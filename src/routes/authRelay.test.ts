@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { Hono } from "hono";
 import {
   createFakeCore,
   createTestKeys,
@@ -16,7 +17,8 @@ import {
 } from "../testing/ipalphaHarness";
 import { ensureLoginAccount, findByPersonId } from "../models/users";
 import { hashCode } from "../services/otp";
-import { mapRelayError, rolloverEdition } from "../services/ipalpha";
+import { authLanguage, mapRelayError, rolloverEdition } from "../services/ipalpha";
+import { clientIp } from "../services/clientIp";
 import { IpalphaRejected, IpalphaUnavailable } from "../services/ipalpha/coreClient";
 import { rawDb } from "../db";
 import { config } from "../config";
@@ -83,8 +85,9 @@ describe("legacy phone login without IPAlpha (unchanged)", () => {
 });
 
 describe("legacy phone login relayed through IPAlpha", () => {
-  test("request → relay/start with a system token, first X-Forwarded-For hop and language; challenge stored, no code", async () => {
-    const res = await request({ "x-forwarded-for": "203.0.113.7, 10.0.0.1" });
+  test("request → relay/start with a system token, the ingress-appended (last) X-Forwarded-For hop and language; challenge stored, no code", async () => {
+    // the client may send its own X-Forwarded-For ("198.51.100.9"); Traefik appends the real peer last
+    const res = await request({ "x-forwarded-for": "198.51.100.9, 203.0.113.7" });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ success: true, phone: PHONE, role: "admin", roles: ["admin"], expireMinutes: 5, delivery: "sms" });
     expect(res.body.reused).toBeUndefined();
@@ -115,12 +118,35 @@ describe("legacy phone login relayed through IPAlpha", () => {
     expect(core.callsTo(TOKEN)).toHaveLength(1);
   });
 
+  test("a non-IP X-Forwarded-For is never forwarded as clientIp", async () => {
+    await request({ "x-forwarded-for": "203.0.113.7, not-an-ip" });
+    const [start] = core.callsTo(START);
+    expect(start.json!.clientIp).toBeUndefined(); // no socket in the in-process test app
+  });
+
   test("an expired system token (401) is refreshed once", async () => {
     let n = 0;
     core.on(START, () => (n++ === 0 ? json({ reason: "invalidToken" }, 401) : json({ challengeId: "challenge-2", codeLength: 6, expiresInSec: 300 })));
     const res = await request();
     expect(res.status).toBe(200);
     expect(core.callsTo(TOKEN)).toHaveLength(2);
+  });
+
+  test("a bare 401 (no reason) is treated as a token rejection and retried once", async () => {
+    let n = 0;
+    core.on(START, () => (n++ === 0 ? json({}, 401) : json({ challengeId: "challenge-2", codeLength: 6, expiresInSec: 300 })));
+    expect((await request()).status).toBe(200);
+    expect(core.callsTo(START)).toHaveLength(2);
+  });
+
+  test("a wrong code (401 invalidCode) is verified exactly once — never retried with a fresh token", async () => {
+    await request();
+    rejectWith(VERIFY, 401, { reason: "invalidCode", attemptsLeft: 2 });
+    const res = await verify();
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatchObject({ code: "OTP_INVALID", attemptsLeft: 2 });
+    expect(core.callsTo(VERIFY)).toHaveLength(1);
+    expect(core.callsTo(TOKEN)).toHaveLength(1);
   });
 
   test("personNotFound → today's local SMS path (local hashed code)", async () => {
@@ -150,7 +176,7 @@ describe("legacy phone login relayed through IPAlpha", () => {
     expect((await request()).body.error.code).toBe("IPALPHA_UNAVAILABLE");
   });
 
-  test("request: resendTooSoon → OTP_COOLDOWN; tooManyRequests → OTP_COOLDOWN; tooManyAttempts → ACCOUNT_FROZEN (frozen locally)", async () => {
+  test("request: resendTooSoon / tooManyRequests / tooManyAttempts / tryAgainLater → OTP_COOLDOWN, never a local freeze", async () => {
     rejectWith(START, 429, { reason: "resendTooSoon", retryAfterSec: 42 });
     let res = await request();
     expect(res.status).toBe(429);
@@ -163,13 +189,19 @@ describe("legacy phone login relayed through IPAlpha", () => {
 
     rejectWith(START, 429, { reason: "tooManyAttempts", retryAfterSec: 600 });
     res = await request();
-    expect(res.status).toBe(423);
-    expect(res.body.error).toMatchObject({ code: "ACCOUNT_FROZEN", minutesLeft: 10 });
-    expect((await userDoc(PHONE))!.frozenUntil).toBeInstanceOf(Date);
-    // the local freeze now answers by itself, without asking core
+    expect(res.status).toBe(429);
+    expect(res.body.error).toMatchObject({ code: "OTP_COOLDOWN", secondsLeft: 600 });
+    expect((await userDoc(PHONE))!.frozenUntil).toBeUndefined();
+
+    rejectWith(START, 429, { reason: "tryAgainLater" });
+    res = await request();
+    expect(res.status).toBe(429);
+    expect(res.body.error).toMatchObject({ code: "OTP_COOLDOWN", secondsLeft: config.otp.resendCooldownSeconds });
+    expect((await userDoc(PHONE))!.frozenUntil).toBeUndefined();
+    // nothing frozen: the next request still asks core
     const before = core.callsTo(START).length;
-    expect((await request()).status).toBe(423);
-    expect(core.callsTo(START)).toHaveLength(before);
+    await request();
+    expect(core.callsTo(START)).toHaveLength(before + 1);
   });
 
   test("verify success → relay/verify, personId bound, otp cleared, session sized by sessionIdleHours", async () => {
@@ -241,10 +273,32 @@ describe("legacy phone login relayed through IPAlpha", () => {
     expect((await verify()).body.error.code).toBe("OTP_EXPIRED");
   });
 
-  test("the sessionIdleHours learned from relay sizes the next IPAlpha-button session too", async () => {
-    await request(); // relay answer carries sessionIdleHours: 12
-    const { sessionIdleHours } = await import("../services/ipalpha");
-    expect(sessionIdleHours()).toBe(12);
+  test("profile and camp switches keep the session length fixed at login (stored on the session, not in memory)", async () => {
+    await request();
+    const login = await verify("654321"); // relay verify answered sessionIdleHours: 12
+    const hoursOf = (iso: string) => Math.round((Date.parse(iso) - Date.now()) / 3_600_000);
+    expect(hoursOf(login.body.tokenExpiresAt)).toBe(12);
+    expect((await (await rawDb()).collection("sessions").findOne({}))!.hours).toBe(12);
+
+    const role = await call("/api/auth/role", { role: "admin" }, { authorization: `Bearer ${login.body.token}` });
+    expect(role.status).toBe(200);
+    expect(hoursOf(role.body.tokenExpiresAt)).toBe(12);
+
+    const camp = await call("/api/auth/camp", { campId: login.body.camp.id }, { authorization: `Bearer ${role.body.token}` });
+    expect(camp.status).toBe(200);
+    expect(hoursOf(camp.body.tokenExpiresAt)).toBe(12);
+    expect(await (await rawDb()).collection("sessions").countDocuments()).toBe(1);
+  });
+
+  test("a relay answer never sizes an unrelated login: a local code after personNotFound gets SESSION_HOURS", async () => {
+    await request(); // a relay answer with sessionIdleHours: 12 was seen
+    await (await rawDb()).collection("users").updateOne({ phone: PHONE }, { $set: { otp: null } });
+    rejectWith(START, 404, { reason: "personNotFound" });
+    await request();
+    await (await rawDb()).collection("users").updateOne({ phone: PHONE }, { $set: { "otp.codeHash": hashCode("123456") } });
+    const ok = await verify("123456");
+    expect(ok.status).toBe(200);
+    expect(Math.round((Date.parse(ok.body.tokenExpiresAt) - Date.now()) / 3_600_000)).toBe(config.sessionHours);
   });
 });
 
@@ -253,7 +307,9 @@ describe("mapRelayError (every auth reason)", () => {
   const cases: [string, "request" | "verify", unknown, string | "fallback", number?][] = [
     ["invalidCode", "verify", rejected("invalidCode"), "OTP_INVALID", 400],
     ["tryAgainLater", "verify", rejected("tryAgainLater", { retryAfterSec: 30 }), "ACCOUNT_FROZEN", 423],
-    ["tooManyAttempts", "request", rejected("tooManyAttempts"), "ACCOUNT_FROZEN", 423],
+    ["tooManyAttempts on request", "request", rejected("tooManyAttempts"), "OTP_COOLDOWN", 429],
+    ["tryAgainLater on request", "request", rejected("tryAgainLater", { retryAfterSec: 30 }), "OTP_COOLDOWN", 429],
+    ["tooManyAttempts on verify", "verify", rejected("tooManyAttempts"), "ACCOUNT_FROZEN", 423],
     ["tooManyRequests", "request", rejected("tooManyRequests"), "OTP_COOLDOWN", 429],
     ["challengeExpired", "verify", rejected("challengeExpired"), "OTP_EXPIRED", 400],
     ["resendTooSoon", "request", rejected("resendTooSoon", { retryAfterSec: 5 }), "OTP_COOLDOWN", 429],
@@ -273,6 +329,36 @@ describe("mapRelayError (every auth reason)", () => {
       expect(out.status as number).toBe(status!);
     });
   }
+});
+
+describe("clientIp (TRUST_PROXY_HOPS)", () => {
+  const ipOf = async (hops: number, xff?: string) => {
+    const app = new Hono().get("/", (c) => c.json({ ip: clientIp(c, hops) ?? null }));
+    const res = await app.request("/", { headers: xff ? { "x-forwarded-for": xff } : {} });
+    return ((await res.json()) as { ip: string | null }).ip;
+  };
+  test("1 hop: the last entry (what our ingress appended); spoofed entries to its left are ignored", async () => {
+    expect(await ipOf(1, "1.2.3.4, 203.0.113.7")).toBe("203.0.113.7");
+    expect(await ipOf(1, "2001:db8::1")).toBe("2001:db8::1");
+  });
+  test("2 hops: the second entry from the right", async () => {
+    expect(await ipOf(2, "1.2.3.4, 203.0.113.7, 10.0.0.2")).toBe("203.0.113.7");
+  });
+  test("0 hops, a non-IP entry or no header → the socket (none in-process) — never a non-IP", async () => {
+    expect(await ipOf(0, "203.0.113.7")).toBeNull();
+    expect(await ipOf(1, "203.0.113.7, evil")).toBeNull();
+    expect(await ipOf(1)).toBeNull();
+  });
+});
+
+describe("authLanguage", () => {
+  test("maps every app locale to auth-api's tag", () => {
+    expect(authLanguage("pt")).toBe("pt-BR");
+    expect(authLanguage("en")).toBe("en-US");
+    expect(authLanguage("es")).toBe("es");
+    expect(authLanguage("fr")).toBe("fr");
+    expect(authLanguage("de")).toBe("de");
+  });
 });
 
 describe("camp activation → edition rollover (best effort)", () => {

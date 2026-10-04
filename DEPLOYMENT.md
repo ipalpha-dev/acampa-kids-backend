@@ -24,6 +24,7 @@ committed YAML or frontend `VITE_*` variables.
 | `FILES_DIR` | `/app/data/files`, mounted from `acampa-2025-pictures-pvc` |
 | `JWT_SECRET` | Secret `acampa-2025-secrets`, key `jwt-secret`; required, strong, never the development default |
 | `SESSION_HOURS` | `96` |
+| `TRUST_PROXY_HOPS` | `1` (Traefik appends the real peer as the last `X-Forwarded-For` entry). Set to the number of appending proxies; `0` ignores the header |
 | `OTP_EXPIRE_MINUTES` | `5` |
 | `OTP_MAX_ATTEMPTS` | `3` |
 | `ACCOUNT_FREEZE_MINUTES` | `30` |

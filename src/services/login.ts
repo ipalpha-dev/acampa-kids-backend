@@ -8,7 +8,6 @@ import { availableRolesOf } from "./roles";
 import { createSession } from "./session";
 import { activeCamp } from "./campContext";
 import { switchableCamps } from "./campAccess";
-import { ipalphaEnabled, sessionIdleHours } from "./ipalpha";
 import type { Locale } from "../i18n";
 import type { CheckinWindow, Role, User } from "../types";
 import { minutesBetween, pickActiveRole } from "../utils";
@@ -111,8 +110,10 @@ export function frozenError(user: Pick<User, "frozenUntil">, now = new Date()) {
 
 /**
  * Success of any login: clears the pending code, unfreezes, remembers the
- * device language and issues the session (length `hours`, default
- * `SESSION_HOURS`). The body is the exact `/otp/verify` answer.
+ * device language and issues the session (length `hours` — auth-api's
+ * `sessionIdleHours` from the answer that proved this login — else
+ * `SESSION_HOURS`). The length is stored on the session and reused on profile /
+ * camp switches. The body is the exact `/otp/verify` answer.
  */
 export async function completeLogin(user: User, role: Role, available: Role[], locale: Locale, hours?: number) {
   await updateUser(user._id, { otp: null, frozenUntil: null, locale });
@@ -130,14 +131,6 @@ export async function completeLogin(user: User, role: Role, available: Role[], l
     camp: await sessionCamp(session.campId),
     ...(camps ? { camps } : {}),
   };
-}
-
-/**
- * Session length for a new Acampa session: with IPAlpha on, auth-api's
- * `sessionIdleHours` (entry point config); otherwise undefined → SESSION_HOURS.
- */
-export function loginSessionHours(): number | undefined {
-  return ipalphaEnabled() ? sessionIdleHours() : undefined;
 }
 
 /**

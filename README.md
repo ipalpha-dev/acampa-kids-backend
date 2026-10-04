@@ -36,7 +36,8 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | `OTP_EXPIRE_MINUTES` | OTP lifetime (default `5`) |
 | `OTP_MAX_ATTEMPTS` | wrong attempts before freezing the account (default `3`) |
 | `ACCOUNT_FREEZE_MINUTES` | how long the account stays frozen (default `30`) |
-| `SESSION_HOURS` | session token lifetime (default `96`, 4 days); with IPAlpha on, auth-api's `sessionIdleHours` wins |
+| `SESSION_HOURS` | session token lifetime (default `96`, 4 days); an IPAlpha login uses the `sessionIdleHours` auth-api returned for it |
+| `TRUST_PROXY_HOPS` | proxies in front of the API that append to `X-Forwarded-For` (default `1` = Traefik ingress). The client IP is that many entries from the right; `0` = socket address only |
 | `IPALPHA_*` | IPAlpha login (optional; all required ones or the feature is off) — see [IPAlpha login](#ipalpha-login-core-auth-api-) and `DEPLOYMENT.md` |
 | `APP_URL` | public URL of the frontend, appended to notification SMS (optional) |
 | `PUBLIC_ORIGIN` | public origin of the site (frontend + `/api`). Prefixes images in notification emails. Empty = mail send is refused. Alias: `BACKEND_PUBLIC_URL` |
@@ -139,22 +140,33 @@ freeze rules and sessions. Code: `routes/ipalpha.ts`, `services/ipalpha/`
 
 - **Legacy phone + code** keeps its request/response shapes. With IPAlpha on,
   `/otp/request` relays to auth-api (`/internal/login/relay/start`, forwarding
-  the first `X-Forwarded-For` hop) and stores only the relay `challengeId`
+  the client IP — the `X-Forwarded-For` entry our ingress appended, i.e. the
+  last one with `TRUST_PROXY_HOPS=1`, else the socket; only valid IPs) and stores only the relay `challengeId`
   on `users.otp` (`provider: "ipalpha"`, no code); `/otp/verify` relays the
   check, binds the returned person id and opens the session. auth reasons map
   to the existing codes: `invalidCode` → `OTP_INVALID`, `tryAgainLater` /
-  `tooManyAttempts` → `ACCOUNT_FROZEN` (frozen locally too), `tooManyRequests`
-  / `resendTooSoon` → `OTP_COOLDOWN`, `challengeExpired` → `OTP_EXPIRED`.
+  `tooManyAttempts` → on verify `ACCOUNT_FROZEN` (frozen locally too), on
+  request `OTP_COOLDOWN` (never frozen); `tooManyRequests` / `resendTooSoon` →
+  `OTP_COOLDOWN`, `challengeExpired` → `OTP_EXPIRED`. Only a 401 token
+  rejection (`invalidToken` / no reason) refreshes the system token and
+  retries once — a 401 `invalidCode` is never sent twice.
   `personNotFound` keeps the local SMS path (roster phones not in core yet).
   The Settings → Testes SMS redirect does not apply to relayed codes.
-- **Session length**: auth-api's `sessionIdleHours` (learned from relay
-  answers; until one arrives, `SESSION_HOURS`).
+- **Session length**: the `sessionIdleHours` of the answer that proved this
+  login (relay verify `sessionIdleHours`, popup `/oauth/token`
+  `session_idle_hours`); absent or a local code → `SESSION_HOURS`. Stored on
+  the session (`sessions.hours`) and reused on profile / camp switches.
+- **`/start` limit**: 20 per minute per client IP, in memory per pod →
+  429 `IPALPHA_RATE_LIMITED` (+ `secondsLeft`, `Retry-After`).
 - **Camp activation** with `IPALPHA_PROJECT_ID` + `IPALPHA_PROJECTS_API_URL`:
   `current-by-year?year=<camp.year>` on projects-api — best effort, logged,
   never blocks the activation.
 - New error codes: `IPALPHA_DENIED`, `IPALPHA_STATE_INVALID`,
   `IPALPHA_CODE_INVALID`, `IPALPHA_DISABLED` (404, feature off),
-  `IPALPHA_UNAVAILABLE` (503 — core down; the app shows its maintenance scene).
+  `IPALPHA_UNAVAILABLE` (503 — core unreachable / 5xx; the app shows its maintenance scene),
+  `IPALPHA_MISCONFIGURED` (500 — core refused our PAR / token request:
+  credentials, entry point, params; logged as an error),
+  `IPALPHA_RATE_LIMITED` (429, `/start` only).
 
 **Do not:** store or cache person tokens or any core profile/person data
 (only `users.ipalphaPersonIds` — ids, nothing else); log tokens, codes or

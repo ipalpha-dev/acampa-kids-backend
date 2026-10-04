@@ -1,20 +1,20 @@
 import { Hono, type Context } from "hono";
-import { getConnInfo } from "hono/bun";
 import { config } from "../config";
 import { resolveLocale, sms, smsPrefix, type Locale } from "../i18n";
 import { findByPhone, toPublicUser, updateUser } from "../models/users";
 import { availableRolesOf } from "../services/roles";
 import { comteleEnabled, comteleSendSms, resolveSmsTarget } from "../services/comtele";
 import { generateLocalCode, hashCode, verifyLocalCode } from "../services/otp";
-import { createSession, revokeSession } from "../services/session";
+import { replaceSession, revokeSession } from "../services/session";
+import { clientIp } from "../services/clientIp";
 import type { PublicUser, Role, SessionUser, User } from "../types";
 import { formatBrazilPhone, isRole, normalizeBrazilPhone } from "../utils";
 import { requireAuth } from "../middleware/auth";
 import { withCamp } from "../services/campContext";
 import { findCamp } from "../models/camps";
 import { canSwitchCamps, switchableCamps } from "../services/campAccess";
-import { NO_PROFILE_ERROR, bindPersonId, completeLogin, frozenError, landingRole, loginSessionHours, resolveAccountByPhone, sessionCamp, staffWindowError } from "../services/login";
-import { authLanguage, coreClient, ipalphaEnabled, mapRelayError, rememberSessionIdleHours, sessionIdleHours, type RelayOutcome } from "../services/ipalpha";
+import { NO_PROFILE_ERROR, bindPersonId, completeLogin, frozenError, landingRole, resolveAccountByPhone, sessionCamp, staffWindowError } from "../services/login";
+import { authLanguage, coreClient, ipalphaEnabled, mapRelayError, type RelayOutcome } from "../services/ipalpha";
 import ipalphaRoutes from "./ipalpha";
 
 interface AuthEnv {
@@ -31,17 +31,6 @@ const auth = new Hono<AuthEnv>();
 
 // "Entrar com IPAlpha": /api/auth/ipalpha/{config,start,complete}
 auth.route("/ipalpha", ipalphaRoutes);
-
-/** The caller's IP for auth-api's per-IP limit: first X-Forwarded-For hop (ingress), else the socket. */
-function clientIp(c: Context): string | undefined {
-  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  if (forwarded) return forwarded;
-  try {
-    return getConnInfo(c).remote.address || undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 function minutesOf(ms: number): number {
   return Math.max(1, Math.round(ms / 60_000));
@@ -92,7 +81,6 @@ async function relayOtpRequest(c: Context, user: User, phone: string, role: Role
     await applyRelayOutcome(user, outcome);
     return c.json({ error: outcome.error }, outcome.status);
   }
-  rememberSessionIdleHours(answer.sessionIdleHours);
 
   const now = new Date();
   const expiresAt = new Date(now.getTime() + answer.expiresInSec * 1000);
@@ -129,9 +117,9 @@ async function relayOtpVerify(c: Context, user: User, code: string, role: Role, 
     await applyRelayOutcome(user, outcome);
     return c.json({ error: outcome.error }, outcome.status);
   }
-  rememberSessionIdleHours(answer.sessionIdleHours);
   await bindPersonId(user, answer.personId);
-  return c.json(await completeLogin(user, role, available, deviceLocale, answer.sessionIdleHours ?? sessionIdleHours()));
+  // session length: what auth-api answered for THIS login (absent → SESSION_HOURS)
+  return c.json(await completeLogin(user, role, available, deviceLocale, answer.sessionIdleHours ?? undefined));
 }
 
 /**
@@ -388,7 +376,8 @@ auth.post("/otp/verify", async (c) => {
   }
 
   // success — clear OTP, unfreeze, remember device language, create session
-  return c.json(await completeLogin(user, role, available, deviceLocale, loginSessionHours()));
+  // a local code (IPAlpha off, or a roster phone core does not know yet): SESSION_HOURS
+  return c.json(await completeLogin(user, role, available, deviceLocale));
 });
 
 /** Who am I? (requires Bearer token) */
@@ -416,8 +405,8 @@ auth.post("/role", requireAuth, async (c) => {
   const windowErr = await staffWindowError(user.phone, role);
   if (windowErr) return c.json({ error: windowErr }, 403);
 
-  await revokeSession(c.get("sessionId"));
-  const { token, session } = await createSession(user._id, role, c.get("campId"), loginSessionHours());
+  // same length the session was opened with
+  const { token, session } = await replaceSession(c.get("sessionId"), user._id, role, c.get("campId"));
   const camps = await switchableCamps(user, role);
   return c.json({
     success: true,
@@ -450,8 +439,7 @@ auth.post("/camp", requireAuth, async (c) => {
   const user = await findByPhone(sessionUser.phone);
   if (!user) return c.json({ error: { code: "USER_NOT_FOUND", message: "Cadastro não encontrado." } }, 404);
 
-  await revokeSession(c.get("sessionId"));
-  const { token, session } = await createSession(user._id, activeRole, target._id, loginSessionHours());
+  const { token, session } = await replaceSession(c.get("sessionId"), user._id, activeRole, target._id);
   const { available, camps } = await withCamp(target._id, async () => ({
     available: await availableRolesOf(user),
     camps: await switchableCamps(user, activeRole),

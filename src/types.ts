@@ -1052,6 +1052,8 @@ export interface Session {
   campId: string;
   createdAt: Date;
   expiresAt: Date;
+  /** length fixed at login (IPAlpha's `sessionIdleHours` or `SESSION_HOURS`), reused on profile / camp switches; absent on older sessions */
+  hours?: number;
 }
 
 // ── Seeds (super-admin maintained templates the setup wizard imports) ──────

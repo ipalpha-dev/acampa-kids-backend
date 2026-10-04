@@ -25,6 +25,7 @@ export async function createSession(
     campId,
     createdAt: now,
     expiresAt,
+    hours: ttlHours,
   });
 
   const session: Session = {
@@ -34,6 +35,7 @@ export async function createSession(
     campId,
     createdAt: now,
     expiresAt,
+    hours: ttlHours,
   };
 
   const token = await new SignJWT({
@@ -82,6 +84,25 @@ export async function revokeUserSessions(userId: string): Promise<number> {
   const db = await getDb();
   const res = await db.collection("sessions").deleteMany({ userId });
   return res.deletedCount;
+}
+
+/**
+ * Profile / camp switch: the current session is revoked and a new one issued
+ * with the SAME length it was opened with (`hours`, fixed at login — e.g.
+ * IPAlpha's `sessionIdleHours`). Sessions from before `hours` existed get
+ * `config.sessionHours`.
+ */
+export async function replaceSession(
+  sessionId: string,
+  userId: string,
+  role: Session["role"],
+  campId: string,
+): Promise<{ token: string; session: Session }> {
+  const db = await getDb();
+  const current = await db.collection("sessions").findOne({ _id: new ObjectId(sessionId) }, { projection: { hours: 1 } });
+  const hours = typeof current?.hours === "number" ? current.hours : undefined;
+  await db.collection("sessions").deleteOne({ _id: new ObjectId(sessionId) });
+  return createSession(userId, role, campId, hours);
 }
 
 export async function revokeSession(sessionId: string): Promise<void> {

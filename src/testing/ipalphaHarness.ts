@@ -13,9 +13,10 @@ import { ensureCampsCollection } from "../models/camps";
 import { migrateToCamps } from "../services/campMigration";
 import { ensureIndexes } from "../models/users";
 import { ensureLoginStateIndexes } from "../models/ipalphaLoginStates";
-import { ipalpha, resetSessionIdleHours } from "../services/ipalpha";
+import { ipalpha } from "../services/ipalpha";
 import { createIpalphaCoreClient } from "../services/ipalpha/coreClient";
 import authRoutes from "../routes/auth";
+import { resetStartRateLimit } from "../routes/ipalpha";
 
 let server: MongoMemoryServer | null = null;
 let users = 0;
@@ -46,7 +47,7 @@ export async function resetData(): Promise<void> {
   for (const name of ["users", "sessions", "staff", "campers", "settings", "userCampState", "ipalphaLoginStates"]) {
     await db.collection(name).deleteMany({});
   }
-  resetSessionIdleHours();
+  resetStartRateLimit();
 }
 
 export async function insertStaff(name: string, phone: string): Promise<void> {

@@ -82,6 +82,14 @@ export const config = {
   /** fallback session length; with IPAlpha on, auth-api's `sessionIdleHours` (entry point config) wins */
   sessionHours: Number(process.env.SESSION_HOURS ?? 96),
 
+  /**
+   * Reverse proxies in front of the API that append to X-Forwarded-For
+   * (Traefik ingress = 1). The client IP is the entry that many hops from the
+   * right — what our own ingress appended; entries further left are
+   * client-supplied and never trusted. 0 = ignore the header, use the socket.
+   */
+  trustProxyHops: Math.max(0, Math.floor(Number(process.env.TRUST_PROXY_HOPS ?? 1)) || 0),
+
   /** IPAlpha login (see readIpalphaConfig) */
   ipalpha: readIpalphaConfig(process.env),
 

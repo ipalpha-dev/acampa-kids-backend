@@ -22,27 +22,6 @@ export function coreClient(): IpalphaCoreClient {
   return ipalpha.client;
 }
 
-/**
- * The session length auth-api configures for Acampa's entry point
- * (`sessionIdleHours`, edited in Mordomia). Learned from every relay answer
- * (app configuration, not person data); until one arrives the local
- * `SESSION_HOURS` (default 96, auth's own default) is used.
- */
-let learnedSessionIdleHours: number | null = null;
-
-export function rememberSessionIdleHours(hours: number | null): void {
-  if (hours !== null) learnedSessionIdleHours = hours;
-}
-
-export function sessionIdleHours(): number {
-  return learnedSessionIdleHours ?? config.sessionHours;
-}
-
-/** tests only: forget what relay answers taught */
-export function resetSessionIdleHours(): void {
-  learnedSessionIdleHours = null;
-}
-
 /** Acampa's device locale → auth-api's language tag (SMS language). */
 export function authLanguage(locale: Locale): string {
   return ({ pt: "pt-BR", en: "en-US", es: "es", fr: "fr", de: "de" } as Record<string, string>)[locale] ?? "pt-BR";
@@ -53,11 +32,19 @@ export const UNAVAILABLE_ERROR = {
   message: "O login está em manutenção. Tente novamente em instantes.",
 } as const;
 
+/** core refused OUR request (credentials, entry point, params) — a deploy problem, not an outage (500, logged) */
+export const MISCONFIGURED_ERROR = {
+  code: "IPALPHA_MISCONFIGURED",
+  message: "O login IPAlpha não está disponível agora. Entre com o seu celular.",
+} as const;
+
 /**
  * What the legacy OTP routes answer for an auth-api relay rejection (§5):
  *
  *   invalidCode                      → 400 OTP_INVALID (+ attemptsLeft when auth sent one)
- *   tryAgainLater / tooManyAttempts  → 423 ACCOUNT_FROZEN (+ minutesLeft); the account is frozen locally too
+ *   tryAgainLater / tooManyAttempts  → verify: 423 ACCOUNT_FROZEN (+ minutesLeft); the account is frozen locally too
+ *                                      request: 429 OTP_COOLDOWN (+ secondsLeft) — core throttles sending, the
+ *                                      account is NOT frozen (asking for a code proves nothing wrong)
  *   tooManyRequests (per-IP limit)   → 429 OTP_COOLDOWN (+ secondsLeft) — the account is NOT frozen
  *   challengeExpired                 → 400 OTP_EXPIRED; the pending challenge is dropped
  *   resendTooSoon                    → 429 OTP_COOLDOWN (+ secondsLeft)
@@ -77,6 +64,11 @@ export type RelayOutcome =
       /** count one more wrong attempt on the pending challenge */
       countAttempt?: boolean;
     };
+
+function cooldown(retryAfterSec: number | null): RelayOutcome {
+  const secondsLeft = Math.ceil(retryAfterSec ?? config.otp.resendCooldownSeconds);
+  return { kind: "error", status: 429, error: { code: "OTP_COOLDOWN", message: `Aguarde ${secondsLeft}s para pedir um novo código.`, secondsLeft } };
+}
 
 export function mapRelayError(phase: "request" | "verify", err: unknown): RelayOutcome {
   if (err instanceof IpalphaUnavailable || !(err instanceof IpalphaRejected)) {
@@ -98,6 +90,7 @@ export function mapRelayError(phase: "request" | "verify", err: unknown): RelayO
     }
     case "tryAgainLater":
     case "tooManyAttempts": {
+      if (phase === "request") return cooldown(retryAfterSec);
       const minutesLeft = retryAfterSec ? Math.max(1, Math.ceil(retryAfterSec / 60)) : config.otp.freezeMinutes;
       return {
         kind: "error",
@@ -111,10 +104,8 @@ export function mapRelayError(phase: "request" | "verify", err: unknown): RelayO
       };
     }
     case "tooManyRequests":
-    case "resendTooSoon": {
-      const secondsLeft = Math.ceil(retryAfterSec ?? config.otp.resendCooldownSeconds);
-      return { kind: "error", status: 429, error: { code: "OTP_COOLDOWN", message: `Aguarde ${secondsLeft}s para pedir um novo código.`, secondsLeft } };
-    }
+    case "resendTooSoon":
+      return cooldown(retryAfterSec);
     case "challengeExpired":
       return { kind: "error", status: 400, error: { code: "OTP_EXPIRED", message: "O código expirou. Peça um novo código." }, clearOtp: true };
   }

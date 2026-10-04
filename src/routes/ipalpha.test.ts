@@ -52,8 +52,8 @@ async function startLogin(personHint?: string): Promise<string> {
   return core.callsTo("POST /oauth/par").at(-1)!.form!.get("state")!;
 }
 
-function tokenAnswer(token: string) {
-  core.on("POST /oauth/token", () => json({ token_type: "Bearer", tokens_by_resource: { "ipalpha:persons": { access_token: token, expires_in: 300 } } }));
+function tokenAnswer(token: string, extra: Record<string, unknown> = {}) {
+  core.on("POST /oauth/token", () => json({ token_type: "Bearer", tokens_by_resource: { "ipalpha:persons": { access_token: token, expires_in: 300 } }, ...extra }));
 }
 
 function phonesAnswer(phones: { e164: string; verified: boolean }[]) {
@@ -118,6 +118,27 @@ describe("POST /api/auth/ipalpha/start", () => {
     expect(form.has("login_hint")).toBe(false);
   });
 
+  test("PAR refused for our configuration (invalid_client / invalid_request) → 500 IPALPHA_MISCONFIGURED, no state left", async () => {
+    for (const [status, error, reason] of [[401, "invalid_client", "unknownClient"], [400, "invalid_request", "invalidRequest"], [400, undefined, "invalidRedirectUri"]] as const) {
+      core.on("POST /oauth/par", () => json({ error, reason }, status));
+      const res = await call("/api/auth/ipalpha/start", {});
+      expect(res.status).toBe(500);
+      expect(res.body.error.code).toBe("IPALPHA_MISCONFIGURED");
+    }
+    expect(await (await rawDb()).collection("ipalphaLoginStates").countDocuments()).toBe(0);
+  });
+
+  test("more than 20 starts a minute from one IP → 429 IPALPHA_RATE_LIMITED; another IP is unaffected", async () => {
+    const from = (ip: string) => call("/api/auth/ipalpha/start", {}, { "x-forwarded-for": ip });
+    for (let i = 0; i < 20; i++) expect((await from("203.0.113.7")).status).toBe(200);
+    const limited = await from("203.0.113.7");
+    expect(limited.status).toBe(429);
+    expect(limited.body.error.code).toBe("IPALPHA_RATE_LIMITED");
+    expect(limited.body.error.secondsLeft).toBeGreaterThan(0);
+    expect(core.callsTo("POST /oauth/par")).toHaveLength(20);
+    expect((await from("203.0.113.8")).status).toBe(200);
+  });
+
   test("core down → 503 IPALPHA_UNAVAILABLE and no state left behind", async () => {
     core.setDown(true);
     const res = await call("/api/auth/ipalpha/start", {});
@@ -174,6 +195,15 @@ describe("POST /api/auth/ipalpha/complete", () => {
     expect(createHash("sha256").update(verifier).digest("base64url")).toBe(par.get("code_challenge")!);
   });
 
+  test("token exchange refused for our configuration (invalid_client / unauthorized_client / invalid_request) → 500 IPALPHA_MISCONFIGURED", async () => {
+    for (const [status, error, reason] of [[401, "invalid_client", "unknownClient"], [400, "unauthorized_client", "forbidden"], [400, "invalid_request", "invalidRequest"]] as const) {
+      core.on("POST /oauth/token", () => json({ error, reason }, status));
+      const res = await call("/api/auth/ipalpha/complete", { code: "c", state: await startLogin() });
+      expect(res.status).toBe(500);
+      expect(res.body.error.code).toBe("IPALPHA_MISCONFIGURED");
+    }
+  });
+
   test("token exchange 5xx → 503 IPALPHA_UNAVAILABLE", async () => {
     core.on("POST /oauth/token", () => json({}, 502));
     const state = await startLogin();
@@ -228,7 +258,7 @@ describe("POST /api/auth/ipalpha/complete", () => {
     expect(doc.ipalphaPersonIds).toEqual([PERSON]);
     // nothing else from core is stored on the account
     expect(Object.keys(doc).sort()).toEqual(["_id", "createdAt", "frozenUntil", "ipalphaPersonIds", "locale", "name", "otp", "phone", "roles", "updatedAt"]);
-    // session length: SESSION_HOURS until auth-api told us its sessionIdleHours
+    // session length: SESSION_HOURS when the token answer carries no session_idle_hours
     const hours = (Date.parse(first.body.tokenExpiresAt) - Date.now()) / 3_600_000;
     expect(Math.round(hours)).toBe(config.sessionHours);
 
@@ -236,6 +266,16 @@ describe("POST /api/auth/ipalpha/complete", () => {
     expect(second.status).toBe(200);
     expect(second.body.user.phone).toBe(ADMIN_PHONE);
     expect(core.callsTo(`GET /persons/${PERSON}/data/phone`)).toHaveLength(1);
+  });
+
+  test("session sized by the token answer's session_idle_hours; the device locale is saved", async () => {
+    await ensureLoginAccount("Admin Teste", ADMIN_PHONE, "admin");
+    tokenAnswer(await signPersonToken(keys, PERSON), { session_idle_hours: 8 });
+    phonesAnswer([{ e164: ADMIN_PHONE, verified: true }]);
+    const res = await call("/api/auth/ipalpha/complete", { code: "c", state: await startLogin(), locale: "de" });
+    expect(res.status).toBe(200);
+    expect(Math.round((Date.parse(res.body.tokenExpiresAt) - Date.now()) / 3_600_000)).toBe(8);
+    expect((await userDoc(ADMIN_PHONE))!.locale).toBe("de");
   });
 
   test("first login provisions a roster member's account like the phone login does", async () => {

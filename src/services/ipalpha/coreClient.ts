@@ -30,6 +30,11 @@ export class IpalphaRejected extends Error {
   ) {
     super(`IPAlpha rejected: ${status} ${reason}`);
   }
+
+  /** the RFC 6749 `error` of an OAuth answer (auth-api sends it next to `reason`), else null */
+  get oauthError(): string | null {
+    return str(this.body.error);
+  }
 }
 
 /** core unreachable, timed out, 5xx, or answered something unreadable */
@@ -50,6 +55,13 @@ export interface RelayVerifyAnswer {
   sessionIdleHours: number | null;
 }
 
+export interface CodeExchangeAnswer {
+  /** the `ipalpha:persons` access token — used once, never stored */
+  token: string;
+  /** the entry point's `loginPolicy.sessionIdleHours` (`session_idle_hours`, CONTRACTS §9), null when absent */
+  sessionIdleHours: number | null;
+}
+
 export interface PhoneEntry {
   e164: string;
   verified: boolean;
@@ -58,8 +70,8 @@ export interface PhoneEntry {
 export interface IpalphaCoreClient {
   /** PAR (RFC 9126) → the popup URL for the SPA */
   startAuthorization(input: { state: string; codeChallenge: string; personHint?: string }): Promise<{ url: string }>;
-  /** authorization_code → the `ipalpha:persons` access token (used once, never stored) */
-  exchangeCode(input: { code: string; codeVerifier: string }): Promise<string>;
+  /** authorization_code → the `ipalpha:persons` access token (used once, never stored) + session length */
+  exchangeCode(input: { code: string; codeVerifier: string }): Promise<CodeExchangeAnswer>;
   /** local JWKS verification → the person id (`sub`) */
   verifyPersonsToken(token: string): Promise<{ personId: string }>;
   /** `GET /persons/:id/data/phone` with the person's own token, read at use time */
@@ -84,6 +96,21 @@ function str(v: unknown): string | null {
 
 function idleHours(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+}
+
+/**
+ * 401 reasons that mean "this bearer is no good" (expired, revoked, rotated
+ * key): shared-js `AuthRequired` answers `{reason: "invalidToken"}` for all of
+ * them; `invalid_token` is RFC 6750's name. A 401 carrying any OTHER reason is
+ * the call's own answer (e.g. relay `invalidCode`) and must never be retried —
+ * a retry would verify the same wrong code twice and burn the person's attempts.
+ */
+const BEARER_REJECTED_REASONS = new Set(["invalidToken", "invalid_token", "tokenRevoked", "unauthorized"]);
+
+function bearerRejected(err: unknown): boolean {
+  if (!(err instanceof IpalphaRejected) || err.status !== 401) return false;
+  const reason = str(err.body.reason) ?? str(err.body.error);
+  return reason === null || BEARER_REJECTED_REASONS.has(reason);
 }
 
 export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps = {}): IpalphaCoreClient {
@@ -132,7 +159,7 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
     return token;
   }
 
-  /** a system call; a 401 drops the cached token and retries once (rotated / revoked token) */
+  /** a system call; a 401 token rejection drops the cached token and retries once (rotated / revoked token) */
   async function systemCall(label: string, resource: string, scope: string, url: string, payload: unknown): Promise<Record<string, unknown>> {
     for (let attempt = 0; ; attempt++) {
       const token = await systemToken(resource, scope);
@@ -143,7 +170,7 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
           body: payload === undefined ? undefined : JSON.stringify(payload),
         });
       } catch (err) {
-        if (attempt === 0 && err instanceof IpalphaRejected && err.status === 401) {
+        if (attempt === 0 && bearerRejected(err)) {
           systemTokens.delete(`${resource} ${scope}`);
           continue;
         }
@@ -195,7 +222,7 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       const token = str(byResource?.[PERSONS_RESOURCE]?.access_token);
       // no persons token = the person did not grant what Acampa asked for
       if (!token) throw new IpalphaRejected(403, "personsResourceMissing", {});
-      return token;
+      return { token, sessionIdleHours: idleHours(body.session_idle_hours) };
     },
 
     async verifyPersonsToken(token) {
