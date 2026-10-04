@@ -1,16 +1,16 @@
 /** Languages the app speaks. Default is Portuguese (the camp's home language). */
-export const LOCALES = ["pt", "en", "es", "fr"] as const;
+export const LOCALES = ["pt", "en", "es", "fr", "de"] as const;
 export type Locale = (typeof LOCALES)[number];
 
 /** Default / fallback language — Brazilian Portuguese. */
 export const DEFAULT_LOCALE: Locale = "pt";
 
-/** Map a device / Accept-Language tag onto one of our four locales. */
+/** Map a device / Accept-Language tag onto one of our five locales. */
 export function resolveLocale(raw: string | null | undefined): Locale {
   if (!raw) return DEFAULT_LOCALE;
   const tag = raw.trim().toLowerCase().replace("_", "-");
   const primary = tag.split("-")[0] ?? tag;
-  if (primary === "pt" || primary === "en" || primary === "es" || primary === "fr") return primary;
+  if ((LOCALES as readonly string[]).includes(primary)) return primary as Locale;
   return DEFAULT_LOCALE;
 }
 

@@ -1,7 +1,7 @@
 import { config } from "../config";
 import { format, type Locale } from "./locales";
 
-/** Every SMS the backend sends — PT / EN / ES / FR. Keep under ~160 chars when interpolated. */
+/** Every SMS the backend sends — PT / EN / ES / FR / DE. Keep under ~160 chars when interpolated. */
 export type SmsKey =
   | "otp"
   | "adminInvite"
@@ -77,6 +77,11 @@ export type SmsKey =
   | "and"
   | "changeMore"
   | "changeMorePlural"
+  | "verbIsOne"
+  | "verbIsMany"
+  | "verbBecameOne"
+  | "verbBecameMany"
+  | "kidPluralSuffix"
   | "childSingular"
   | "childPlural"
   | "childNewSingular"
@@ -118,7 +123,7 @@ export type SmsKey =
   | "rolePhotographer"
   | "roleParentContact";
 
-type Catalog = Record<SmsKey, string>;
+export type Catalog = Record<SmsKey, string>;
 
 const pt: Catalog = {
   otp: "{prefix}: {code} é seu código de acesso. Vale por {minutes} min. Se não foi você, ignore.",
@@ -195,6 +200,11 @@ const pt: Catalog = {
   and: " e ",
   changeMore: "mudança",
   changeMorePlural: "mudanças",
+  verbIsOne: "está",
+  verbIsMany: "estão",
+  verbBecameOne: "passou",
+  verbBecameMany: "passaram",
+  kidPluralSuffix: "s",
   childSingular: "criança",
   childPlural: "crianças",
   childNewSingular: "criança nova",
@@ -312,6 +322,11 @@ const en: Catalog = {
   and: " and ",
   changeMore: "change",
   changeMorePlural: "changes",
+  verbIsOne: "is",
+  verbIsMany: "are",
+  verbBecameOne: "is",
+  verbBecameMany: "are",
+  kidPluralSuffix: "s",
   childSingular: "kid",
   childPlural: "kids",
   childNewSingular: "new kid",
@@ -429,6 +444,11 @@ const es: Catalog = {
   and: " y ",
   changeMore: "cambio",
   changeMorePlural: "cambios",
+  verbIsOne: "está",
+  verbIsMany: "están",
+  verbBecameOne: "pasó",
+  verbBecameMany: "pasaron",
+  kidPluralSuffix: "s",
   childSingular: "niño",
   childPlural: "niños",
   childNewSingular: "niño nuevo",
@@ -546,6 +566,11 @@ const fr: Catalog = {
   and: " et ",
   changeMore: "changement",
   changeMorePlural: "changements",
+  verbIsOne: "est",
+  verbIsMany: "sont",
+  verbBecameOne: "passe",
+  verbBecameMany: "passent",
+  kidPluralSuffix: "s",
   childSingular: "enfant",
   childPlural: "enfants",
   childNewSingular: "nouvel enfant",
@@ -588,7 +613,132 @@ const fr: Catalog = {
   roleParentContact: "contact parents ({title})",
 };
 
-const CATALOGS: Record<Locale, Catalog> = { pt, en, es, fr };
+const de: Catalog = {
+  otp: "{prefix}: {code} ist dein Zugangscode. {minutes} Min. gültig. Warst du das nicht? Einfach ignorieren.",
+  adminInvite: "{prefix}: {name}, du verwaltest jetzt Acampa Kids. Melde dich mit diesem Handy an: {url}",
+  coalesceTail: " +{rest} Änderung. Siehe {link}",
+  coalesceTailMany: " +{rest} Änderungen. Siehe {link}",
+  coalesceLink: ". {link}",
+  checkinDone: "{prefix}: {name}, Check-in erledigt!{info} Die Kinder in deinem Zimmer siehst du unter {link}",
+  checkinDoneShort: "{prefix}: {name}, Check-in erledigt!{info} {link}",
+  checkinRoom: "Dein Zimmer: {room}",
+  checkinRoomKids: "Dein Zimmer: {room} ({kids} Kinder)",
+  checkinBus: "Transport: {bus}",
+  checkinReminder: "{prefix}: {name}, Zeit für deinen Check-in! Wenn du an der Kirche ankommst, check ein unter {link}",
+  birthday: "{prefix}: {name}, {of}{kid}{age}{room} hat heute Geburtstag! 🎂 Machen wir den Tag für {pron} besonders.",
+  birthdayAge: " ({years} Jahre)",
+  birthdayRoom: " aus Zimmer {room}",
+  parentEditMedical: "{prefix}: {name}, {by} hat Gesundheitsangaben von {kid} geändert{list}. Siehe {link}",
+  parentEditNotes: "{prefix}: {name}, {by} hat Hinweise zu {kid} geändert{list}. Siehe {link}",
+  occurrence: "{prefix}: {name}, {by} hat ein neues Vorkommnis erfasst{who}. Siehe {link}",
+  foreignLookup: "{prefix}: {name}, {staff} hat {count} Kind außerhalb des eigenen Bereichs gescannt{list}. Siehe {link}",
+  foreignLookupPlural: "{prefix}: {name}, {staff} hat {count} Kinder außerhalb des eigenen Bereichs gescannt{list}. Siehe {link}",
+  photos: "die Fotos vom Camp sind jetzt in der App 📷",
+  busCheckin: "{prefix}: {greet}{article}{kid} ist unterwegs zu einem tollen Wochenende, um mehr über Jesus zu lernen! Genieß dein freies Wochenende: Wir kümmern uns gut um {pron}.",
+  parentWelcomeOne: "{who} bei Acampa Kids angemeldet! Verfolge alles in der App.",
+  parentWelcomeMany: "{who} bei Acampa Kids angemeldet! Verfolge alles in der App.",
+  parentWelcomeFallback: "dein Kind ist",
+  parentWelcomeEnterPhone: " Melde dich mit der Nummer {phone} an: {link}",
+  parentWelcomeEnter: " Melde dich an: {link}",
+  enrolRoles: "du bist jetzt {roles}",
+  enrolOpen: "die Camp-App ist jetzt für dich freigeschaltet",
+  enrolNewRoles: "du hast {count} neue Aufgaben im Camp",
+  enrolEnterPhone: " Melde dich mit der Nummer {phone} an: {link}",
+  enrolEnter: " Melde dich an: {link}",
+  kidLost: "{kid} ist nicht mehr in deiner Obhut",
+  kidLostTo: "{kid} ist nicht mehr in deiner Obhut (jetzt bei {to})",
+  kidGained: "{kid} ist jetzt in deiner Obhut ({n} Kind bei dir)",
+  kidGainedRoom: "{kid} (Zimmer {room}) ist jetzt in deiner Obhut ({n} Kind{s} bei dir)",
+  kidsLost: "{names} {verb} nicht mehr in deiner Obhut",
+  kidsLostTo: "{names} {verb} nicht mehr in deiner Obhut (jetzt bei {to})",
+  kidsGained: "{names} {verb} jetzt in deiner Obhut",
+  kidsGainedRoom: "{names} {verb} jetzt in deiner Obhut (Zimmer {room})",
+  myRoomNow: "dein Zimmer ist jetzt {room}",
+  myRoomNone: "du bist keinem Zimmer mehr zugeteilt",
+  myRoomRoleCaretaker: "du bist jetzt LEITUNG im Zimmer (deine Kinder siehst du in der App)",
+  myRoomRoleHelper: "du bist jetzt UNTERSTÜTZUNG im Zimmer (ohne zugeteilte Kinder)",
+  myTeamNow: "dein Team ist jetzt {team}",
+  myTeamNone: "du bist keinem Team mehr zugeteilt",
+  myBusNow: "dein Transport ist jetzt {bus}",
+  myBusNone: "dir ist gerade kein Transport zugeteilt",
+  roomsKidsGainedLost: "{gained} {gVerb} jetzt in deiner Obhut; {lost} {lVerb} es nicht mehr",
+  roomsKidsGained: "{gained} {gVerb} jetzt in deiner Obhut",
+  roomsKidsLost: "{lost} {lVerb} nicht mehr in deiner Obhut",
+  roomsKidsSame: "die Kinder bleiben dieselben",
+  roomsKidsCountGainLose: "{kids} in deiner Obhut: +{g}, -{l}",
+  roomsKidsCountGain: "{g} {kids} jetzt in deiner Obhut",
+  roomsKidsCountLose: "{l} {kids} nicht mehr in deiner Obhut",
+  roleAssigned: "{event}: deine Aufgabe ist {duty}",
+  roleEventCancelled: "{event} wurde abgesagt",
+  roleLeft: "{event}: du bist nicht mehr eingeteilt",
+  roleChanged: "{event}: deine Aufgabe ist jetzt {duty}",
+  roleMoved: "{title} verschoben auf {when}: deine Aufgabe ist {duty}",
+  roleRenamed: 'deine Aufgabe "{before}" heißt jetzt "{after}"',
+  roleNowAuto: "die Aufgabe {role} gilt jetzt für {audience}: schau in deinen Einsatzplan",
+  roleNowManual: "die Aufgabe {role} gilt jetzt nur für Eingeteilte: schau in deinen Einsatzplan",
+  instructionsNew: 'neue Hinweise: "{title}"',
+  instructionsRenamed: 'Hinweise "{before}" heißen jetzt "{after}"',
+  instructionsUpdated: 'Hinweise "{title}" aktualisiert',
+  prepNew: 'neue Vorbereitung: "{title}"',
+  prepRenamed: 'Vorbereitung "{before}" heißt jetzt "{after}"',
+  prepUpdated: 'Vorbereitung "{title}" aktualisiert',
+  otherRole: "andere Aufgabe",
+  importFinished: "AcampaKids: KI-Prüfung des Imports {file} abgeschlossen. {ok}/{total} {subject} geprüft.",
+  importErrors: "AcampaKids: KI-Prüfung von {file} hatte {errors}/{total} Fehler. Prüfe den Worker.",
+  and: " und ",
+  changeMore: "Änderung",
+  changeMorePlural: "Änderungen",
+  verbIsOne: "ist",
+  verbIsMany: "sind",
+  verbBecameOne: "ist",
+  verbBecameMany: "sind",
+  kidPluralSuffix: "er",
+  childSingular: "Kind",
+  childPlural: "Kinder",
+  childNewSingular: "neues Kind",
+  childNewPlural: "neue Kinder",
+  camperSingular: "Kind",
+  camperPlural: "Kinder",
+  staffTeam: "Team",
+  guardianOf: "Bezugsperson von {name}",
+  seeIn: "Siehe {link}",
+  ofHer: "",
+  ofHim: "",
+  her: "sie",
+  him: "ihn",
+  theF: "",
+  theM: "",
+  enrolledF: "{name} ist",
+  enrolledM: "{name} ist",
+  enrolledFp: "{names} sind",
+  enrolledMp: "{names} sind",
+  fieldAllergies: "Allergien",
+  fieldDrugAllergies: "Medikamentenallergien",
+  fieldHealthIssues: "Gesundheit",
+  fieldMedications: "Medikamente",
+  fieldFoodRestrictions: "Ernährung",
+  fieldHealthNotes: "medizinische Hinweise",
+  fieldWeightKg: "Gewicht",
+  fieldInsurance: "Krankenversicherung",
+  fieldInsuranceCard: "Versichertenkarte",
+  fieldGeneralNotes: "Hinweise",
+  fieldNeurodivergent: "neurodivergent",
+  roleOrganizer: "im Orga-Team (Admin-Zugang)",
+  roleGameOrganizer: "im Spiele-Team (Programm und Punktestand)",
+  roleScoreHelper: "im Punkte-Team (trägt Punkte ein)",
+  roleCheckinHelper: "im Check-in-Team",
+  roleBusHelper: "an der Bustür (Einstieg der Kinder)",
+  roleBusHelperNamed: "an der Tür von {vehicle} (Einstieg der Kinder)",
+  roleMedical: "im Sanitätsteam",
+  roleVestHelper: "für die Westen zuständig (Ausgabe und Rückgabe)",
+  rolePhotographer: "im Foto-Team (lädt die Fotos hoch)",
+  roleParentContact: "Ansprechperson für Familien ({title})",
+};
+
+const CATALOGS: Record<Locale, Catalog> = { pt, en, es, fr, de };
+
+/** Every catalog, keyed by locale — exported for the completeness test. */
+export { CATALOGS };
 
 export function sms(locale: Locale, key: SmsKey, vars: Record<string, string | number> = {}): string {
   const catalog = CATALOGS[locale] ?? pt;

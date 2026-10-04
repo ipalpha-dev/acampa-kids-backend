@@ -19,7 +19,7 @@ export interface OtpState {
 }
 
 /** UI + SMS language for this account — refreshed from the device on every login. */
-export type AppLocale = "pt" | "en" | "es" | "fr";
+export type AppLocale = "pt" | "en" | "es" | "fr" | "de";
 
 export interface User {
   _id: string;

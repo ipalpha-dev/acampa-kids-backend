@@ -45,7 +45,7 @@ export function resetSessionIdleHours(): void {
 
 /** Acampa's device locale → auth-api's language tag (SMS language). */
 export function authLanguage(locale: Locale): string {
-  return ({ pt: "pt-BR", en: "en-US", es: "es", fr: "fr" } as Record<string, string>)[locale] ?? "pt-BR";
+  return ({ pt: "pt-BR", en: "en-US", es: "es", fr: "fr", de: "de" } as Record<string, string>)[locale] ?? "pt-BR";
 }
 
 export const UNAVAILABLE_ERROR = {

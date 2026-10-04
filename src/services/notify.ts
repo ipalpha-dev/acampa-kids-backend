@@ -125,7 +125,7 @@ function first(name: string): string {
 
 // ── text helpers ─────────────────────────────────────────────────────────────
 
-const DATE_LOCALE: Record<Locale, string> = { pt: "pt-BR", en: "en-US", es: "es-ES", fr: "fr-FR" };
+const DATE_LOCALE: Record<Locale, string> = { pt: "pt-BR", en: "en-US", es: "es-ES", fr: "fr-FR", de: "de-DE" };
 
 /** "2026-09-12" → "sáb 12/09" — weekday voice follows the recipient's language */
 export function shortDate(iso: string, locale: Locale = "pt"): string {
@@ -602,7 +602,7 @@ export async function notifyCamperChange(before: Camper | null, after: Camper | 
     if (got?.active && after) {
       const [room, n, locale] = await Promise.all([bedroomName(after.bedroom), countKidsOf(got._id), localeForPhone(got.phone)]);
       const text = room
-        ? sms(locale, "kidGainedRoom", { kid: first(after.name), room, n, s: n === 1 ? "" : "s" })
+        ? sms(locale, "kidGainedRoom", { kid: first(after.name), room, n, s: n === 1 ? "" : sms(locale, "kidPluralSuffix") })
         : sms(locale, "kidGained", { kid: first(after.name), n });
       await enqueue(got, "bedroom", text, settings);
     }
@@ -625,7 +625,7 @@ export async function notifyCaretakerChange(kids: Camper[], from: Staff, to: Sta
     if (from.active) {
       const locale = await localeForPhone(from.phone);
       const names = peopleLabel(kids, locale);
-      const verb = n === 1 ? (locale === "en" ? "is" : locale === "fr" ? "est" : "está") : (locale === "en" ? "are" : locale === "fr" ? "sont" : "estão");
+      const verb = sms(locale, n === 1 ? "verbIsOne" : "verbIsMany");
       const text = to
         ? sms(locale, "kidsLostTo", { names, verb, to: first(to.name) })
         : sms(locale, "kidsLost", { names, verb });
@@ -634,7 +634,7 @@ export async function notifyCaretakerChange(kids: Camper[], from: Staff, to: Sta
     if (to?.active) {
       const [room, locale] = await Promise.all([bedroomName(kids[0].bedroom), localeForPhone(to.phone)]);
       const names = peopleLabel(kids, locale);
-      const verb = n === 1 ? (locale === "en" ? "is" : locale === "fr" ? "passe" : "passou") : (locale === "en" ? "are" : locale === "fr" ? "passent" : "passaram");
+      const verb = sms(locale, n === 1 ? "verbBecameOne" : "verbBecameMany");
       const text = room
         ? sms(locale, "kidsGainedRoom", { names, verb, room })
         : sms(locale, "kidsGained", { names, verb });
@@ -709,7 +709,7 @@ export function composeRoomsAppliedSms(p: RoomsPersonChange, locale: Locale = "p
   if (p.role) facts.push(p.role === "caretaker" ? sms(locale, "myRoomRoleCaretaker") : sms(locale, "myRoomRoleHelper"));
   const g = p.kids?.gained ?? [];
   const l = p.kids?.lost ?? [];
-  const be = (n: number) => (n === 1 ? (locale === "en" ? "is" : locale === "fr" ? "est" : "está") : locale === "en" ? "are" : locale === "fr" ? "sont" : "estão");
+  const be = (n: number) => sms(locale, n === 1 ? "verbIsOne" : "verbIsMany");
   const detailed = () => {
     if (g.length && l.length) {
       return sms(locale, "roomsKidsGainedLost", {
