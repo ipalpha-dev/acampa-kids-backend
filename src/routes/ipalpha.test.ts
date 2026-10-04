@@ -101,6 +101,7 @@ describe("POST /api/auth/ipalpha/start", () => {
     expect(form.get("login_hint")).toBe("person-hint_1");
     expect(form.get("redirect_uri")).toBe(TEST_ENV.IPALPHA_REDIRECT_URI);
     expect(form.get("code_challenge_method")).toBe("S256");
+    expect(res.body.state).toBe(form.get("state"));
 
     const stored = await (await rawDb()).collection("ipalphaLoginStates").findOne({ state: form.get("state") });
     expect(stored).not.toBeNull();

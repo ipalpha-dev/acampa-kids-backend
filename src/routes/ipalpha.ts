@@ -69,7 +69,8 @@ ipalphaRoutes.post("/start", async (c) => {
   try {
     const { url } = await coreClient().startAuthorization({ state, codeChallenge: s256(codeVerifier), personHint });
     c.header("Cache-Control", "no-store");
-    return c.json({ url });
+    // `state` lets the SPA match the popup's reply; the one-time server check stays the real guard
+    return c.json({ url, state });
   } catch (err) {
     await consumeLoginState(state);
     const why = err instanceof IpalphaRejected ? `${err.status} ${err.reason}` : "unavailable";
