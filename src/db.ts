@@ -3,13 +3,15 @@ import { config } from "./config";
 import { currentCampId } from "./services/campContext";
 import { isScoped, scopeBulkOp, scopeDoc, scopeDocs, scopeFilter, scopeIndexKeys, scopeIndexOptions, scopeUpdate } from "./services/campScope";
 
-const client = new MongoClient(config.mongoUri);
+/** created on first use (not at import) so tests can point `config.mongoUri` at a throwaway server first */
+let client: MongoClient | null = null;
 
 let realDb: Db | null = null;
 
 /** The real, unscoped database — for the global registry (`camps`) and anything that must see every camp at once (boot migration, backups). */
 export async function rawDb(): Promise<Db> {
   if (!realDb) {
+    client ??= new MongoClient(config.mongoUri);
     await client.connect();
     realDb = client.db(config.dbName);
   }
@@ -90,8 +92,9 @@ export async function getDb(): Promise<Db> {
 }
 
 export async function closeDb(): Promise<void> {
-  if (realDb) {
+  if (client) {
     await client.close();
+    client = null;
     realDb = null;
     scopedDb = null;
   }

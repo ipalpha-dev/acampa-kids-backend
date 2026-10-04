@@ -1,27 +1,21 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { getConnInfo } from "hono/bun";
 import { config } from "../config";
 import { resolveLocale, sms, smsPrefix, type Locale } from "../i18n";
-import { ensureLoginAccount, findByPhone, toPublicUser, updateUser } from "../models/users";
-import { findStaffByPhone } from "../models/staff";
-import { listCampersOfGuardian } from "../models/campers";
-import { getSettings, staffAccessOpen } from "../models/settings";
-import { staffHasAccess } from "../services/scope";
+import { findByPhone, toPublicUser, updateUser } from "../models/users";
 import { availableRolesOf } from "../services/roles";
 import { comteleEnabled, comteleSendSms, resolveSmsTarget } from "../services/comtele";
 import { generateLocalCode, hashCode, verifyLocalCode } from "../services/otp";
-import { createSession, revokeSession, verifySessionToken } from "../services/session";
-import type { CheckinWindow, PublicUser, Role, SessionUser, User } from "../types";
-import { formatBrazilPhone, isRole, minutesBetween, normalizeBrazilPhone, pickActiveRole } from "../utils";
+import { createSession, revokeSession } from "../services/session";
+import type { PublicUser, Role, SessionUser, User } from "../types";
+import { formatBrazilPhone, isRole, normalizeBrazilPhone } from "../utils";
 import { requireAuth } from "../middleware/auth";
-import { activeCamp, withCamp } from "../services/campContext";
+import { withCamp } from "../services/campContext";
 import { findCamp } from "../models/camps";
 import { canSwitchCamps, switchableCamps } from "../services/campAccess";
-
-/** `{ id, label, year, active }` of the session's camp — falls back to the active camp for pre-migration sessions. */
-async function sessionCamp(campId: string): Promise<{ id: string; label: string; year: number; active: boolean }> {
-  const camp = (await findCamp(campId)) ?? activeCamp();
-  return { id: camp._id, label: camp.label, year: camp.year, active: camp.active };
-}
+import { NO_PROFILE_ERROR, bindPersonId, completeLogin, frozenError, landingRole, loginSessionHours, resolveAccountByPhone, sessionCamp, staffWindowError } from "../services/login";
+import { authLanguage, coreClient, ipalphaEnabled, mapRelayError, rememberSessionIdleHours, sessionIdleHours, type RelayOutcome } from "../services/ipalpha";
+import ipalphaRoutes from "./ipalpha";
 
 interface AuthEnv {
   Variables: {
@@ -35,56 +29,109 @@ interface AuthEnv {
 
 const auth = new Hono<AuthEnv>();
 
-/**
- * Ordinary team members may only log in inside `settings.staffAccessWindow`.
- * Returns the error payload to send (403) when the window is closed, or null.
- */
-async function staffWindowError(phone: string, role: Role) {
-  const settings = await getSettings();
-  const now = new Date();
-  let window: CheckinWindow;
-  if (role === "parent") {
-    // parents: their own access window (Settings → Geral)
-    if (staffAccessOpen(settings.parentAccessWindow, now)) return null;
-    window = settings.parentAccessWindow;
-  } else {
-    if (role !== "staff" && role !== "health_staff") return null;
-    const me = await findStaffByPhone(phone);
-    if (!me) return null;
-    if (staffHasAccess(me._id, settings, now)) return null;
-    window = settings.staffAccessWindow;
+// "Entrar com IPAlpha": /api/auth/ipalpha/{config,start,complete}
+auth.route("/ipalpha", ipalphaRoutes);
+
+/** The caller's IP for auth-api's per-IP limit: first X-Forwarded-For hop (ingress), else the socket. */
+function clientIp(c: Context): string | undefined {
+  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+  if (forwarded) return forwarded;
+  try {
+    return getConnInfo(c).remote.address || undefined;
+  } catch {
+    return undefined;
   }
-  const { from, until } = window;
-  const audience = role === "parent" ? "parent" : "staff";
-  if (until && now >= until) {
-    return {
-      code: "STAFF_ACCESS_ENDED",
-      message: "O acampamento já terminou. Esperamos você no ano que vem!",
-      audience,
-      opensAt: from?.toISOString() ?? null,
-      closesAt: until.toISOString(),
-    };
+}
+
+function minutesOf(ms: number): number {
+  return Math.max(1, Math.round(ms / 60_000));
+}
+
+/** Local side effects of a relay rejection (freeze / drop the challenge / count the attempt) — see mapRelayError. */
+async function applyRelayOutcome(user: User, outcome: Extract<RelayOutcome, { kind: "error" }>): Promise<void> {
+  if (outcome.freezeMinutes) {
+    await updateUser(user._id, { otp: null, frozenUntil: new Date(Date.now() + outcome.freezeMinutes * 60 * 1000) });
+    console.warn(`[auth] Account frozen for ${outcome.freezeMinutes}min by IPAlpha: account ${user._id}`);
+  } else if (outcome.clearOtp) {
+    await updateUser(user._id, { otp: null });
+  } else if (outcome.countAttempt && user.otp) {
+    await updateUser(user._id, { otp: { ...user.otp, attempts: user.otp.attempts + 1 } });
   }
-  return {
-    code: "STAFF_ACCESS_NOT_YET",
-    audience,
-    message: role === "parent" ? "O app ainda não está liberado para os pais." : "O app ainda não está liberado para a equipe.",
-    opensAt: from?.toISOString() ?? null,
-    closesAt: until?.toISOString() ?? null,
-  };
 }
 
 /**
- * The profile a login LANDS on: the highest-privilege one the person may
- * ACTUALLY enter with (see services/roles#availableRolesOf). The first token
- * uses the highest role; the client immediately shows the profile chooser
- * when more than one is available. Falls back to the stored list only when
- * the data offers nothing, so
- * the error the person gets is still about their own account.
+ * IPAlpha relay of the code request (auth-api generates and sends the code).
+ * Returns the response, or null when auth-api does not know this phone
+ * (`personNotFound`) — the caller then keeps today's local SMS path.
  */
-async function landingRole(user: User): Promise<{ role: Role; available: Role[] }> {
-  const available = await availableRolesOf(user);
-  return { role: pickActiveRole(available.length > 0 ? available : user.roles), available };
+async function relayOtpRequest(c: Context, user: User, phone: string, role: Role, available: Role[], deviceLocale: Locale): Promise<Response | null> {
+  // a relayed code sent moments ago and still valid (e.g. the person went back
+  // and re-entered the phone): don't ask core again — reuse it, as the local path does
+  if (user.otp?.provider === "ipalpha" && user.otp.challengeId) {
+    const secondsSince = (Date.now() - user.otp.requestedAt.getTime()) / 1000;
+    if (secondsSince < config.otp.resendCooldownSeconds && user.otp.expiresAt > new Date() && user.otp.attempts < config.otp.maxAttempts) {
+      return c.json({
+        success: true,
+        phone,
+        role,
+        roles: available,
+        expiresAt: user.otp.expiresAt.toISOString(),
+        expireMinutes: minutesOf(user.otp.expiresAt.getTime() - user.otp.requestedAt.getTime()),
+        delivery: "sms",
+        reused: true,
+      });
+    }
+  }
+
+  let answer;
+  try {
+    answer = await coreClient().relayStart({ phone, language: authLanguage(user.locale || deviceLocale), clientIp: clientIp(c) });
+  } catch (err) {
+    const outcome = mapRelayError("request", err);
+    if (outcome.kind === "fallback") return null;
+    await applyRelayOutcome(user, outcome);
+    return c.json({ error: outcome.error }, outcome.status);
+  }
+  rememberSessionIdleHours(answer.sessionIdleHours);
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + answer.expiresInSec * 1000);
+  await updateUser(user._id, {
+    otp: { provider: "ipalpha", challengeId: answer.challengeId, requestedRole: role, requestedAt: now, expiresAt, attempts: 0 },
+  });
+  console.log(`[ipalpha] login code relayed through IPAlpha for account ${user._id} (entrando como ${role})`);
+
+  return c.json({
+    success: true,
+    phone,
+    role,
+    roles: available,
+    expiresAt: expiresAt.toISOString(),
+    expireMinutes: minutesOf(answer.expiresInSec * 1000),
+    delivery: "sms",
+  });
+}
+
+/** IPAlpha relay of the code check → the proven person id is bound and the session issued. */
+async function relayOtpVerify(c: Context, user: User, code: string, role: Role, available: Role[], deviceLocale: Locale): Promise<Response> {
+  const challengeId = user.otp?.challengeId;
+  if (!ipalphaEnabled() || !challengeId) {
+    // IPAlpha was switched off while this code was pending
+    await updateUser(user._id, { otp: null });
+    return c.json({ error: { code: "OTP_EXPIRED", message: "O código expirou. Peça um novo código." } }, 400);
+  }
+  let answer;
+  try {
+    answer = await coreClient().relayVerify({ challengeId, code });
+  } catch (err) {
+    const outcome = mapRelayError("verify", err);
+    if (outcome.kind === "fallback") return c.json({ error: { code: "OTP_EXPIRED", message: "O código expirou. Peça um novo código." } }, 400);
+    await applyRelayOutcome(user, outcome);
+    return c.json({ error: outcome.error }, outcome.status);
+  }
+  rememberSessionIdleHours(answer.sessionIdleHours);
+  await bindPersonId(user, answer.personId);
+  return c.json(await completeLogin(user, role, available, deviceLocale, answer.sessionIdleHours ?? sessionIdleHours()));
 }
 
 /**
@@ -92,6 +139,9 @@ async function landingRole(user: User): Promise<{ role: Role; available: Role[] 
  * Login flow: phone number only. The first session uses the highest role; the
  * frontend asks which profile to keep before opening the application whenever
  * this array contains more than one role.
+ *
+ * With IPAlpha configured the code is generated and sent by auth-api (relay);
+ * phones auth-api does not know yet keep the local SMS path below.
  */
 auth.post("/otp/request", async (c) => {
   const body = await c.req.json<{ phone?: string; locale?: string }>().catch(() => null);
@@ -107,13 +157,7 @@ auth.post("/otp/request", async (c) => {
 
   // look up the PERSON by phone (unique). Roster / guardian phones may not
   // have a users doc yet (the admin form never created one) — provision it.
-  let user = await findByPhone(phone);
-  if (!user) {
-    const [member, kids] = await Promise.all([findStaffByPhone(phone), listCampersOfGuardian(phone)]);
-    if (member?.phone) await ensureLoginAccount(member.name, member.phone, "staff");
-    if (kids.length) await ensureLoginAccount(kids[0].guardianName || kids[0].name, phone, "parent");
-    user = await findByPhone(phone);
-  }
+  const user = await resolveAccountByPhone(phone);
   if (!user) {
     return c.json(
       {
@@ -129,33 +173,24 @@ auth.post("/otp/request", async (c) => {
   // the account exists but the data gives it no profile (e.g. an ex-responsible
   // whose kid is not enrolled this year): say so instead of sending a useless code
   if (available.length === 0) {
-    return c.json(
-      { error: { code: "NO_PROFILE", message: "Este telefone não tem nenhum perfil no acampamento deste ano." } },
-      403,
-    );
+    return c.json({ error: NO_PROFILE_ERROR }, 403);
   }
 
   // frozen account?
-  if (user.frozenUntil && user.frozenUntil > new Date()) {
-    const minutesLeft = minutesBetween(new Date(), user.frozenUntil);
-    return c.json(
-      {
-        error: {
-          code: "ACCOUNT_FROZEN",
-          message: `Conta bloqueada por tentativas incorretas. Tente novamente em ${minutesLeft} minuto(s).`,
-          minutesLeft,
-        },
-      },
-      423,
-    );
-  }
+  const frozen = frozenError(user);
+  if (frozen) return c.json({ error: frozen }, 423);
 
   // ordinary team members: only inside the staff access window
   const windowErr = await staffWindowError(phone, role);
   if (windowErr) return c.json({ error: windowErr }, 403);
 
-  // resend cooldown
-  if (user.otp) {
+  if (ipalphaEnabled()) {
+    const relayed = await relayOtpRequest(c, user, phone, role, available, deviceLocale);
+    if (relayed) return relayed;
+  }
+
+  // resend cooldown (local codes only — a relayed challenge is auth-api's to throttle)
+  if (user.otp && user.otp.provider !== "ipalpha") {
     const secondsSince = (Date.now() - user.otp.requestedAt.getTime()) / 1000;
     if (secondsSince < config.otp.resendCooldownSeconds) {
       // a code was sent moments ago and is still valid (e.g. user went back
@@ -269,7 +304,7 @@ auth.post("/otp/verify", async (c) => {
     );
   }
 
-  let user = await findByPhone(phone);
+  const user = await findByPhone(phone);
   if (!user) {
     return c.json(
       { error: { code: "USER_NOT_FOUND", message: "Cadastro não encontrado." } },
@@ -279,26 +314,12 @@ auth.post("/otp/verify", async (c) => {
   const { role, available } = await landingRole(user);
   // the profile may have vanished between the request and the verify
   if (available.length === 0) {
-    return c.json(
-      { error: { code: "NO_PROFILE", message: "Este telefone não tem nenhum perfil no acampamento deste ano." } },
-      403,
-    );
+    return c.json({ error: NO_PROFILE_ERROR }, 403);
   }
 
   // frozen?
-  if (user.frozenUntil && user.frozenUntil > new Date()) {
-    const minutesLeft = minutesBetween(new Date(), user.frozenUntil);
-    return c.json(
-      {
-        error: {
-          code: "ACCOUNT_FROZEN",
-          message: `Conta bloqueada por tentativas incorretas. Tente novamente em ${minutesLeft} minuto(s).`,
-          minutesLeft,
-        },
-      },
-      423,
-    );
-  }
+  const frozen = frozenError(user);
+  if (frozen) return c.json({ error: frozen }, 423);
 
   if (!user.otp) {
     return c.json(
@@ -323,6 +344,9 @@ auth.post("/otp/verify", async (c) => {
       400,
     );
   }
+
+  // a code relayed through IPAlpha is checked by auth-api
+  if (user.otp.provider === "ipalpha") return relayOtpVerify(c, user, code, role, available, deviceLocale);
 
   // validate the code (always generated and hashed on our side)
   const valid = !!user.otp.codeHash && verifyLocalCode(code, user.otp.codeHash);
@@ -364,21 +388,7 @@ auth.post("/otp/verify", async (c) => {
   }
 
   // success — clear OTP, unfreeze, remember device language, create session
-  await updateUser(user._id, { otp: null, frozenUntil: null, locale: deviceLocale });
-  user = { ...user, locale: deviceLocale };
-
-  const { token, session } = await createSession(user._id, role);
-  const camps = await switchableCamps(user, role);
-
-  return c.json({
-    success: true,
-    token,
-    tokenExpiresAt: session.expiresAt.toISOString(),
-    // `roles` is what the switcher offers: the profiles the DATA gives this person
-    user: { ...toPublicUser(user), roles: available, activeRole: role },
-    camp: await sessionCamp(session.campId),
-    ...(camps ? { camps } : {}),
-  });
+  return c.json(await completeLogin(user, role, available, deviceLocale, loginSessionHours()));
 });
 
 /** Who am I? (requires Bearer token) */
@@ -407,7 +417,7 @@ auth.post("/role", requireAuth, async (c) => {
   if (windowErr) return c.json({ error: windowErr }, 403);
 
   await revokeSession(c.get("sessionId"));
-  const { token, session } = await createSession(user._id, role, c.get("campId"));
+  const { token, session } = await createSession(user._id, role, c.get("campId"), loginSessionHours());
   const camps = await switchableCamps(user, role);
   return c.json({
     success: true,
@@ -441,7 +451,7 @@ auth.post("/camp", requireAuth, async (c) => {
   if (!user) return c.json({ error: { code: "USER_NOT_FOUND", message: "Cadastro não encontrado." } }, 404);
 
   await revokeSession(c.get("sessionId"));
-  const { token, session } = await createSession(user._id, activeRole, target._id);
+  const { token, session } = await createSession(user._id, activeRole, target._id, loginSessionHours());
   const { available, camps } = await withCamp(target._id, async () => ({
     available: await availableRolesOf(user),
     camps: await switchableCamps(user, activeRole),

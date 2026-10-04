@@ -22,6 +22,7 @@ import { deleteCamp, evaluateCampDeleteCode } from "../services/campDelete";
 import { IMPORT_BLOCKS, campSummary, importFromCamp, searchCampCampers, searchCampStaff, type ImportBlock, type ImportOptions } from "../services/campImport";
 import { generateLocalCode, hashCode } from "../services/otp";
 import { rearmActiveCampTimers } from "../services/realtime";
+import { rolloverEdition } from "../services/ipalpha";
 import { sms, smsPrefix } from "../i18n";
 import type { Role, SessionUser } from "../types";
 import { formatBrazilPhone } from "../utils";
@@ -100,6 +101,8 @@ camps.post("/", requireAuth, requireGlobalAdmin, async (c) => {
   await activateCamp(created._id);
   await withCamp(created._id, () => updateSettings({ wizardMode: false }));
   await rearmActiveCampTimers();
+  // IPAlpha: this year's edition becomes the project's current one (best effort, never blocks)
+  void rolloverEdition(created.year);
 
   return c.json({ camp: serializeCampFull((await findCamp(created._id)) ?? created) }, 201);
 });
@@ -135,6 +138,8 @@ camps.put("/:id", requireAuth, requireGlobalAdmin, async (c) => {
   if (typeof year === "number") patch.year = year;
   if (typeof body?.archived === "boolean") patch.archived = body.archived;
   const updated = Object.keys(patch).length ? await updateCamp(id, patch) : await findCamp(id);
+  // IPAlpha: the activated camp's year becomes the project's current edition (best effort, never blocks)
+  if (body?.active === true && updated) void rolloverEdition(updated.year);
 
   return c.json({ camp: serializeCampFull(updated!) });
 });

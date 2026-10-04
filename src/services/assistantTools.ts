@@ -38,7 +38,7 @@ const COLLECTIONS: Record<string, AssistantCollection> = {
   camperLookups: { description: "Auditoria de leituras emergenciais de crachás." },
   camperImports: { description: "Processos de importação de planilhas de acampantes e equipe." },
   camperImportDictionary: { description: "Dicionário aprendido durante importações de planilhas." },
-  users: { description: "Contas de acesso, nomes, telefones e perfis; dados de autenticação são ocultados.", hiddenFields: ["otp"] },
+  users: { description: "Contas de acesso, nomes, telefones e perfis; dados de autenticação são ocultados.", hiddenFields: ["otp", "ipalphaPersonIds"] },
   ai_usage: { description: "Métricas de uso das funções de IA." },
   sms_usage: { description: "Métricas de envio de SMS." },
 };

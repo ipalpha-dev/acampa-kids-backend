@@ -11,10 +11,13 @@ export async function createSession(
   userId: string,
   role: Session["role"],
   campId: string = activeCampId(),
+  /** session length override (IPAlpha's `sessionIdleHours`); default `config.sessionHours` */
+  hours?: number,
 ): Promise<{ token: string; session: Session }> {
   const db = await getDb();
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + config.sessionHours * 60 * 60 * 1000);
+  const ttlHours = hours !== undefined && Number.isFinite(hours) && hours > 0 ? hours : config.sessionHours;
+  const expiresAt = new Date(now.getTime() + ttlHours * 60 * 60 * 1000);
 
   const { insertedId } = await db.collection("sessions").insertOne({
     userId,

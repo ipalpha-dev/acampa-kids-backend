@@ -8,4 +8,5 @@ scripts/.supabase-children.json
 *.tsbuildinfo
 # Tests and the notes prompt lab (reads real registration exports) never ship in the image.
 **/*.test.ts
+src/testing
 scripts/notes-ai-test.ts

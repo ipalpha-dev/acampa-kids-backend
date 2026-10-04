@@ -22,6 +22,8 @@ import { ensureScoreIndexes } from "./models/scores";
 import { ensureCamperLookupIndexes } from "./models/camperLookups";
 import { ensureCamperImportIndexes } from "./models/camperImports";
 import { ensureGalleryIndexes } from "./models/gallery";
+import { ensureLoginStateIndexes } from "./models/ipalphaLoginStates";
+import { logIpalphaStatus } from "./services/ipalpha";
 import teamRoutes from "./routes/teams";
 import scoreRoutes from "./routes/scores";
 import galleryRoutes from "./routes/gallery";
@@ -126,6 +128,7 @@ await ensureCampsCollection();
 await migrateToCamps();
 console.log(`🏕️  active camp: "${activeCamp().label}" (${activeCampId()})`);
 await ensureIndexes();
+await ensureLoginStateIndexes(); // IPAlpha sign-ins in flight (TTL 10 min)
 await ensureCamperLookupIndexes();
 await ensureCamperImportIndexes();
 await ensureCategoryIndexes();
@@ -188,6 +191,7 @@ console.log(
     ? "Comtele SMS enabled (real OTP via SMS)."
     : "⚠️  COMTELE_API_KEY not set — running in MOCK mode: OTP codes are printed in this console.",
 );
+logIpalphaStatus();
 console.log(
   mailEnabled()
     ? "SendGrid mail enabled (notification emails)."

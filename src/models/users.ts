@@ -19,6 +19,7 @@ function toUser(doc: Record<string, unknown> | null, state?: UserCampState | nul
     updatedAt: doc.updatedAt as Date,
     otp: doc.otp as User["otp"],
     frozenUntil: doc.frozenUntil as Date | undefined,
+    ipalphaPersonIds: Array.isArray(doc.ipalphaPersonIds) ? (doc.ipalphaPersonIds as unknown[]).filter((x): x is string => typeof x === "string") : [],
     prepDone: marks.prepDone,
     welcomeSentAt: marks.welcomeSentAt,
   };
@@ -134,6 +135,34 @@ export async function findByPhone(phone: string): Promise<User | null> {
   return toUser(doc, await findUserCampState(doc._id.toString()));
 }
 
+/** The account an IPAlpha person id was bound to (see addPersonId) — null when none yet. */
+export async function findByPersonId(personId: string): Promise<User | null> {
+  if (!personId) return null;
+  const db = await getDb();
+  const doc = await db.collection("users").findOne({ ipalphaPersonIds: personId });
+  if (!doc) return null;
+  const { findUserCampState } = await import("./userCampState");
+  return toUser(doc, await findUserCampState(doc._id.toString()));
+}
+
+/**
+ * Binds an IPAlpha person id to this account (`$addToSet`). Nothing else from
+ * core is stored. A person id already bound to ANOTHER account is left there
+ * (unique index) and `false` is returned — the caller logs it, the login of the
+ * phone-proven account still goes on.
+ */
+export async function addPersonId(userId: string, personId: string): Promise<boolean> {
+  if (!personId || !ObjectId.isValid(userId)) return false;
+  const db = await getDb();
+  try {
+    await db.collection("users").updateOne({ _id: new ObjectId(userId) }, { $addToSet: { ipalphaPersonIds: personId }, $set: { updatedAt: new Date() } });
+    return true;
+  } catch (err) {
+    if ((err as { code?: number }).code === 11000) return false;
+    throw err;
+  }
+}
+
 export async function findById(id: string): Promise<User | null> {
   const db = await getDb();
   const doc = await db.collection("users").findOne({ _id: new ObjectId(id) });
@@ -203,6 +232,8 @@ export async function ensureIndexes(): Promise<void> {
   }
 
   await db.collection("users").createIndex({ phone: 1 }, { unique: true });
+  // one IPAlpha person ↔ one Acampa account (multikey; accounts without the field are skipped)
+  await db.collection("users").createIndex({ ipalphaPersonIds: 1 }, { unique: true, sparse: true });
   await db.collection("sessions").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
   const { ensureUserCampStateIndexes } = await import("./userCampState");
   await ensureUserCampStateIndexes();

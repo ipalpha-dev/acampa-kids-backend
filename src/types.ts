@@ -2,10 +2,15 @@ export const ROLES = ["parent", "staff", "health_staff", "admin"] as const;
 export type Role = (typeof ROLES)[number];
 
 export interface OtpState {
-  /** how the code was delivered: "comtele" (real SMS) or "local" (dev mock — console only) */
-  provider: "comtele" | "local";
-  /** sha256 hash of the code (always generated server-side) */
+  /**
+   * how the code was delivered: "comtele" (real SMS) or "local" (dev mock — console only),
+   * or "ipalpha" — relayed through IPAlpha auth-api, which generated and sent the code
+   */
+  provider: "comtele" | "local" | "ipalpha";
+  /** sha256 hash of the code (local codes only — never present for "ipalpha") */
   codeHash?: string;
+  /** "ipalpha" only: auth-api's relay challenge id (the code itself never reaches Acampa's storage) */
+  challengeId?: string;
   /** the role the user picked when requesting the code */
   requestedRole: Role;
   requestedAt: Date;
@@ -31,6 +36,8 @@ export interface User {
   otp?: OtpState;
   /** set when the account is frozen after too many wrong OTP attempts */
   frozenUntil?: Date;
+  /** IPAlpha person ids proven to be this account (the ONLY thing kept from core — no profile data) */
+  ipalphaPersonIds: string[];
   /** PARENTS: the Preparação items they ticked as done ("section:<id>") — the team's equivalent lives on `staff.prepDone` */
   prepDone: string[];
   /** PARENTS: when the welcome SMS (app link) went out — null until then; sent ONCE, ever (services/notify.ts syncParentWelcomes) */

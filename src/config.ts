@@ -1,3 +1,65 @@
+/**
+ * IPAlpha (core auth-api + persons-api) login. Every REQUIRED variable must be
+ * present for the feature to turn on; absent = the IPAlpha button is hidden and
+ * the legacy phone + code login keeps sending its own SMS (see README → IPAlpha).
+ */
+export const IPALPHA_REQUIRED_ENV = [
+  "IPALPHA_AUTH_API_URL",
+  "IPALPHA_AUTH_ORIGIN",
+  "IPALPHA_PERSONS_API_URL",
+  "IPALPHA_TOKEN_ISSUER",
+  "IPALPHA_CLIENT_ID",
+  "IPALPHA_ENTRY_POINT",
+  "IPALPHA_CLIENT_SECRET",
+  "IPALPHA_REDIRECT_URI",
+  "IPALPHA_SYSTEM_CLIENT_ID",
+  "IPALPHA_SYSTEM_CLIENT_SECRET",
+] as const;
+
+export interface IpalphaConfig {
+  /** true only when every IPALPHA_REQUIRED_ENV variable is set */
+  enabled: boolean;
+  /** names (never values) of the required variables that are missing */
+  missing: string[];
+  authApiUrl: string;
+  authOrigin: string;
+  personsApiUrl: string;
+  tokenIssuer: string;
+  clientId: string;
+  entryPoint: string;
+  clientSecret: string;
+  redirectUri: string;
+  systemClientId: string;
+  systemClientSecret: string;
+  /** the long-lived Acampa project in projects-api (optional: login + edition rollover become project-scoped) */
+  projectId: string | null;
+  /** projects-api base URL — only used by the camp → edition rollover (optional) */
+  projectsApiUrl: string | null;
+}
+
+const trimSlash = (v: string) => v.replace(/\/+$/, "");
+
+export function readIpalphaConfig(env: Record<string, string | undefined>): IpalphaConfig {
+  const get = (name: string) => (env[name] ?? "").trim();
+  const missing = IPALPHA_REQUIRED_ENV.filter((name) => !get(name));
+  return {
+    enabled: missing.length === 0,
+    missing,
+    authApiUrl: trimSlash(get("IPALPHA_AUTH_API_URL")),
+    authOrigin: trimSlash(get("IPALPHA_AUTH_ORIGIN")),
+    personsApiUrl: trimSlash(get("IPALPHA_PERSONS_API_URL")),
+    tokenIssuer: get("IPALPHA_TOKEN_ISSUER"),
+    clientId: get("IPALPHA_CLIENT_ID"),
+    entryPoint: get("IPALPHA_ENTRY_POINT"),
+    clientSecret: get("IPALPHA_CLIENT_SECRET"),
+    redirectUri: get("IPALPHA_REDIRECT_URI"),
+    systemClientId: get("IPALPHA_SYSTEM_CLIENT_ID"),
+    systemClientSecret: get("IPALPHA_SYSTEM_CLIENT_SECRET"),
+    projectId: get("IPALPHA_PROJECT_ID") || null,
+    projectsApiUrl: get("IPALPHA_PROJECTS_API_URL") ? trimSlash(get("IPALPHA_PROJECTS_API_URL")) : null,
+  };
+}
+
 const aiBaseUrl = (process.env.AI_BASE_URL ?? "https://ai-models.kevyn.com.br/v1").replace(/\/$/, "");
 const aiApiKey = process.env.AI_API_KEY ?? "";
 
@@ -17,7 +79,11 @@ export const config = {
   filesDir: process.env.FILES_DIR ?? "data/files",
 
   jwtSecret: process.env.JWT_SECRET ?? "dev-secret-change-me",
+  /** fallback session length; with IPAlpha on, auth-api's `sessionIdleHours` (entry point config) wins */
   sessionHours: Number(process.env.SESSION_HOURS ?? 96),
+
+  /** IPAlpha login (see readIpalphaConfig) */
+  ipalpha: readIpalphaConfig(process.env),
 
   otp: {
     length: 6,

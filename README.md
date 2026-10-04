@@ -36,7 +36,8 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | `OTP_EXPIRE_MINUTES` | OTP lifetime (default `5`) |
 | `OTP_MAX_ATTEMPTS` | wrong attempts before freezing the account (default `3`) |
 | `ACCOUNT_FREEZE_MINUTES` | how long the account stays frozen (default `30`) |
-| `SESSION_HOURS` | session token lifetime (default `96`, 4 days) |
+| `SESSION_HOURS` | session token lifetime (default `96`, 4 days); with IPAlpha on, auth-api's `sessionIdleHours` wins |
+| `IPALPHA_*` | IPAlpha login (optional; all required ones or the feature is off) — see [IPAlpha login](#ipalpha-login-core-auth-api-) and `DEPLOYMENT.md` |
 | `APP_URL` | public URL of the frontend, appended to notification SMS (optional) |
 | `PUBLIC_ORIGIN` | public origin of the site (frontend + `/api`). Prefixes images in notification emails. Empty = mail send is refused. Alias: `BACKEND_PUBLIC_URL` |
 | `SENDGRID_API_KEY` | SendGrid API key for `POST https://api.sendgrid.com/v3/mail/send`. **Empty = mock mode**: emails are printed to the server console |
@@ -121,6 +122,46 @@ request and on the WebSocket upgrade (`middleware/auth#roleNoLongerValid`): a
 parent session without kids, or an admin's `staff` session, is revoked (401).
 
 Error responses carry machine-readable codes: `PHONE_INVALID`, `USER_NOT_FOUND`, `NO_PROFILE` (the phone has no profile at this year's camp), `ROLE_NOT_ALLOWED` (phone exists but doesn't hold the selected role — includes `availableRoles`), `OTP_COOLDOWN`, `OTP_EXPIRED`, `OTP_INVALID` (with `attemptsLeft`), `ACCOUNT_FROZEN` (with `minutesLeft`), `UNAUTHORIZED`.
+
+## IPAlpha login (core auth-api) 🔑
+
+Optional, on only when every required `IPALPHA_*` variable is set (see
+[`DEPLOYMENT.md`](./DEPLOYMENT.md); boot logs the missing **names**, never
+values). IPAlpha owns identity; Acampa keeps its own roles, access windows,
+freeze rules and sessions. Code: `routes/ipalpha.ts`, `services/ipalpha/`
+(all core HTTP behind `coreClient.ts`), shared login gates in `services/login.ts`.
+
+| Method | Path | Body | Result |
+|---|---|---|---|
+| GET | `/api/auth/ipalpha/config` | — | `{ enabled, authOrigin, clientId, entryPoint }` (public; `enabled:false` hides the button) |
+| POST | `/api/auth/ipalpha/start` | `{ personHint? }` | stores `{state, codeVerifier}` (`ipalphaLoginStates`, TTL 10 min, one-time), PARs server-side with the client secret + PKCE S256, `response_mode=web_message`, resource `ipalpha:persons` (+ `project_id`, `login_hint`) → `{ url }` for the popup |
+| POST | `/api/auth/ipalpha/complete` | `{ code, state }` (or `{ error, state }`) | state consumed once → code exchanged server-side → token verified locally (JWKS, `iss`, `aud=ipalpha:persons`, `token_use=external_access`, `azp`) → account by `ipalphaPersonIds`, else by the person's **verified** phone read fresh from persons-api (+ roster / guardian provisioning) → person id bound → same profile / frozen / window gates as the phone login → the exact `/otp/verify` answer |
+
+- **Legacy phone + code** keeps its request/response shapes. With IPAlpha on,
+  `/otp/request` relays to auth-api (`/internal/login/relay/start`, forwarding
+  the first `X-Forwarded-For` hop) and stores only the relay `challengeId`
+  on `users.otp` (`provider: "ipalpha"`, no code); `/otp/verify` relays the
+  check, binds the returned person id and opens the session. auth reasons map
+  to the existing codes: `invalidCode` → `OTP_INVALID`, `tryAgainLater` /
+  `tooManyAttempts` → `ACCOUNT_FROZEN` (frozen locally too), `tooManyRequests`
+  / `resendTooSoon` → `OTP_COOLDOWN`, `challengeExpired` → `OTP_EXPIRED`.
+  `personNotFound` keeps the local SMS path (roster phones not in core yet).
+  The Settings → Testes SMS redirect does not apply to relayed codes.
+- **Session length**: auth-api's `sessionIdleHours` (learned from relay
+  answers; until one arrives, `SESSION_HOURS`).
+- **Camp activation** with `IPALPHA_PROJECT_ID` + `IPALPHA_PROJECTS_API_URL`:
+  `current-by-year?year=<camp.year>` on projects-api — best effort, logged,
+  never blocks the activation.
+- New error codes: `IPALPHA_DENIED`, `IPALPHA_STATE_INVALID`,
+  `IPALPHA_CODE_INVALID`, `IPALPHA_DISABLED` (404, feature off),
+  `IPALPHA_UNAVAILABLE` (503 — core down; the app shows its maintenance scene).
+
+**Do not:** store or cache person tokens or any core profile/person data
+(only `users.ipalphaPersonIds` — ids, nothing else); log tokens, codes or
+phones; read persons-api ahead of use; trust an unverified phone; return
+secrets from `/config`. Only system tokens are cached, in memory, until 30 s
+before expiry. Tests: `bun test` (fake core + local ES256 JWKS +
+mongodb-memory-server, synthetic data — `src/testing/`, never shipped).
 
 ## Realtime feed (WebSocket) 📡
 

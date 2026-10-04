@@ -55,6 +55,16 @@ committed YAML or frontend `VITE_*` variables.
 | `FACE_SERVICE_URL` | `http://acampa-2025-face:8000` (cluster-internal only). Empty disables the parents' photo search |
 | `FACE_MATCH_THRESHOLD` | `0.22`; low so parents find their kid (a few other children in the results is ok) |
 | `FACE_MIN_DETECTION_SCORE` | `0.4` |
+| `IPALPHA_AUTH_API_URL` | auth-api base URL (server-to-server; JWKS at `/.well-known/jwks.json`). **IPAlpha login needs every required `IPALPHA_*` below — any missing = feature off** (boot logs the missing names) |
+| `IPALPHA_AUTH_ORIGIN` | auth-webapp origin that hosts the sign-in popup / One Tap frame |
+| `IPALPHA_PERSONS_API_URL` | persons-api base URL (first-login phone read) |
+| `IPALPHA_TOKEN_ISSUER` | auth-api `iss` |
+| `IPALPHA_CLIENT_ID`, `IPALPHA_ENTRY_POINT`, `IPALPHA_REDIRECT_URI` | Acampa's confidential external entry point in auth-api |
+| `IPALPHA_CLIENT_SECRET` | Secret ref only — the entry point's client secret |
+| `IPALPHA_SYSTEM_CLIENT_ID` | Acampa's app-bound system client (`login:relay`, `projects:editions`) |
+| `IPALPHA_SYSTEM_CLIENT_SECRET` | Secret ref only |
+| `IPALPHA_PROJECT_ID` | optional: the Acampa project (project-scoped sign-in + yearly edition rollover) |
+| `IPALPHA_PROJECTS_API_URL` | optional: projects-api base URL; needed with `IPALPHA_PROJECT_ID` for the edition rollover on camp activation |
 
 MongoDB uses `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`
 from `mongo-credentials`, and `MONGO_INITDB_DATABASE=camping`. These initialize
