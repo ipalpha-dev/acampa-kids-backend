@@ -362,8 +362,12 @@ export interface IpalphaCoreClient {
   getImport(token: string, importId: string): Promise<Record<string, unknown>>;
   /** decisions, in `review` → the job */
   patchImport(token: string, importId: string, decisions: ImportDecisions): Promise<Record<string, unknown>>;
-  /** `X-Projects-Authorization` carries the importer's projects token (memberships); 409 `decisionsPending {pending}` */
-  applyImport(token: string, projectsToken: string, importId: string): Promise<{ importId: string; status: string }>;
+  /**
+   * 409 `decisionsPending {pending}`. persons-api writes the memberships itself with its own system scope
+   * (decision 75) — no projects token goes along. A refused membership fails its row (`membership:<reason>`);
+   * an importer who may no longer register fails the run (`failureReason: membership:<reason>`).
+   */
+  applyImport(token: string, importId: string): Promise<{ importId: string; status: string }>;
   cancelImport(token: string, importId: string): Promise<void>;
   /**
    * `GET /imports/:id/batches?cursor=<FIRST batch number>&limit≤10` — ids + app field values only (decision 67).
@@ -869,16 +873,8 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       return obj(await roleCall("imports/patch", token, "PATCH", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}`, decisions));
     },
 
-    async applyImport(token, projectsToken, importId) {
-      const init = jsonInit("POST", token, {});
-      init.headers = { ...(init.headers as Record<string, string>), "x-projects-authorization": `Bearer ${projectsToken}` };
-      let body: Record<string, unknown>;
-      try {
-        body = obj(await call("imports/apply", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}/apply`, init));
-      } catch (err) {
-        if (bearerRejected(err)) throw new IpalphaTokenRevoked("imports/apply");
-        throw err;
-      }
+    async applyImport(token, importId) {
+      const body = obj(await roleCall("imports/apply", token, "POST", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}/apply`, {}));
       return { importId: str(body.importId) ?? importId, status: str(body.status) ?? "applying" };
     },
 

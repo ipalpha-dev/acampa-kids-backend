@@ -24,6 +24,7 @@ const ORGANIZER = "person-organizer";
 const KID_A = "person-kid-a";
 const KID_B = "person-kid-b";
 const KID_C = "person-kid-c";
+const KID_C_REFUSED = "person-kid-c-refused";
 const LEADER = "person-leader";
 const SECRET = "whsec_test_secret_value";
 /** persons-api import ids are Mongo ObjectIds */
@@ -237,11 +238,11 @@ describe("the proxy speaks persons-api §20 with the importer's coordenação to
 
   test("the view: reviews with options + the importer's context, counts, failureReason, the fields a column may map to", async () => {
     const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
-    job = { ...job!, status: "failed", failureReason: "projectsTokenRejected" };
+    job = { ...job!, status: "failed", failureReason: "membership:outsideWindow" };
     const res = await call("GET", `/api/imports/${IMPORT_ID}`, undefined, token);
     expect(res.status).toBe(200);
     const v = res.body.import;
-    expect(v).toMatchObject({ status: "failed", failureReason: "projectsTokenRejected", counts: { rows: 3, pending: 2, batches: 0, created: 0, updated: 0, skipped: 0, failed: 0 } });
+    expect(v).toMatchObject({ status: "failed", failureReason: "membership:outsideWindow", counts: { rows: 3, pending: 2, batches: 0, created: 0, updated: 0, skipped: 0, failed: 0 } });
     expect(v.reviews[0]).toMatchObject({ id: "match:4:person", kind: "match", blocking: true, options: ["match", "new", "skip"], rowRef: 4, existingPersonId: KID_A, context: { name: "Ana Pequena" } });
     expect(v.reviews[1]).toMatchObject({ kind: "category", field: "app:transportation", rowRefs: [2, 3], context: { value: "Ônibus azul" } });
     expect(v.fields).toContain("responsible2Phone");
@@ -280,15 +281,14 @@ describe("the proxy speaks persons-api §20 with the importer's coordenação to
     expect(core.callsTo(`PATCH /imports/${IMPORT_ID}`)[0].json).toEqual(decisions);
   });
 
-  test("apply carries the coordenação PROJECTS token in X-Projects-Authorization; decisionsPending comes back with its pending list", async () => {
+  test("apply sends only the coordenação PERSONS token (persons-api enrolls with its own system scope — decision 75); decisionsPending comes back with its pending list", async () => {
     const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
     const res = await call("POST", `/api/imports/${IMPORT_ID}/apply`, {}, token);
     expect(res.status).toBe(200);
     expect(res.body.import.status).toBe("applying");
     const sent = core.callsTo(`POST /imports/${IMPORT_ID}/apply`)[0];
-    const projects = (sent.headers.get("x-projects-authorization") ?? "").replace(/^Bearer /, "");
-    expect(JSON.parse(atob(projects.split(".")[1]))).toMatchObject({ projectRole: "coordenacao", aud: "ipalpha:projects" });
-    expect(JSON.parse(atob((sent.headers.get("authorization") ?? "").slice(7).split(".")[1]))).toMatchObject({ aud: "ipalpha:persons" });
+    expect(sent.headers.get("x-projects-authorization")).toBeNull();
+    expect(JSON.parse(atob((sent.headers.get("authorization") ?? "").slice(7).split(".")[1]))).toMatchObject({ projectRole: "coordenacao", aud: "ipalpha:persons" });
 
     core.on("POST /imports/:id/apply", () => json({ reason: "decisionsPending", pending: [{ id: "required:transportation", kind: "required", field: "app:transportation" }, { id: "match:4:person", kind: "match" }] }, 409));
     const refused = await call("POST", `/api/imports/${IMPORT_ID}/apply`, {}, token);
@@ -325,6 +325,8 @@ describe("webhook (§21/§22): HMAC, idempotent, batches → participants", () =
       row(2, KID_A, { transportation: busId, bedroom: roomId, team: teamId, invitedBy: "Tia Bia", generalNotes: "gosta de desenhar" }),
       row(3, KID_B, { transportation: "unknown-bus", bedroom: roomId }, { status: "updated", unfilled: ["team"] }),
       { rowRef: 4, status: "failed", reason: "cannotLinkSelf", appFields: {}, unfilled: [] },
+      // an existing person whose membership projects-api refused (decision 81): data kept in core, no camp row here
+      { rowRef: 5, personId: KID_C_REFUSED, status: "failed", reason: "membership:conflict", appFields: { transportation: busId }, unfilled: [] },
     ];
     expect((await deliver(batchMessage(1, rows), "d-batch-1")).status).toBe(202);
     await settle();
@@ -335,7 +337,8 @@ describe("webhook (§21/§22): HMAC, idempotent, batches → participants", () =
     expect(await findCamperById(KID_B)).toMatchObject({ transportation: null, bedroom: null, importId: IMPORT_ID });
     expect((await findImportJob(IMPORT_ID))!.lastBatch).toBe(1);
     const event = sock.events().find((e) => e.type === "import-batch")!;
-    expect(event.data).toEqual({ importId: IMPORT_ID, batch: 1, rows: 3, applied: 2, skipped: 1, unfilled: 3, conflicts: 0 });
+    expect(await findCamperById(KID_C_REFUSED)).toBeNull();
+    expect(event.data).toEqual({ importId: IMPORT_ID, batch: 1, rows: 4, applied: 2, skipped: 2, unfilled: 3, conflicts: 0 });
     expect(JSON.stringify(sock.events().filter((e) => e.type.startsWith("import-")))).not.toContain("Tia Bia");
     expect((await deliver(batchMessage(1, rows), "d-batch-1")).body).toEqual({ ok: true, duplicate: true });
     // the same batch under another delivery id (socket + webhook) is not applied twice either

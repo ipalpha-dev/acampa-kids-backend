@@ -109,12 +109,13 @@ calls persons-api, never stored):
 | `POST /` multipart `file` (.csv/.xlsx ≤ 5 MB) + `subject` | 201 `{import}`. 400 `FILE_REQUIRED` \| `FILE_TOO_LARGE` \| `FILE_TYPE_INVALID` \| `SUBJECT_INVALID`; 409 `EDITION_UNKNOWN`. To persons-api: multipart `file` + `data` JSON `{editionId, targets, appFields}`; targets camper `{camper:{role:"participante", responsibleRole:"responsavel"}}`, team `{team:{role:"equipe"}}` |
 | `GET /:id` | `{import}` (also catches up batches persons-api has and this side has not applied — decision 77) |
 | `PATCH /:id` persons-api's own shape `{mapping?:{column: field\|null}, reviews?:[{id, choice?, value?, rows?}]}` | `{import}`; 400 `DECISIONS_INVALID` (unknown field, a category key the camp does not have, a text over its limit) |
-| `POST /:id/apply` | `{import}` (persons-api gets the coordenação projects token in `X-Projects-Authorization`); 409 `DECISIONS_PENDING` `{pending:[{id, kind, field?}]}` |
+| `POST /:id/apply` | `{import}` (only the coordenação persons token goes along — persons-api enrolls with its own system scope, decision 75); 409 `DECISIONS_PENDING` `{pending:[{id, kind, field?}]}`. A refused membership fails its row (`reason: "membership:<reason>"`; a person created by that row is rolled back, decision 81); an importer who may no longer register fails the run (`status:"failed"`, `failureReason:"membership:<reason>"`) |
 | `DELETE /:id` | `{success:true}` (cancel; rows wiped in core; batches applied before it are still read) |
 | `GET /:id/results?cursor=<batch number>` | `{items:[{batch, rows:[{rowRef, personId, status:"created"\|"updated"\|"skipped"\|"failed", reason, appFields, unfilled}]}], nextCursor}` — ids + app field values only; `cursor` = the FIRST batch to return (1-based), `nextCursor` null when no further batch exists yet |
 
 `import` = `{id, subject, status:"analysing"|"review"|"applying"|"done"|"failed"|"cancelled", failureReason
-(a failed apply resumes by applying again; `analysisFailed` is final), steps:[{name:"read"|"columns"|"matching"|
+(persons-api's: `analysisFailed` final; `membership:<reason>` the importer may no longer register / the edition refused;
+`projectsUnavailable` \| `interrupted` \| `internalError` resume by applying again; `projectsRefused` \| `projectNotFound` core setup), steps:[{name:"read"|"columns"|"matching"|
 "categories"|"observations"|"apply", done, total}], file:{name,size,sheet}|null, mapping, fields:[core field key |
 "app:<key>"], reviews:[{id, kind:"column"|"rowKind"|"invalid"|"match"|"duplicate"|"category"|"observations"|"required",
 blocking, options, rowRef, rowRefs, field, who, basis, existingPersonId, firstRowRef, choice, value, rows, resolved,

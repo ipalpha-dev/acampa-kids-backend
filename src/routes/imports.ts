@@ -4,7 +4,7 @@ import { requireManager } from "../middleware/roles";
 import { findImportJob, FINAL_IMPORT_STATUSES } from "../models/importJobs";
 import { campEditionId, coordinationToken } from "../services/acting";
 import { coreClient } from "../services/ipalpha";
-import { IpalphaRejected, PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
+import { IpalphaRejected, PERSONS_RESOURCE } from "../services/ipalpha/coreClient";
 import {
   appFieldsFor,
   campOfEdition,
@@ -52,9 +52,9 @@ function subjectParam(v: unknown): ImportSubject | null {
   return (IMPORT_SUBJECTS as readonly unknown[]).includes(v) ? (v as ImportSubject) : null;
 }
 
-/** The importer's coordenação token for `audience`, or the 403 answer. */
-function tokenOf(c: Context<Env>, audience: typeof PERSONS_RESOURCE | typeof PROJECTS_RESOURCE = PERSONS_RESOURCE): string | Response {
-  return coordinationToken(c.get("session"), audience) ?? fail(c, "COORDINATION_REQUIRED", "Só a coordenação importa planilhas no IPAlpha.", 403);
+/** The importer's coordenação PERSONS token, or the 403 answer. */
+function tokenOf(c: Context<Env>): string | Response {
+  return coordinationToken(c.get("session"), PERSONS_RESOURCE) ?? fail(c, "COORDINATION_REQUIRED", "Só a coordenação importa planilhas no IPAlpha.", 403);
 }
 
 imports.get("/app-fields", async (c) => {
@@ -135,11 +135,10 @@ imports.patch("/:id", async (c) => {
 imports.post("/:id/apply", async (c) => {
   const token = tokenOf(c);
   if (token instanceof Response) return token;
-  const projectsToken = tokenOf(c, PROJECTS_RESOURCE);
-  if (projectsToken instanceof Response) return projectsToken;
   const id = c.req.param("id");
   try {
-    await coreClient().applyImport(token, projectsToken, id);
+    // only the persons token: persons-api enrolls with its own system scope (decision 75)
+    await coreClient().applyImport(token, id);
   } catch (err) {
     if (err instanceof IpalphaRejected && err.status === 409 && err.reason === "decisionsPending") {
       const pending = (Array.isArray(err.body.pending) ? err.body.pending : [])

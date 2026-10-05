@@ -205,7 +205,12 @@ export interface ImportView {
   id: string;
   subject: ImportSubject | null;
   status: string;
-  /** a failed apply (`projectsTokenRejected`, `projectsUnavailable`, `interrupted`, `internalError`) resumes by applying again; `analysisFailed` is final */
+  /**
+   * persons-api's reason, passed through: `analysisFailed` (final), `membership:<reason>` (the importer may no longer
+   * register — roleNotHeld, notSteward, editionMismatch, noGrant, outsideWindow — or the whole call was refused,
+   * e.g. `membership:unknownEdition`), `projectsUnavailable` / `interrupted` / `internalError` (apply again resumes),
+   * `projectsRefused` / `projectNotFound` (core configuration). Row reasons come with the batches.
+   */
   failureReason: string | null;
   steps: { name: string; done: number; total: number }[];
   file: { name: string; size: number; sheet: string | null } | null;
