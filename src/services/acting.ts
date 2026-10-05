@@ -3,6 +3,7 @@ import { findCamp, setCampEditionId } from "../models/camps";
 import { coreClient } from "./ipalpha";
 import { IpalphaTokenRevoked, PERSONS_RESOURCE, PROJECTS_RESOURCE } from "./ipalpha/coreClient";
 import { openRoleTokens, revokeSession } from "./session";
+import { forgetSessionValidation, rememberValidation, rememberedValidation } from "./sessionValidation";
 import { holdsRole } from "./members";
 import { currentCampId } from "./campContext";
 import { COORDINATION_ROLE, RESPONSIBLE_ROLE, type CoreRole, type Session } from "../types";
@@ -88,14 +89,25 @@ export function coordinationJobToken(session: Session): { token: string; expires
   return { token, expiresAt: grant.expiresAt };
 }
 
-/** Re-check the acting token and live membership before exposing camp operations. */
+/**
+ * Re-check the acting token and live membership before exposing camp operations.
+ * A project-wide role (coordenação) asks pending kinds with NO edition: its token
+ * still carries the login edition (auth-api stamps every project token), and
+ * projects-api answers 400 unknownEdition once that edition is archived — which
+ * would end every history-camp request.
+ */
 export async function validateSessionRole(session: Session, role: CoreRole = session.activeRole): Promise<void> {
+  if (rememberedValidation(session._id, role, session.campId)) return;
   try {
     await coreClient().healthLists(roleToken(session, PERSONS_RESOURCE, role));
     const token = roleToken(session, PROJECTS_RESOURCE, role);
-    await coreClient().pendingKinds(token, openRoleTokens(session)[role]?.editionId ?? undefined);
+    const editionId = role === COORDINATION_ROLE ? undefined : openRoleTokens(session)[role]?.editionId ?? undefined;
+    await coreClient().pendingKinds(token, editionId);
     if (!(await holdsRole(session.personId, role, session.campId))) throw new IpalphaTokenRevoked("membership removed");
+    rememberValidation(session._id, role, session.campId);
   } catch (err) {
+    // a removed membership must not stay remembered for the rest of the window
+    forgetSessionValidation(session._id);
     if (err instanceof IpalphaTokenRevoked) await revokeSession(session._id);
     throw err;
   }

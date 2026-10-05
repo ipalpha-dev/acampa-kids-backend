@@ -20,6 +20,7 @@ import { ensureImportConflictIndexes } from "../models/importConflicts";
 import { ensureSessionIndexes, createSession } from "../services/session";
 import { ipalpha } from "../services/ipalpha";
 import { createIpalphaCoreClient, type RoleGrant } from "../services/ipalpha/coreClient";
+import { clearValidationMemo } from "../services/sessionValidation";
 import { clearMembersMemo } from "../services/members";
 import { activeCampId } from "../services/campContext";
 import { createApp } from "../app";
@@ -61,6 +62,7 @@ export async function resetData(): Promise<void> {
   await db.collection("camps").updateMany({}, { $set: { editionId: null } });
   resetStartRateLimit();
   clearMembersMemo();
+  clearValidationMemo();
   clearImportMemory();
   await clearImportJobs();
 }
@@ -98,7 +100,8 @@ export interface FakeWorld {
   sex: Map<string, string>;
   health: Map<string, Record<string, unknown>>;
   memberships: FakeMembership[];
-  editions: { id: string; year: number; current: boolean }[];
+  /** `archived` is unknown to pending-kinds (projects-api 400 unknownEdition); absent = active */
+  editions: { id: string; year: number; current: boolean; status?: "active" | "archived" }[];
   templates: Map<string, Record<string, unknown>>;
   messages: { slug: string; recipients: { personId: string; variables: Record<string, string> }[] }[];
   links: { subjectId: string; agentId: string }[];
@@ -208,9 +211,13 @@ export async function signPersonToken(keys: TestKeys, personId: string, override
   return new SignJWT(claims).setProtectedHeader({ alg: "ES256", kid: "test-key" }).setIssuedAt().setExpirationTime("5m").sign(key ?? keys.privateKey);
 }
 
-/** A per-role token as auth-api mints it (`projectRole`, `editionId` claims). */
+/**
+ * A per-role token as auth-api mints it (`projectRole`, `editionId` claims).
+ * Coordenação is project-wide, but a real token still carries the login edition
+ * (oauth.service.ts stamps every project token) — omitting it hid the archived-edition 400.
+ */
 export async function signRoleToken(keys: TestKeys, personId: string, role: string, aud: string, editionId: string | null = TEST_EDITION): Promise<string> {
-  return signPersonToken(keys, personId, { aud, projectId: TEST_PROJECT, projectRole: role, ...(editionId && role !== "coordenacao" ? { editionId } : {}) });
+  return signPersonToken(keys, personId, { aud, projectId: TEST_PROJECT, projectRole: role, ...(editionId ? { editionId } : {}) });
 }
 
 /** The `/oauth/token` (and relay v2) answer for a person holding `roles`. */
@@ -387,7 +394,8 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   core.on(`GET ${P}/me/pending-kinds`, (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
     const editionId = call.query.get("editionId");
-    if (editionId && !world.editions.some((e) => e.id === editionId)) return json({ reason: "unknownEdition" }, 400);
+    // projects-api pending-kinds: an archived edition is unknownEdition (active only)
+    if (editionId && !world.editions.some((e) => e.id === editionId && e.status !== "archived")) return json({ reason: "unknownEdition" }, 400);
     return json(pendingView(String(claimsOf(call).sub), editionId));
   });
   core.on(`POST ${P}/me/pending-kinds/confirm`, (call) => {
@@ -483,7 +491,7 @@ export async function sessionFor(keys: TestKeys, personId: string, roles: string
       role,
       tokens: { "ipalpha:persons": await signRoleToken(keys, personId, role, "ipalpha:persons"), "ipalpha:projects": await signRoleToken(keys, personId, role, "ipalpha:projects") },
       expiresAt: Date.now() + 3600_000,
-      editionId: role === "coordenacao" ? null : TEST_EDITION,
+      editionId: TEST_EDITION,
     })),
   );
   const { token } = await createSession({ personId, grants, activeRole, campId: activeCampId(), hours: 12 });

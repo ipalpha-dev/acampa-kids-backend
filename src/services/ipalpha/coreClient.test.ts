@@ -24,7 +24,8 @@ describe("core client", () => {
     expect(answer.roles.map((r) => r.role)).toEqual(["equipe", "coordenacao"]);
     expect(Object.keys(answer.roles[0].tokens).sort()).toEqual(["ipalpha:persons", "ipalpha:projects"]);
     expect(answer.roles[0].editionId).toBe(TEST_EDITION);
-    expect(answer.roles[1].editionId).toBeNull();
+    // coordenação is project-wide, but auth-api still stamps the login edition on its token
+    expect(answer.roles[1].editionId).toBe(TEST_EDITION);
   });
 
   test("a persons token from another key is rejected", async () => {

@@ -123,7 +123,8 @@ describe("pending kinds (decision 87)", () => {
       expect(bad.body.error.code).toBe("KINDS_INVALID");
     }
     expect(core.callsTo(`POST ${PENDING}/confirm`)).toHaveLength(0);
-    expect(core.callsTo(`GET ${PENDING}`)).toHaveLength(5);
+    // the role check is remembered ~15 s: staff once, responsável once (the bad bodies never reach core)
+    expect(core.callsTo(`GET ${PENDING}`)).toHaveLength(2);
   });
 
   test("core refusals keep their reason; a revoked responsável token ends the session", async () => {

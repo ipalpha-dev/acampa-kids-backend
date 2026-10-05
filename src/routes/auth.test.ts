@@ -94,6 +94,7 @@ describe("popup login (/api/auth/ipalpha) → per-role tokens → Acampa session
     const opened = openRoleTokens(doc as never);
     expect(Object.keys(opened).sort()).toEqual(["coordenacao", "equipe"]);
     expect(opened.equipe.editionId).toBe(TEST_EDITION);
+    expect(opened.coordenacao.editionId).toBe(TEST_EDITION);
   });
 
   test("a person with no role in the project → 403 NOT_IN_PROJECT, no session", async () => {
@@ -277,6 +278,49 @@ describe("camp-only authorization stays live", () => {
   });
 });
 
+test("coordenação keeps a history camp when the login edition is archived", async () => {
+  const { ObjectId } = await import("mongodb");
+  const { createCamp, activateCamp } = await import("../models/camps");
+  const { activeCampId } = await import("../services/campContext");
+  const original = activeCampId();
+  const past = await createCamp({ label: "Synthetic past camp", year: 2024, createdByPersonId: PERSON });
+  const current = await createCamp({ label: "Synthetic current camp", year: new Date().getFullYear(), createdByPersonId: PERSON });
+  await activateCamp(current._id);
+  world.editions = [
+    { id: "edition-2024", year: 2024, current: false, status: "archived" },
+    { id: TEST_EDITION, year: new Date().getFullYear(), current: true },
+  ];
+  try {
+    const token = await sessionFor(keys, PERSON, ["coordenacao"]);
+    const grants = openRoleTokens((await sessionDoc(token)) as never);
+    expect(grants.coordenacao.editionId).toBe(TEST_EDITION);
+    const switched = await call("POST", "/api/auth/camp", { campId: past._id }, token);
+    expect(switched.status).toBe(200);
+    const asked = core.callsTo("GET /projects/project-test-1/me/pending-kinds");
+    expect(asked.every((c) => !c.query.has("editionId"))).toBe(true);
+    const read = await call("GET", "/api/bedrooms", undefined, token);
+    expect(read.status).toBe(200);
+    expect(await sessionDoc(token)).not.toBeNull();
+  } finally {
+    await (await rawDb()).collection("camps").deleteMany({ _id: { $in: [new ObjectId(past._id), new ObjectId(current._id)] } });
+    await activateCamp(original);
+  }
+});
+
+test("a repeated camp read reuses the role check for about 15 s; a 401 still ends the session", async () => {
+  const token = await sessionFor(keys, PERSON, ["coordenacao"]);
+  expect((await call("GET", "/api/bedrooms", undefined, token)).status).toBe(200);
+  const afterFirst = core.callsTo("GET /health-lists").length;
+  expect((await call("GET", "/api/bedrooms", undefined, token)).status).toBe(200);
+  expect(core.callsTo("GET /health-lists")).toHaveLength(afterFirst);
+  const grants = openRoleTokens((await sessionDoc(token)) as never);
+  world.revoked.add(grants.coordenacao.tokens["ipalpha:persons"]);
+  const { clearValidationMemo } = await import("../services/sessionValidation");
+  clearValidationMemo();
+  expect((await call("GET", "/api/bedrooms", undefined, token)).status).toBe(401);
+  expect(await sessionDoc(token)).toBeNull();
+});
+
 test("expired active role grant blocks camp operations while the local session is live", async () => {
   const { seal } = await import("../services/session");
   const token = await sessionFor(keys, PERSON, ["coordenacao"]);
@@ -288,8 +332,9 @@ test("expired active role grant blocks camp operations while the local session i
   expect(await sessionDoc(token)).toBeNull();
 });
 
-test("websocket lifecycle rechecks live membership before another payload", async () => {
+test("websocket lifecycle rechecks live membership once the role memo expires", async () => {
   const { authorizedClientSession, addClient, removeClient } = await import("../services/realtime");
+  const { clearValidationMemo } = await import("../services/sessionValidation");
   const token = await sessionFor(keys, PERSON, ["coordenacao"]);
   const doc = (await sessionDoc(token))!;
   const closed: number[] = [];
@@ -298,6 +343,11 @@ test("websocket lifecycle rechecks live membership before another payload", asyn
   try {
     expect(await authorizedClientSession(client)).not.toBeNull();
     world.memberships = [];
+    const asked = core.callsTo("GET /projects/project-test-1/memberships").length;
+    // inside the 15 s window the remembered check still authorizes (ids only)
+    expect(await authorizedClientSession(client)).not.toBeNull();
+    expect(core.callsTo("GET /projects/project-test-1/memberships")).toHaveLength(asked);
+    clearValidationMemo();
     expect(await authorizedClientSession(client)).toBeNull();
     expect(closed).toEqual([4401]);
     expect(await sessionDoc(token)).toBeNull();

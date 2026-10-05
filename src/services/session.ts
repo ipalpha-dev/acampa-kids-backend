@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import { config } from "../config";
 import { getDb } from "../db";
 import { activeCampId } from "./campContext";
+import { forgetSessionValidation } from "./sessionValidation";
 import { closePersonSockets, closeSessionSockets } from "./realtime";
 import type { RoleGrant } from "./ipalpha/coreClient";
 import type { CoreRole, Session } from "../types";
@@ -154,6 +155,7 @@ export async function listLiveSessionsOf(personId: string): Promise<Session[]> {
 /** Role switch: another role of the list; the offline key rotates (the offline copy is role-scoped and gets wiped). */
 export async function switchSessionRole(id: string, role: CoreRole): Promise<Session | null> {
   const db = await getDb();
+  forgetSessionValidation(id);
   const res = await db.collection(COLLECTION).findOneAndUpdate({ _id: id as never }, { $set: { activeRole: role, offlineKey: newOfflineKey() } }, { returnDocument: "after" });
   return toSession(res as Record<string, unknown> | null);
 }
@@ -176,6 +178,7 @@ export async function dropSessionRole(session: Session, role: CoreRole): Promise
 /** Ends a session (logout, SESSION_ENDED, access window…): the record goes and its sockets close (4401). */
 export async function revokeSession(id: string): Promise<void> {
   const db = await getDb();
+  forgetSessionValidation(id);
   await db.collection(COLLECTION).deleteOne({ _id: id as never });
   closeSessionSockets(id);
 }
