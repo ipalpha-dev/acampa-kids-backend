@@ -1,6 +1,5 @@
 import { getDb } from "../db";
 import type { Camper, CamperChangeLog, CamperCheckin, CheckinKind, CheckinLog } from "../types";
-import { AI_REVIEW_MAX_ATTEMPTS, aiReviewDueFilter, aiReviewRetryAt } from "./aiReviewRetry";
 import { baseOf, PARTICIPANTS, toCheckin } from "./participants";
 
 export { toCheckin } from "./participants";
@@ -32,8 +31,7 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
 }
 
 /** Writable camp-ops fields of a kid. */
-export type CamperData = Pick<Camper, "team" | "transportation" | "bedroom" | "bed" | "caretakerId" | "qrToken" | "invitedBy" | "generalNotes" | "bedroomPreference" | "importId"> &
-  Partial<Pick<Camper, "draft" | "aiReviewStatus" | "aiReviewError" | "aiReviewStartedAt" | "aiReviewFinishedAt" | "aiReviewAttempts" | "aiReviewNextRetryAt" | "aiReviewStructured">>;
+export type CamperData = Pick<Camper, "team" | "transportation" | "bedroom" | "bed" | "caretakerId" | "qrToken" | "invitedBy" | "generalNotes" | "bedroomPreference" | "importId"> & Partial<Pick<Camper, "draft">>;
 
 export const EMPTY_CAMPER: CamperData = { team: null, transportation: null, bedroom: null, bed: null, caretakerId: null, qrToken: "", invitedBy: "", generalNotes: "", bedroomPreference: "", importId: null };
 
@@ -151,78 +149,6 @@ export async function listCamperChanges(personId: string): Promise<CamperChangeL
   const db = await getDb();
   const docs = await db.collection(CHANGE_LOG_COLLECTION).find({ personId }).sort({ at: -1 }).toArray();
   return docs.map((d) => ({ ...(d as unknown as CamperChangeLog), _id: String(d._id) }));
-}
-
-/** rows of imports paused for a new sign-in (decision 50) are left alone */
-const notPaused = (paused: readonly string[]) => (paused.length ? { importId: { $nin: [...paused] } } : {});
-
-/** Phase 1 claim — the fast structuring pass: fresh pendings plus due error retries (not yet structured). */
-export async function claimCampersForAiReview(limit = 15, paused: readonly string[] = []): Promise<Camper[]> {
-  return claim({ $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(new Date())], aiReviewStructured: { $ne: true }, ...notPaused(paused) }, limit);
-}
-
-/** Phase 2 claim — the slow generative cleanup: rows the structuring pass already handled. */
-export async function claimCampersForCleanup(limit = 15, paused: readonly string[] = []): Promise<Camper[]> {
-  return claim({ aiReviewStructured: true, $or: [{ aiReviewStatus: { $in: ["pending", "structured"] } }, aiReviewDueFilter(new Date())], ...notPaused(paused) }, limit);
-}
-
-/** Puts a claimed row back (its import paused for a new sign-in): no attempt counted, picked up again on resume. */
-export async function releaseCamperReview(personId: string, structured: boolean): Promise<void> {
-  const db = await getDb();
-  await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId, aiReviewStatus: "processing" }, { $set: { aiReviewStatus: structured ? "structured" : "pending", aiReviewStartedAt: null, updatedAt: new Date() } });
-}
-
-async function claim(filter: Record<string, unknown>, limit: number): Promise<Camper[]> {
-  const db = await getDb();
-  const out: Camper[] = [];
-  const now = new Date();
-  for (let i = 0; i < limit; i++) {
-    const doc = await db.collection(PARTICIPANTS).findOneAndUpdate(
-      { ...KIND, ...filter },
-      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: now } },
-      { sort: { createdAt: 1 }, returnDocument: "after" },
-    );
-    const camper = toCamper(doc as Record<string, unknown> | null);
-    if (!camper) break;
-    out.push(camper);
-  }
-  return out;
-}
-
-/** Requeues jobs left processing after a worker crash / rollout. */
-export async function requeueStaleAiReviews(staleMs = 10 * 60_000): Promise<number> {
-  const db = await getDb();
-  const res = await db.collection(PARTICIPANTS).updateMany(
-    { ...KIND, aiReviewStatus: "processing", aiReviewStartedAt: { $lt: new Date(Date.now() - staleMs) } },
-    { $set: { aiReviewStatus: "pending", aiReviewStartedAt: null, aiReviewError: "", updatedAt: new Date() } },
-  );
-  return res.modifiedCount;
-}
-
-/** Finishes phase 1: marks the row "structured" (the health result was written to persons-api). */
-export async function finishCamperStructure(personId: string, error = ""): Promise<Camper | null> {
-  if (!error) return updateCamper(personId, { aiReviewStatus: "structured", aiReviewStructured: true, aiReviewError: "", aiReviewNextRetryAt: null });
-  return failCamperReview(personId, error);
-}
-
-async function failCamperReview(personId: string, error: string): Promise<Camper | null> {
-  const db = await getDb();
-  const now = new Date();
-  const after = await db.collection(PARTICIPANTS).findOneAndUpdate(
-    { ...KIND, personId },
-    { $set: { aiReviewStatus: "error", aiReviewError: error, aiReviewFinishedAt: now, updatedAt: now }, $inc: { aiReviewAttempts: 1 } },
-    { returnDocument: "after" },
-  );
-  const attempts = typeof (after as Record<string, unknown> | null)?.aiReviewAttempts === "number" ? ((after as Record<string, unknown>).aiReviewAttempts as number) : 1;
-  const next = attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null;
-  await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId }, { $set: { aiReviewNextRetryAt: next, updatedAt: new Date() } });
-  return toCamper(after ? { ...(after as Record<string, unknown>), aiReviewNextRetryAt: next } : null);
-}
-
-/** Finishes phase 2: the terminal "reviewed" state (or an error with retry). */
-export async function finishCamperAiReview(personId: string, error = ""): Promise<Camper | null> {
-  if (!error) return updateCamper(personId, { aiReviewStatus: "reviewed", aiReviewError: "", aiReviewFinishedAt: new Date(), aiReviewNextRetryAt: null });
-  return failCamperReview(personId, error);
 }
 
 export async function deleteCamper(personId: string): Promise<boolean> {

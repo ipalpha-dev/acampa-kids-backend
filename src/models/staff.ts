@@ -1,7 +1,6 @@
 import { getDb } from "../db";
 import type { CamperCheckin, Staff, VestStatus } from "../types";
 import { ROOM_ROLES } from "../types";
-import { AI_REVIEW_MAX_ATTEMPTS, aiReviewDueFilter, aiReviewRetryAt } from "./aiReviewRetry";
 import { baseOf, PARTICIPANTS, toCheckin } from "./participants";
 
 /**
@@ -36,8 +35,7 @@ function toVest(v: unknown): VestStatus {
 export const NO_VEST: VestStatus = { delivered: null, returned: null };
 
 /** Writable camp-ops fields of a team member. */
-export type StaffData = Pick<Staff, "active" | "team" | "transportation" | "bedroom" | "roomRole" | "generalNotes" | "importId"> &
-  Partial<Pick<Staff, "draft" | "aiReviewStatus" | "aiReviewError" | "aiReviewStartedAt" | "aiReviewFinishedAt" | "aiReviewAttempts" | "aiReviewNextRetryAt" | "aiReviewStructured">>;
+export type StaffData = Pick<Staff, "active" | "team" | "transportation" | "bedroom" | "roomRole" | "generalNotes" | "importId"> & Partial<Pick<Staff, "draft">>;
 
 export const EMPTY_STAFF: StaffData = { active: true, team: null, transportation: null, bedroom: null, roomRole: "helper", generalNotes: "", importId: null };
 
@@ -70,82 +68,6 @@ export async function updateStaff(personId: string, patch: Partial<StaffData>): 
   const db = await getDb();
   const res = await db.collection(PARTICIPANTS).findOneAndUpdate({ ...KIND, personId }, { $set: { ...patch, updatedAt: new Date() } }, { returnDocument: "after" });
   return toStaff(res as Record<string, unknown> | null);
-}
-
-async function claim(filter: Record<string, unknown>, limit: number): Promise<Staff[]> {
-  const db = await getDb();
-  const out: Staff[] = [];
-  for (let i = 0; i < limit; i++) {
-    const now = new Date();
-    const doc = await db.collection(PARTICIPANTS).findOneAndUpdate(
-      { ...KIND, ...filter },
-      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: now } },
-      { sort: { createdAt: 1 }, returnDocument: "after" },
-    );
-    const staff = toStaff(doc as Record<string, unknown> | null);
-    if (!staff) break;
-    out.push(staff);
-  }
-  return out;
-}
-
-/** rows of imports paused for a new sign-in (decision 50) are left alone */
-const notPaused = (paused: readonly string[]) => (paused.length ? { importId: { $nin: [...paused] } } : {});
-
-/** Phase 1 claim — the fast structuring pass; skips rows already structured. */
-export async function claimStaffForAiReview(limit: number, paused: readonly string[] = []): Promise<Staff[]> {
-  return claim({ $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(new Date())], aiReviewStructured: { $ne: true }, ...notPaused(paused) }, limit);
-}
-
-/** Phase 2 claim — the slow generative cleanup. */
-export async function claimStaffForCleanup(limit: number, paused: readonly string[] = []): Promise<Staff[]> {
-  return claim({ aiReviewStructured: true, $or: [{ aiReviewStatus: { $in: ["pending", "structured"] } }, aiReviewDueFilter(new Date())], ...notPaused(paused) }, limit);
-}
-
-/** Puts a claimed row back (its import paused for a new sign-in): no attempt counted, picked up again on resume. */
-export async function releaseStaffReview(personId: string, structured: boolean): Promise<void> {
-  const db = await getDb();
-  await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId, aiReviewStatus: "processing" }, { $set: { aiReviewStatus: structured ? "structured" : "pending", aiReviewStartedAt: null, updatedAt: new Date() } });
-}
-
-async function failStaffReview(personId: string, error: string): Promise<number> {
-  const db = await getDb();
-  const now = new Date();
-  const after = await db.collection(PARTICIPANTS).findOneAndUpdate(
-    { ...KIND, personId },
-    { $set: { aiReviewStatus: "error", aiReviewError: error, aiReviewFinishedAt: now, updatedAt: now }, $inc: { aiReviewAttempts: 1 } },
-    { returnDocument: "after" },
-  );
-  const attempts = typeof (after as Record<string, unknown> | null)?.aiReviewAttempts === "number" ? ((after as Record<string, unknown>).aiReviewAttempts as number) : 1;
-  await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId }, { $set: { aiReviewNextRetryAt: attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null, updatedAt: new Date() } });
-  return attempts;
-}
-
-/** Finishes phase 1 (structured). Returns the failed-attempt count on error. */
-export async function finishStaffStructure(personId: string, error = ""): Promise<number> {
-  if (!error) {
-    await updateStaff(personId, { aiReviewStatus: "structured", aiReviewStructured: true, aiReviewError: "", aiReviewNextRetryAt: null });
-    return 0;
-  }
-  return failStaffReview(personId, error);
-}
-
-/** Finishes phase 2 (reviewed). Returns the failed-attempt count on error. */
-export async function finishStaffAiReview(personId: string, error = ""): Promise<number> {
-  if (!error) {
-    await updateStaff(personId, { aiReviewStatus: "reviewed", aiReviewError: "", aiReviewFinishedAt: new Date(), aiReviewNextRetryAt: null });
-    return 0;
-  }
-  return failStaffReview(personId, error);
-}
-
-export async function requeueStaleStaffAiReviews(staleMs = 15 * 60_000): Promise<number> {
-  const db = await getDb();
-  const res = await db.collection(PARTICIPANTS).updateMany(
-    { ...KIND, aiReviewStatus: "processing", aiReviewStartedAt: { $lt: new Date(Date.now() - staleMs) } },
-    { $set: { aiReviewStatus: "pending", aiReviewStartedAt: null, aiReviewError: "", updatedAt: new Date() } },
-  );
-  return res.modifiedCount;
 }
 
 /** Marks the person as arrived (`null` undoes it). */

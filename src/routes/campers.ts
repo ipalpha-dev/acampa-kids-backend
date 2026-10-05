@@ -63,10 +63,6 @@ export function serializeCamper(k: Camper) {
     busReturnCheckin: k.busReturnCheckin,
     parentEditedAt: k.parentEditedAt,
     importId: k.importId,
-    aiReviewStatus: k.aiReviewStatus,
-    aiReviewError: k.aiReviewError,
-    aiReviewStartedAt: k.aiReviewStartedAt,
-    aiReviewFinishedAt: k.aiReviewFinishedAt,
     createdAt: k.createdAt,
     updatedAt: k.updatedAt,
   };
@@ -84,7 +80,7 @@ export function serializeCamperFor(k: Camper, scope: Scope) {
   if (vis === "full" && !scope.all && scope.kidsRoomsDraft && scope.parentKids.length > 0) return { ...full, bedroom: null, bed: null, caretakerId: null };
   if (vis === "full") return full;
   if (vis === "care") return { ...full, invitedBy: "", qrToken: "", importId: null, contactsHidden: true };
-  return { ...full, redacted: true, invitedBy: "", qrToken: "", bed: null, generalNotes: "", bedroomPreference: "", parentEditedAt: null, importId: null, aiReviewStatus: null, aiReviewError: "", aiReviewStartedAt: null, aiReviewFinishedAt: null };
+  return { ...full, redacted: true, invitedBy: "", qrToken: "", bed: null, generalNotes: "", bedroomPreference: "", parentEditedAt: null, importId: null };
 }
 
 export function serializeCamperList(list: Camper[], scope: Scope) {

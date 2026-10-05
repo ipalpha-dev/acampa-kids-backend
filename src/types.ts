@@ -228,18 +228,10 @@ interface ParticipantBase {
   checkin: CamperCheckin | null;
   /** free camp-ops notes (Acampa keeps them — decision 33) */
   generalNotes: string;
-  /** spreadsheet import process that created this row; null for regular records */
+  /** the persons-api import (§20) whose batch created / last filled this row; null for regular records */
   importId: string | null;
   /** import dry-run row; hidden until apply */
   draft?: boolean;
-  /** bulk AI health-note triage for spreadsheet imports (health is written to persons-api) */
-  aiReviewStatus: CamperAiReviewStatus | null;
-  aiReviewError: string;
-  aiReviewStartedAt: Date | null;
-  aiReviewFinishedAt: Date | null;
-  aiReviewAttempts?: number;
-  aiReviewNextRetryAt?: Date | null;
-  aiReviewStructured?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -340,75 +332,6 @@ export interface Camper extends ParticipantBase {
 }
 
 export type CamperSex = "F" | "M";
-
-/** Background AI triage state for campers created by a spreadsheet import. "structured" = the fast Jev pass finished (health fields already updated); the slow cleanup pass is still pending. */
-export type CamperAiReviewStatus = "pending" | "processing" | "structured" | "reviewed" | "error";
-
-/** One reusable raw spreadsheet value → resolved system value mapping. */
-export interface CamperImportDictionaryEntry {
-  field: string;
-  raw: string;
-  normalized: string;
-  value: unknown;
-  label: string;
-  draft: boolean;
-  kind: "column" | "text" | "boolean" | "date" | "bedroom" | "transportation" | "team" | "staff" | "category";
-}
-
-/**
- * `needsSignIn` (decision 50): the background AI health pass paused because the importer's IPAlpha token was
- * revoked / expired — the importer signs in again and calls `POST …/:id/resume`; then it is `completed` again.
- */
-export type CamperImportStatus = "needs_mapping" | "analyzing" | "panic" | "review" | "ready" | "importing" | "completed" | "needsSignIn" | "error";
-export type CamperImportReviewKind = "leader" | "date" | "guardianName" | "phone" | "cpf" | "email" | "duplicate";
-
-export interface CamperImportReviewItem {
-  id: string;
-  row: number;
-  kind: CamperImportReviewKind;
-  field: string;
-  kidName: string;
-  guardianName: string;
-  birthDate: string;
-  age: number | null;
-  emergencyContact: string;
-  original: string;
-  value: string;
-  skip: boolean;
-  resolved: boolean;
-  /** A grouped review (notably one missing leader) can affect several spreadsheet rows. */
-  affectedRows?: number[];
-  options?: { id: string; label: string }[];
-  /** Existing registry record matched by the deterministic camper identity key. */
-  existingId?: string;
-  existingData?: Record<string, unknown>;
-  incomingData?: Record<string, unknown>;
-  mergedData?: Record<string, unknown>;
-  /** True when the two versions have complementary information to combine. */
-  mergeAvailable?: boolean;
-}
-
-export type StaffImportReviewKind = "phone" | "duplicate" | "bedroom" | "roomRole" | "inactive";
-export interface StaffImportReviewItem {
-  id: string;
-  row: number;
-  kind: StaffImportReviewKind;
-  field: string;
-  memberName: string;
-  original: string;
-  value: string;
-  skip: boolean;
-  resolved: boolean;
-  context?: string;
-  existingId?: string;
-  existingName?: string;
-  existingPhone?: string | null;
-  options?: { id: string; label: string }[];
-  existingData?: Record<string, unknown>;
-  incomingData?: Record<string, unknown>;
-  mergedData?: Record<string, unknown>;
-  mergeAvailable?: boolean;
-}
 
 export type RoomRole = "caretaker" | "helper";
 export const ROOM_ROLES: readonly RoomRole[] = ["caretaker", "helper"];

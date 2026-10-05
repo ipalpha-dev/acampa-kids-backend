@@ -42,6 +42,14 @@ export interface IpalphaConfig {
   projectId: string;
   /** 32-byte AES-256-GCM key (base64 or hex) that encrypts the per-role core tokens kept in the session */
   sessionTokenKey: string;
+  /**
+   * OPTIONAL (§21): dispatch-api origin for the ONE app-channel socket
+   * (`{url}/api/dispatch/socket.io`, namespace `/apps`). Empty = no socket —
+   * imports still work (webhook + reconciliation on the importer's reads).
+   */
+  dispatchUrl: string;
+  /** OPTIONAL (§22): the app webhook signing secret (shown once in Mordomia / Developers portal). Empty = `POST /api/dispatch/webhook` refuses. */
+  webhookSecret: string;
 }
 
 const trimSlash = (v: string) => v.replace(/\/+$/, "");
@@ -66,6 +74,8 @@ export function readIpalphaConfig(env: Record<string, string | undefined>): Ipal
     systemClientSecret: get("IPALPHA_SYSTEM_CLIENT_SECRET"),
     projectId: get("IPALPHA_PROJECT_ID"),
     sessionTokenKey: get("SESSION_TOKEN_KEY"),
+    dispatchUrl: trimSlash(get("IPALPHA_DISPATCH_URL")),
+    webhookSecret: get("IPALPHA_WEBHOOK_SECRET"),
   };
 }
 
@@ -125,15 +135,6 @@ export const config = {
     matchThreshold: Number(process.env.FACE_MATCH_THRESHOLD ?? 0.22),
     /** Weak detections still count — group shots and hats are the usual camp photo. */
     minDetectionScore: Number(process.env.FACE_MIN_DETECTION_SCORE ?? 0.4),
-  },
-
-  /**
-   * Background import worker → API callback. The worker POSTs per-record
-   * review results so the API can push a websocket event; the shared secret
-   * authenticates it (empty = the endpoint refuses everything).
-   */
-  worker: {
-    secret: process.env.WORKER_SECRET ?? "",
   },
 
   /** OpenAI-compatible gateway for the editor's AI helper (empty key = feature hidden) */

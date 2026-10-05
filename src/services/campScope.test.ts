@@ -5,7 +5,7 @@ import { HANDLED, PASSTHROUGH, SCOPED, scopeBulkOp, scopeDoc, scopeDocs, scopeFi
 
 describe("SCOPED", () => {
   test("lists the real collections the app writes campId on", () => {
-    for (const name of ["participants", "bedrooms", "categories", "transports", "teams", "scores", "schedule_roles", "schedule_events", "prep_sections", "instructions", "occurrences", "medicationDoses", "gallery", "settings", "checkinLog", "camperChangeLog", "camperLookups", "camperImports", "ai_usage", "sms_usage"]) {
+    for (const name of ["participants", "bedrooms", "categories", "transports", "teams", "scores", "schedule_roles", "schedule_events", "prep_sections", "instructions", "occurrences", "medicationDoses", "gallery", "settings", "checkinLog", "camperChangeLog", "camperLookups", "ai_usage", "sms_usage"]) {
       expect(SCOPED.has(name)).toBe(true);
     }
     for (const name of ["sessions", "camps", "seeds", "camperImportDictionary", "files", "userCampState"]) {
@@ -162,7 +162,6 @@ describe("scoped wrapper coverage guard", () => {
 
   // `= db.collection(...)` / `= (await getDb()).collection(...)` variable assignments found by hand
   // (grep -rn '= db\.collection(\|= (await getDb())\.collection(' src scripts):
-  //   src/models/cleanup.ts:280   const col = db.collection("camperImportDictionary")  → .countDocuments (unscoped collection, still covered)
   //   scripts/seed-medications.ts:59  const campers = db.collection("campers")          → .find, .updateOne (both HANDLED)
   test("methods used on named collection variables are all handled or passthrough", () => {
     const usedOnVariables = ["countDocuments", "find", "updateOne"];

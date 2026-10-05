@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "worker": "bun run src/worker.ts",
     "backup": "bun run scripts/backup.ts"
   },
   "dependencies": {
@@ -14,6 +13,7 @@
     "jose": "^5.9.6",
     "mongodb": "^6.12.0",
     "sanitize-html": "^2.17.7",
+    "socket.io-client": "^4.8.4",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

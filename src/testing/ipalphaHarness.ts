@@ -13,6 +13,8 @@ import { ensureCampsCollection } from "../models/camps";
 import { ensureFirstCamp } from "../services/campMigration";
 import { ensureLoginStateIndexes } from "../models/ipalphaLoginStates";
 import { ensureParticipantIndexes } from "../models/participants";
+import { ensureDispatchDeliveryIndexes } from "../models/dispatchDeliveries";
+import { clearTrackedImports } from "../services/personImports";
 import { ensureSessionIndexes, createSession } from "../services/session";
 import { ipalpha } from "../services/ipalpha";
 import { createIpalphaCoreClient, type RoleGrant } from "../services/ipalpha/coreClient";
@@ -35,6 +37,7 @@ export async function startTestDb(): Promise<void> {
   await ensureSessionIndexes();
   await ensureParticipantIndexes();
   await ensureLoginStateIndexes();
+  await ensureDispatchDeliveryIndexes();
 }
 
 export async function stopTestDb(): Promise<void> {
@@ -48,12 +51,13 @@ export async function stopTestDb(): Promise<void> {
 /** Empties everything a test touches (the camp registry stays; its edition id is forgotten). */
 export async function resetData(): Promise<void> {
   const db = await rawDb();
-  for (const name of ["sessions", "participants", "settings", "userCampState", "ipalphaLoginStates", "camperImports", "schedule_events", "checkinLog", "camperChangeLog", "camperLookups", "occurrences", "medicationDoses", "scores", "sms_usage", "bedrooms"]) {
+  for (const name of ["sessions", "participants", "settings", "userCampState", "ipalphaLoginStates", "dispatchDeliveries", "transports", "teams", "schedule_events", "checkinLog", "camperChangeLog", "camperLookups", "occurrences", "medicationDoses", "scores", "sms_usage", "bedrooms"]) {
     await db.collection(name).deleteMany({});
   }
   await db.collection("camps").updateMany({}, { $set: { editionId: null } });
   resetStartRateLimit();
   clearMembersMemo();
+  clearTrackedImports();
 }
 
 // ── fake IPAlpha core ─────────────────────────────────────────────────────
@@ -65,6 +69,8 @@ export interface FakeCall {
   headers: Headers;
   form: URLSearchParams | null;
   json: unknown;
+  /** multipart bodies (persons-api imports) */
+  multipart: FormData | null;
 }
 
 type Handler = (call: FakeCall) => Response | Promise<Response>;
@@ -115,7 +121,8 @@ export function createFakeCore() {
     const headers = new Headers(init?.headers);
     const raw = typeof init?.body === "string" ? init.body : null;
     const isForm = headers.get("content-type")?.includes("x-www-form-urlencoded");
-    const call: FakeCall = { method, path: url.pathname, query: url.searchParams, headers, form: raw && isForm ? new URLSearchParams(raw) : null, json: raw && !isForm ? JSON.parse(raw) : null };
+    const multipart = init?.body instanceof FormData ? init.body : null;
+    const call: FakeCall = { method, path: url.pathname, query: url.searchParams, headers, form: raw && isForm ? new URLSearchParams(raw) : null, json: raw && !isForm ? JSON.parse(raw) : null, multipart };
     calls.push(call);
     const exact = handlers.get(`${method} ${url.pathname}`);
     if (exact) return exact(call);

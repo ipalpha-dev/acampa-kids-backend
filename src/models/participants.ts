@@ -1,5 +1,5 @@
 import { getDb } from "../db";
-import type { CamperAiReviewStatus, CamperCheckin, CoreRole } from "../types";
+import type { CamperCheckin, CoreRole } from "../types";
 
 /**
  * `participants` (CONTRACTS §15, approved shape): one row per person per camp
@@ -19,10 +19,6 @@ export function toCheckin(v: unknown): CamperCheckin | null {
   return { at: o.at, byPersonId: (o.byPersonId as string) ?? "", byRole: (o.byRole as CoreRole) ?? "equipe", ...(typeof o.note === "string" && o.note ? { note: o.note } : {}) };
 }
 
-export function toAiStatus(v: unknown): CamperAiReviewStatus | null {
-  return (["pending", "processing", "structured", "reviewed", "error"] as CamperAiReviewStatus[]).includes(v as CamperAiReviewStatus) ? (v as CamperAiReviewStatus) : null;
-}
-
 /** The base fields every participant row carries (see ParticipantBase in types.ts). */
 export function baseOf(doc: Record<string, unknown>) {
   return {
@@ -35,13 +31,6 @@ export function baseOf(doc: Record<string, unknown>) {
     generalNotes: (doc.generalNotes as string) ?? "",
     importId: (doc.importId as string) ?? null,
     draft: doc.draft === true,
-    aiReviewStatus: toAiStatus(doc.aiReviewStatus),
-    aiReviewError: (doc.aiReviewError as string) ?? "",
-    aiReviewStartedAt: (doc.aiReviewStartedAt as Date) ?? null,
-    aiReviewFinishedAt: (doc.aiReviewFinishedAt as Date) ?? null,
-    aiReviewAttempts: typeof doc.aiReviewAttempts === "number" ? doc.aiReviewAttempts : 0,
-    aiReviewNextRetryAt: (doc.aiReviewNextRetryAt as Date) ?? null,
-    aiReviewStructured: doc.aiReviewStructured === true,
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
   };
@@ -69,6 +58,4 @@ export async function ensureParticipantIndexes(): Promise<void> {
   await db.collection(PARTICIPANTS).createIndex({ team: 1 });
   await db.collection(PARTICIPANTS).createIndex({ caretakerId: 1 });
   await db.collection(PARTICIPANTS).createIndex({ qrToken: 1 }, { sparse: true });
-  await db.collection(PARTICIPANTS).createIndex({ aiReviewStatus: 1, createdAt: 1 });
-  await db.collection(PARTICIPANTS).createIndex({ importId: 1, aiReviewStatus: 1 });
 }

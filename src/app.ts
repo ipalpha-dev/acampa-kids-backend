@@ -29,11 +29,9 @@ import assistantRoutes from "./routes/assistant";
 import cleanupRoutes from "./routes/cleanup";
 import seedsRoutes from "./routes/seeds";
 import wizardRoutes from "./routes/wizard";
-import camperImportRoutes from "./routes/camperImports";
-import staffImportRoutes from "./routes/staffImports";
-import workerRoutes from "./routes/worker";
 import campRoutes from "./routes/camps";
-import superRoutes from "./routes/super";
+import importRoutes from "./routes/imports";
+import dispatchWebhookRoutes from "./routes/dispatchWebhook";
 
 /**
  * The HTTP app (every route + the core error handler), without the boot side
@@ -73,10 +71,10 @@ export function createApp(opts: { logRequests?: boolean; bootGate?: boolean } = 
   app.route("/api/bedrooms", bedroomRoutes);
   app.route("/api/schedule", scheduleRoutes);
   app.route("/api/campers", camperRoutes);
-  app.route("/api/camper-imports", camperImportRoutes);
-  app.route("/api/staff-imports", staffImportRoutes);
-  // background import worker callbacks (shared WORKER_SECRET, not a user session)
-  app.route("/api/worker", workerRoutes);
+  // spreadsheet imports run in persons-api (§20); Acampa proxies with the importer's coordenação token
+  app.route("/api/imports", importRoutes);
+  // dispatch app-channel fallback: signed deliveries when the socket is down (§21/§22 — HMAC, no session)
+  app.route("/api/dispatch", dispatchWebhookRoutes);
   app.route("/api/settings", settingsRoutes);
   app.route("/api/cleanup", cleanupRoutes);
   app.route("/api/seeds", seedsRoutes);
@@ -101,7 +99,6 @@ export function createApp(opts: { logRequests?: boolean; bootGate?: boolean } = 
   app.route("/api/realtime", realtimeRoutes);
   // the camps registry (multi-year): GET /active is public, the rest admin / organizer
   app.route("/api/camps", campRoutes);
-  app.route("/api/super", superRoutes);
   // person data at use: names (paged), data kinds via the acting role token, health lists (services/people.ts)
   app.route("/api/people", peopleRoutes);
 

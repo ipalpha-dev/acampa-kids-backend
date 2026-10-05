@@ -168,33 +168,15 @@ export async function rekeySessionSockets(next: { id: string; role: Role; coreRo
   return mine.length;
 }
 
-/** targeted event, not a collection replace: one record's background review advanced */
-export type AiReviewedKind = "camper" | "staff";
-export type AiReviewedStatus = "structured" | "reviewed" | "error";
-
 /**
- * Tells every connected client about one record's background AI review:
- * "structured" = the fast Jev pass wrote the structured health fields
- * (cleanup still pending); "reviewed"/"error" are terminal. The payload
- * carries only the record identity — clients re-read what they need
- * (or ignore it; unknown types are skipped).
+ * A persons-api import (§20) moved on — progress of a step, or a batch Acampa
+ * just applied to `participants`. Only the IMPORTER's sockets of that camp
+ * hear it (ids and counts only, never row data); the import screen re-reads
+ * `GET /api/imports/:id` and the results.
  */
-export function emitAiReviewed(kind: AiReviewedKind, id: string, status: AiReviewedStatus, attempts: number): void {
+export function emitImportEvent(personId: string, campId: string, type: "import-progress" | "import-batch", data: Record<string, unknown>): void {
   if (clients.size === 0) return;
-  const campId = currentCampId();
-  const payload = JSON.stringify({ type: "ai-review-done", at: new Date().toISOString(), data: { kind, id, status, attempts } });
-  for (const client of clients) if (client.campId === campId) safeSend(client, payload);
-}
-
-/**
- * An import's background health pass paused for a new sign-in (decision 50):
- * only the importer's sockets of that camp hear it — the import screen offers
- * "sign in again and resume". Ids only.
- */
-export function emitImportNeedsSignIn(importId: string, personId: string, subject: "camper" | "staff"): void {
-  if (clients.size === 0) return;
-  const campId = currentCampId();
-  const payload = JSON.stringify({ type: "import-needs-sign-in", at: new Date().toISOString(), data: { importId, subject } });
+  const payload = JSON.stringify({ type, at: new Date().toISOString(), data });
   for (const client of clients) if (client.campId === campId && client.personId === personId) safeSend(client, payload);
 }
 

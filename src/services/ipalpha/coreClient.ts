@@ -24,6 +24,7 @@ export const PERSONS_RESOURCE = "ipalpha:persons";
 export const PROJECTS_RESOURCE = "ipalpha:projects";
 export const AUTH_RESOURCE = "ipalpha:auth";
 export const NOTIFICATIONS_RESOURCE = "ipalpha:notifications";
+export const DISPATCH_RESOURCE = "ipalpha:dispatch";
 /** audiences Acampa asks for at sign-in (§10) */
 export const LOGIN_RESOURCES = [PERSONS_RESOURCE, PROJECTS_RESOURCE, AUTH_RESOURCE] as const;
 
@@ -34,6 +35,7 @@ export const SCOPES = {
   templates: "projects:templates",
   appNames: "persons:app-names",
   sendTemplate: "notifications:send-template",
+  appChannel: "dispatch:app-channel",
 } as const;
 
 const EXTERNAL_TOKEN_USE = "external_access";
@@ -218,6 +220,57 @@ export interface MembershipInput {
   involved?: { personId: string; purpose: "responsible"; kinds: string[] }[];
 }
 
+/** One app-owned field Acampa hands persons-api on an import (§20 `appFields`). */
+export interface ImportAppField {
+  key: string;
+  description: string;
+  kind: "text" | "category";
+  categories?: { key: string; label: string }[];
+  required: boolean;
+}
+
+export type ImportRowStatus = "created" | "updated" | "skipped" | "failed";
+
+/** One row of a §20 batch: ids + app field values only (decision 67). */
+export interface ImportBatchRow {
+  rowRef: string;
+  personId: string | null;
+  status: ImportRowStatus;
+  reason: string | null;
+  appFields: Record<string, string>;
+  unfilled: string[];
+}
+
+export interface ImportBatch {
+  batch: number;
+  rows: ImportBatchRow[];
+}
+
+const ROW_STATUSES: readonly ImportRowStatus[] = ["created", "updated", "skipped", "failed"];
+
+/** A §20/§21 batch (persons `GET /imports/:id/batches` item, or the dispatch `person-import.batch` message). */
+export function toImportBatch(v: unknown): ImportBatch | null {
+  const o = obj(v);
+  const batch = typeof o.batch === "number" && Number.isInteger(o.batch) && o.batch >= 0 ? o.batch : null;
+  if (batch === null) return null;
+  const rows = (Array.isArray(o.rows) ? o.rows : [])
+    .map((r) => obj(r))
+    .map((r) => ({
+      rowRef: str(r.rowRef) ?? (typeof r.rowRef === "number" ? String(r.rowRef) : ""),
+      personId: str(r.personId),
+      status: (ROW_STATUSES.includes(r.status as ImportRowStatus) ? r.status : "failed") as ImportRowStatus,
+      reason: str(r.reason),
+      // values may come as string | number | boolean | null (dispatch AppImportRowDto) — Acampa keeps text; null = empty
+      appFields: Object.fromEntries(
+        Object.entries(obj(r.appFields))
+          .filter(([, val]) => typeof val === "string" || typeof val === "number" || typeof val === "boolean")
+          .map(([k, val]) => [k, String(val)]),
+      ) as Record<string, string>,
+      unfilled: strings(r.unfilled),
+    }));
+  return { batch, rows };
+}
+
 export type LocalizedText = Record<string, string>;
 
 export interface MessageTemplate {
@@ -291,6 +344,20 @@ export interface IpalphaCoreClient {
    * role may read `medical` of the targets. Logged by core as a basic-register view, never as a health read.
    */
   healthFlags(token: string, personIds: string[]): Promise<Map<string, boolean>>;
+
+  // ── persons-api imports (§20, the importer's per-role token) ──
+  /** `POST /projects/:projectId/imports` multipart: `file` + `editionId`, `targets`, `appFields` (JSON strings) */
+  createImport(token: string, input: { file: Blob; fileName: string; editionId?: string; targets: Record<string, string>; appFields: ImportAppField[] }): Promise<Record<string, unknown>>;
+  getImport(token: string, importId: string): Promise<Record<string, unknown>>;
+  patchImport(token: string, importId: string, decisions: Record<string, unknown>): Promise<Record<string, unknown>>;
+  applyImport(token: string, importId: string): Promise<Record<string, unknown>>;
+  cancelImport(token: string, importId: string): Promise<void>;
+  /** `GET /imports/:id/batches?cursor&limit≤10` — ids + app field values only (decision 67) */
+  importBatches(token: string, importId: string, query?: { cursor?: string; limit?: number }): Promise<Page<ImportBatch>>;
+
+  // ── dispatch-api (app client) ──
+  /** §21 app-channel handshake token (`dispatch:app-channel`, claim appId); `fresh` drops the cached one first */
+  appChannelToken(fresh?: boolean): Promise<{ token: string; expiresAt: number }>;
 
   // ── notifications-api (app client) ──
   sendTemplate(input: { templateSlug: string; recipients: MessageRecipient[]; editionId?: string }): Promise<{ personId: string; status: MessageStatus }[]>;
@@ -381,9 +448,13 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
   const project = () => encodeURIComponent(cfg.projectId);
 
   async function call(label: string, url: string, init: RequestInit): Promise<unknown> {
+    return callWith(label, url, init, timeoutMs);
+  }
+
+  async function callWith(label: string, url: string, init: RequestInit, timeout: number): Promise<unknown> {
     let res: Response;
     try {
-      res = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      res = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(timeout) });
     } catch {
       throw new IpalphaUnavailable(`${label}: unreachable`);
     }
@@ -760,6 +831,52 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
         if (typeof o.personId === "string") out.set(o.personId, o.hasHealthInfo === true);
       }
       return out;
+    },
+
+    async createImport(token, { file, fileName, editionId, targets, appFields }) {
+      const form = new FormData();
+      form.set("file", file, fileName);
+      if (editionId) form.set("editionId", editionId);
+      form.set("targets", JSON.stringify(targets));
+      form.set("appFields", JSON.stringify(appFields));
+      try {
+        // multipart: no content-type header (fetch sets the boundary); uploads get a longer timeout
+        return obj(await callWith("imports/create", `${cfg.personsApiUrl}/projects/${project()}/imports`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: form }, Math.max(timeoutMs, 30_000)));
+      } catch (err) {
+        if (bearerRejected(err)) throw new IpalphaTokenRevoked("imports/create");
+        throw err;
+      }
+    },
+
+    async getImport(token, importId) {
+      return obj(await roleCall("imports/get", token, "GET", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}`));
+    },
+
+    async patchImport(token, importId, decisions) {
+      return obj(await roleCall("imports/patch", token, "PATCH", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}`, decisions));
+    },
+
+    async applyImport(token, importId) {
+      return obj(await roleCall("imports/apply", token, "POST", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}/apply`, {}));
+    },
+
+    async cancelImport(token, importId) {
+      await roleCall("imports/cancel", token, "DELETE", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}`);
+    },
+
+    async importBatches(token, importId, query = {}) {
+      const params = new URLSearchParams();
+      if (query.cursor) params.set("cursor", query.cursor);
+      params.set("limit", String(Math.max(1, Math.min(10, query.limit ?? 10))));
+      const body = await roleCall("imports/batches", token, "GET", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}/batches?${params.toString()}`);
+      return toPage(body, toImportBatch);
+    },
+
+    async appChannelToken(fresh = false) {
+      const key = `${DISPATCH_RESOURCE} ${SCOPES.appChannel}`;
+      if (fresh) systemTokens.delete(key);
+      const token = await systemToken(DISPATCH_RESOURCE, SCOPES.appChannel);
+      return { token, expiresAt: systemTokens.get(key)?.expiresAt ?? now() + 60_000 };
     },
 
     async sendTemplate({ templateSlug, recipients, editionId }) {

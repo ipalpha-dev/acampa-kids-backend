@@ -38,8 +38,6 @@ const COLLECTIONS: Record<string, AssistantCollection> = {
   files: { description: "Metadados dos arquivos enviados; o conteúdo binário não é disponibilizado.", hiddenFields: ["data"] },
   camperChangeLog: { description: "Histórico de alterações nas fichas dos acampantes." },
   camperLookups: { description: "Auditoria de leituras emergenciais de crachás." },
-  camperImports: { description: "Processos de importação de planilhas de acampantes e equipe.", hiddenFields: ["jobToken"] },
-  camperImportDictionary: { description: "Dicionário aprendido durante importações de planilhas." },
   ai_usage: { description: "Métricas de uso das funções de IA." },
   sms_usage: { description: "Métricas de envio de mensagens (modelo e quantidade)." },
 };

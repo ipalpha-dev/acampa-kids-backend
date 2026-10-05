@@ -20,7 +20,6 @@ import { ensureSmsUsageIndex } from "./models/smsUsage";
 import { ensureTeamIndexes } from "./models/teams";
 import { ensureScoreIndexes } from "./models/scores";
 import { ensureCamperLookupIndexes } from "./models/camperLookups";
-import { ensureCamperImportIndexes } from "./models/camperImports";
 import { ensureGalleryIndexes } from "./models/gallery";
 import { ensureLoginStateIndexes } from "./models/ipalphaLoginStates";
 import { logIpalphaStatus } from "./services/ipalpha";
@@ -30,11 +29,15 @@ import { backfillGalleryFaces } from "./services/galleryFaces";
 import { ensureFirstCamp } from "./services/campMigration";
 import { ensureCampsCollection } from "./models/camps";
 import { activeCamp, activeCampId, withCamp } from "./services/campContext";
-import { markBootError, markBooted } from "./services/readiness";
+import { markBootError, markBooted, registerInfo } from "./services/readiness";
+import { dispatchState, startDispatchChannel } from "./services/dispatchChannel";
+import { ensureDispatchDeliveryIndexes } from "./models/dispatchDeliveries";
 
 const app = createApp({ logRequests: true, bootGate: true });
 
 const { port } = config;
+// the dispatch app channel is a peer: shown on /ready as info, never a readiness gate
+registerInfo("dispatch", dispatchState);
 
 // listen FIRST: /live answers at once, /ready (and /api/*) wait for our own infra — boot never waits on a peer
 Bun.serve({
@@ -57,8 +60,8 @@ async function boot(): Promise<void> {
   await ensureUserCampStateIndexes();
   await ensureParticipantIndexes();
   await ensureLoginStateIndexes(); // IPAlpha sign-ins in flight (TTL 10 min)
+  await ensureDispatchDeliveryIndexes(); // webhook delivery ids (TTL 7 days, ids only)
   await ensureCamperLookupIndexes();
-  await ensureCamperImportIndexes();
   await ensureCategoryIndexes();
   await ensureTransportIndexes();
   await ensureStaffIndexes();
@@ -100,6 +103,8 @@ async function bootWithRetry(): Promise<void> {
     await sendCheckinReminder(); // the reminder instant may have passed while the server was down
   });
   logIpalphaStatus();
+  // the ONE app-channel socket (§21): started now, never awaited — reconnects on its own
+  startDispatchChannel();
   console.log("🏕️  ready");
 }
 

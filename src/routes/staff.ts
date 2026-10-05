@@ -69,8 +69,6 @@ export function serializeStaffFor(s: Staff, scope: Scope) {
     prepDone: [],
     foreignLookupCount: 0,
     foreignLookupCamperIds: [],
-    aiReviewStatus: null,
-    aiReviewError: "",
   };
 }
 
@@ -93,10 +91,6 @@ function serialize(s: Staff) {
     roomRole: s.roomRole,
     transportation: s.transportation,
     generalNotes: s.generalNotes,
-    aiReviewStatus: s.aiReviewStatus ?? null,
-    aiReviewError: s.aiReviewError ?? "",
-    aiReviewStartedAt: s.aiReviewStartedAt ?? null,
-    aiReviewFinishedAt: s.aiReviewFinishedAt ?? null,
     checkin: s.checkin,
     vest: s.vest,
     prepDone: s.prepDone,

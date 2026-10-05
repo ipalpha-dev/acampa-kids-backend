@@ -9,7 +9,6 @@ import { insertStaff, listStaff, updateStaff } from "../models/staff";
 import { insertTeam, listTeams } from "../models/teams";
 import { insertTransport, listTransports } from "../models/transports";
 import { activeCampId, withCamp } from "./campContext";
-import { normalizeImportValue } from "./camperImport";
 import { grantRole, type CoordinationTokens } from "./coreRegistration";
 import { responsiblesOf } from "./members";
 import { namesOf } from "./people";
@@ -73,7 +72,8 @@ export interface StaffRow {
 }
 
 /** Accent/case-insensitive comparison key, e.g. "Ana Lúcia" → "ana lucia". */
-export const normalizeKey = normalizeImportValue;
+/** accent / case / punctuation-insensitive key ("Ônibus  Azul!" → "onibus azul") */
+export const normalizeKey = (value: string): string => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR").replace(/[^a-z0-9]+/g, " ").trim();
 
 /** The `idMap` entry for `oldId` when this run already created/matched it; otherwise the pre-computed soft match; otherwise null. */
 export function remapLink(oldId: string | null, idMap: Map<string, string>, softMatchIndex: Map<string, string>): string | null {
