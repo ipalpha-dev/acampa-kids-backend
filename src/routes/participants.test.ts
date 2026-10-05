@@ -1,3 +1,4 @@
+import { createApp } from "../app";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { createFakeCore, createTestKeys, emptyWorld, enableIpalpha, installFakeCore, resetData, sessionFor, startTestDb, stopTestDb, testApp, TEST_EDITION, type FakeCore, type FakeWorld, type TestKeys } from "../testing/ipalphaHarness";
 import { rawDb } from "../db";
@@ -277,15 +278,12 @@ describe("campers: camp ops + names live, health only with the acting role token
     expect((core.callsTo("POST /registrations")[0].json as Record<string, any>).people[0]).toMatchObject({ name: "Caio Servo", phone: "+5511955554444", sex: "male", homeChurch: "IPAlpha" });
   });
 
-  test("a second responsável joins the SAME kid through persons /links (decision 38)", async () => {
+  test("decision 57: no standalone second-responsável path — nothing reaches persons /links", async () => {
     const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
-    const res = await call("POST", `/api/campers/${KID_A}/responsibles`, { name: "tio paulo", phone: "11977776666" }, token);
-    expect(res.status).toBe(201);
-    const guardianId = res.body.responsible.personId;
-    expect(world.links).toEqual([{ subjectId: KID_A, agentId: guardianId, projectId: "project-test-1" } as never]);
-    expect(world.memberships.find((m) => m.personId === KID_A && m.role === "participante")?.involved?.map((i) => i.personId)).toContain(guardianId);
-    expect(world.memberships).toContainEqual(expect.objectContaining({ personId: guardianId, role: "responsavel", editionId: TEST_EDITION }));
-    expect(core.callsTo("POST /registrations").map((c) => (c.json as { children?: unknown }).children)).toEqual([undefined]);
+    const res = await createApp().request(`/api/campers/${KID_A}/responsibles`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ name: "tio paulo", phone: "11977776666" }) });
+    expect(res.status).toBe(404);
+    expect(core.callsTo("POST /links")).toHaveLength(0);
+    expect(core.callsTo("POST /registrations")).toHaveLength(0);
   });
 
   test("only the coordenação registers people", async () => {

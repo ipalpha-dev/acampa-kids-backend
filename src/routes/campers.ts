@@ -13,8 +13,8 @@ import { isInvalid, parseBedroom, parseMedications, parseSingle, parseTeam, pars
 import { serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 import { campInProgress, campPeriod } from "../services/camp";
-import { actingToken, campEditionId, coordinationContext, coordinationToken } from "../services/acting";
-import { addResponsible, healthToCore, mergeHealthInto, registrationData, registrationExtras, registrationProfile } from "../services/coreRegistration";
+import { actingToken, campEditionId, coordinationToken } from "../services/acting";
+import { healthToCore, mergeHealthInto, registrationData, registrationExtras, registrationProfile } from "../services/coreRegistration";
 import { coreClient } from "../services/ipalpha";
 import { PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
 import { hasHealthInfo, healthCounts, healthFlagsOf, matchesHealthTag, nameMatches, namesOf, pageOf, readHealth, readHealthMany, readHealthState, tagFilter, writeHealth } from "../services/people";
@@ -538,26 +538,6 @@ campers.post("/register", async (c) => {
   publish("campers", "bedrooms");
   void notifyCamperChange(null, created);
   return c.json({ camper: { ...serializeCamper(created), name }, responsible: { personId: reg.responsible.personId, created: reg.responsible.created }, medical }, 201);
-});
-
-/**
- * POST /api/campers/:id/responsibles { name, phone, email? } — one more
- * responsável for a kid already in core (coordenação; decision 38): the adult
- * is registered or found by phone, linked to the kid (persons `POST /links`),
- * involved on the kid's membership and given `responsavel`.
- */
-campers.post("/:id/responsibles", async (c) => {
-  const kid = await findCamperById(c.req.param("id"));
-  if (!kid) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
-  const body = await c.req.json<{ name?: unknown; phone?: unknown; email?: unknown }>().catch(() => null);
-  const name = typeof body?.name === "string" ? titleCaseName(body.name) : "";
-  const phone = typeof body?.phone === "string" ? normalizeBrazilPhone(body.phone) : null;
-  if (!name || !phone) return fail(c, "RESPONSIBLE_INVALID", "Informe o nome e o celular do responsável.");
-  const ctx = await coordinationContext(c.get("session"));
-  if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status);
-  const result = await addResponsible(ctx.tokens, { kidId: kid._id, guardian: { name, phone, email: typeof body?.email === "string" && body.email ? body.email : undefined }, editionId: ctx.editionId });
-  void publish("campers");
-  return c.json({ responsible: { personId: result.guardianId, name }, linked: result.linked }, 201);
 });
 
 /** POST /api/campers { personId, ...camp ops } — an existing IPAlpha person joins this camp's kids. */
