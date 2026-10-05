@@ -30,10 +30,40 @@ export function baseOf(doc: Record<string, unknown>) {
     checkin: toCheckin(doc.checkin),
     generalNotes: (doc.generalNotes as string) ?? "",
     importId: (doc.importId as string) ?? null,
+    importEdited: Array.isArray(doc.importEdited) ? (doc.importEdited as unknown[]).filter((k): k is string => typeof k === "string") : [],
     draft: doc.draft === true,
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,
   };
+}
+
+/**
+ * Camp fields a spreadsheet import may fill (Acampa's §20 app fields). Decision 78: a field a person
+ * changed by hand is remembered (its KEY only, in `importEdited`) until an import writes it again, so an
+ * import never silently overwrites a manual choice.
+ */
+export const IMPORT_FIELDS = ["transportation", "bedroom", "team", "roomRole", "bedroomPreference", "invitedBy", "generalNotes"] as const;
+export type ImportField = (typeof IMPORT_FIELDS)[number];
+const IMPORT_FIELD_SET: ReadonlySet<string> = new Set(IMPORT_FIELDS);
+
+/** Who writes a participant row: a person (manual — remembered per field) or an import batch / conflict decision. */
+export type WriteSource = "manual" | "import";
+
+const same = (a: unknown, b: unknown) => (a ?? "") === (b ?? "");
+
+/**
+ * The extra update operators for a write of `patch` over `before` (null = an insert):
+ * manual → `$addToSet` the import fields whose value really changed; import → `$pull` the ones it wrote.
+ */
+export function importEditOps(patch: Record<string, unknown>, before: Record<string, unknown> | null, source: WriteSource): Record<string, unknown> {
+  const keys = Object.keys(patch).filter((k) => IMPORT_FIELD_SET.has(k) && (source === "import" || (before ? !same(before[k], patch[k]) : !same(patch[k], null))));
+  if (keys.length === 0) return {};
+  return source === "import" ? { $pull: { importEdited: { $in: keys } } } : { $addToSet: { importEdited: { $each: keys } } };
+}
+
+/** The `importEdited` of a new row: the import fields a person filled by hand (an import fills none). */
+export function importEditedOnInsert(data: Record<string, unknown>, source: WriteSource): string[] {
+  return source === "import" ? [] : Object.keys(data).filter((k) => IMPORT_FIELD_SET.has(k) && !same(data[k], null));
 }
 
 /** Every person id of this camp's participants (optionally of one kind). */

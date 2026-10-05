@@ -31,6 +31,7 @@ import seedsRoutes from "./routes/seeds";
 import wizardRoutes from "./routes/wizard";
 import campRoutes from "./routes/camps";
 import importRoutes from "./routes/imports";
+import importConflictRoutes from "./routes/importConflicts";
 import dispatchWebhookRoutes from "./routes/dispatchWebhook";
 
 /**
@@ -73,6 +74,8 @@ export function createApp(opts: { logRequests?: boolean; bootGate?: boolean } = 
   app.route("/api/campers", camperRoutes);
   // spreadsheet imports run in persons-api (§20); Acampa proxies with the importer's coordenação token
   app.route("/api/imports", importRoutes);
+  // decision 78: import values a manual edit kept aside, decided on the campers / team page
+  app.route("/api/import-conflicts", importConflictRoutes);
   // dispatch app-channel fallback: signed deliveries when the socket is down (§21/§22 — HMAC, no session)
   app.route("/api/dispatch", dispatchWebhookRoutes);
   app.route("/api/settings", settingsRoutes);

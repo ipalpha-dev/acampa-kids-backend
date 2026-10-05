@@ -1,7 +1,7 @@
 import { io } from "socket.io-client";
 import { config } from "../config";
 import { coreClient, ipalphaEnabled } from "./ipalpha";
-import { enqueueAppMessage, reconcileOpenImports, toAppMessage } from "./personImports";
+import { catchUpUnfinished, enqueueAppMessage, toAppMessage } from "./personImports";
 
 /**
  * The ONE persistent dispatch app-channel socket of this backend (CONTRACTS
@@ -9,9 +9,9 @@ import { enqueueAppMessage, reconcileOpenImports, toAppMessage } from "./personI
  * `dispatch:app-channel`), every subscription multiplexed on it (today:
  * `person-imports` — every import of Acampa's app), reconnect with
  * exponential backoff + jitter (a fresh token each time), resubscribe on
- * every connect, and reconcile missed batches from persons-api after a
- * reconnect (dispatch is stateless; the owner keeps the results — decision
- * 64). Started after boot, never awaited by it: a dispatch outage only
+ * every connect, and catch up every unfinished import (`importJobs`,
+ * decision 77) from persons-api after each connect (dispatch is stateless;
+ * the owner keeps the results — decision 64). Started after boot, never awaited by it: a dispatch outage only
  * shows as `info.dispatch` on /ready. Messages that arrive while the socket
  * is down come through the signed webhook (routes/dispatchWebhook.ts).
  *
@@ -51,7 +51,7 @@ export interface ChannelDeps {
   token?: (fresh: boolean) => Promise<{ token: string; expiresAt: number }>;
   /** one message (default: the import queue) */
   onMessage?: (raw: unknown) => void;
-  /** after (re)subscribing (default: reconcile open imports from persons-api) */
+  /** after (re)subscribing (default: catch up every unfinished import from persons-api — decision 77) */
   onSubscribed?: (reconnect: boolean) => void;
   random?: () => number;
   setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
@@ -85,8 +85,11 @@ export class DispatchChannel {
         const msg = toAppMessage(raw);
         if (msg) void enqueueAppMessage(msg, config.ipalpha.projectId);
       }),
-      onSubscribed: deps.onSubscribed ?? ((reconnect) => {
-        if (reconnect) void reconcileOpenImports().then((n) => n && this.deps.log(`reconciled ${n} import(s)`));
+      // every connect: messages sent while the socket was down (and before this process started) may be missing
+      onSubscribed: deps.onSubscribed ?? (() => {
+        void catchUpUnfinished()
+          .then((n) => n && this.deps.log(`caught up ${n} import(s)`))
+          .catch(() => this.deps.log("import catch-up failed — next connect / the importer's next read tries again"));
       }),
       random: deps.random ?? Math.random,
       setTimer: deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms)),

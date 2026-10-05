@@ -5,10 +5,10 @@ import { HANDLED, PASSTHROUGH, SCOPED, scopeBulkOp, scopeDoc, scopeDocs, scopeFi
 
 describe("SCOPED", () => {
   test("lists the real collections the app writes campId on", () => {
-    for (const name of ["participants", "bedrooms", "categories", "transports", "teams", "scores", "schedule_roles", "schedule_events", "prep_sections", "instructions", "occurrences", "medicationDoses", "gallery", "settings", "checkinLog", "camperChangeLog", "camperLookups", "ai_usage", "sms_usage"]) {
+    for (const name of ["participants", "importConflicts", "bedrooms", "categories", "transports", "teams", "scores", "schedule_roles", "schedule_events", "prep_sections", "instructions", "occurrences", "medicationDoses", "gallery", "settings", "checkinLog", "camperChangeLog", "camperLookups", "ai_usage", "sms_usage"]) {
       expect(SCOPED.has(name)).toBe(true);
     }
-    for (const name of ["sessions", "camps", "seeds", "camperImportDictionary", "files", "userCampState"]) {
+    for (const name of ["sessions", "camps", "importJobs", "seeds", "camperImportDictionary", "files", "userCampState"]) {
       expect(SCOPED.has(name)).toBe(false);
     }
   });

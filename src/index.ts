@@ -32,6 +32,9 @@ import { activeCamp, activeCampId, withCamp } from "./services/campContext";
 import { markBootError, markBooted, registerInfo } from "./services/readiness";
 import { dispatchState, startDispatchChannel } from "./services/dispatchChannel";
 import { ensureDispatchDeliveryIndexes } from "./models/dispatchDeliveries";
+import { ensureImportJobIndexes, pruneImportJobs } from "./models/importJobs";
+import { ensureImportConflictIndexes } from "./models/importConflicts";
+import { catchUpUnfinished } from "./services/personImports";
 
 const app = createApp({ logRequests: true, bootGate: true });
 
@@ -61,6 +64,8 @@ async function boot(): Promise<void> {
   await ensureParticipantIndexes();
   await ensureLoginStateIndexes(); // IPAlpha sign-ins in flight (TTL 10 min)
   await ensureDispatchDeliveryIndexes(); // webhook delivery ids (TTL 7 days, ids only)
+  await ensureImportJobIndexes(); // imports Acampa started (ids only, decision 77)
+  await ensureImportConflictIndexes(); // import values waiting for a decision (decision 78)
   await ensureCamperLookupIndexes();
   await ensureCategoryIndexes();
   await ensureTransportIndexes();
@@ -103,7 +108,12 @@ async function bootWithRetry(): Promise<void> {
     await sendCheckinReminder(); // the reminder instant may have passed while the server was down
   });
   logIpalphaStatus();
-  // the ONE app-channel socket (§21): started now, never awaited — reconnects on its own
+  // decision 77: imports that were running while this process was down are caught up from persons-api (never awaited)
+  void pruneImportJobs()
+    .then(() => catchUpUnfinished())
+    .then((n) => n && console.log(`[imports] caught up ${n} import(s) at boot`))
+    .catch(() => console.warn("[imports] boot catch-up failed — the app channel connect / the importer's next read tries again"));
+  // the ONE app-channel socket (§21): started now, never awaited — reconnects on its own (and catches up on every connect)
   startDispatchChannel();
   console.log("🏕️  ready");
 }

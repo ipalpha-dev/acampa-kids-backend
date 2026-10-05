@@ -229,6 +229,18 @@ export interface ImportAppField {
   required: boolean;
 }
 
+/** §20 `targets`: row kind → the role its person joins; `responsibleRole` makes it a MINOR row (the responsible joins that role and is linked). */
+export interface ImportTarget {
+  role: string;
+  responsibleRole?: string;
+}
+
+/** §20 `PATCH /imports/:id` body: mapping overrides + per-review decisions. */
+export interface ImportDecisions {
+  mapping?: Record<string, string | null>;
+  reviews?: { id: string; choice?: string; value?: string; rows?: Record<string, string> }[];
+}
+
 export type ImportRowStatus = "created" | "updated" | "skipped" | "failed";
 
 /** One row of a §20 batch: ids + app field values only (decision 67). */
@@ -251,7 +263,7 @@ const ROW_STATUSES: readonly ImportRowStatus[] = ["created", "updated", "skipped
 /** A §20/§21 batch (persons `GET /imports/:id/batches` item, or the dispatch `person-import.batch` message). */
 export function toImportBatch(v: unknown): ImportBatch | null {
   const o = obj(v);
-  const batch = typeof o.batch === "number" && Number.isInteger(o.batch) && o.batch >= 0 ? o.batch : null;
+  const batch = typeof o.batch === "number" && Number.isInteger(o.batch) && o.batch >= 1 ? o.batch : null;
   if (batch === null) return null;
   const rows = (Array.isArray(o.rows) ? o.rows : [])
     .map((r) => obj(r))
@@ -336,8 +348,6 @@ export interface IpalphaCoreClient {
   updateName(token: string, personId: string, input: { name?: string; nickname?: string }): Promise<void>;
   updateBirthDate(token: string, personId: string, birthDate: string): Promise<void>;
   register(token: string, input: RegistrationInput): Promise<RegistrationAnswer>;
-  /** persons `POST /links` (decision 38: roles with canRegister) — `agentId` becomes a responsible of `subjectId` */
-  link(token: string, input: { subjectId: string; agentId: string }): Promise<{ linkId: string | null }>;
   healthLists(token: string): Promise<HealthList[]>;
   /**
    * §23 light flag for the list ♥ (decision 69): does each person have ANY health info? ≤ 200 ids, role token whose
@@ -346,14 +356,20 @@ export interface IpalphaCoreClient {
   healthFlags(token: string, personIds: string[]): Promise<Map<string, boolean>>;
 
   // ── persons-api imports (§20, the importer's per-role token) ──
-  /** `POST /projects/:projectId/imports` multipart: `file` + `editionId`, `targets`, `appFields` (JSON strings) */
-  createImport(token: string, input: { file: Blob; fileName: string; editionId?: string; targets: Record<string, string>; appFields: ImportAppField[] }): Promise<Record<string, unknown>>;
+  /** `POST /projects/:projectId/imports` multipart: `file` + `data` JSON `{editionId?, targets, appFields}` → `{importId, status}` */
+  createImport(token: string, input: { file: Blob; fileName: string; editionId?: string; targets: Record<string, ImportTarget>; appFields: ImportAppField[] }): Promise<{ importId: string; status: string }>;
+  /** the job without rows: status, failureReason?, steps, mapping, targets, appFields, reviews, counts */
   getImport(token: string, importId: string): Promise<Record<string, unknown>>;
-  patchImport(token: string, importId: string, decisions: Record<string, unknown>): Promise<Record<string, unknown>>;
-  applyImport(token: string, importId: string): Promise<Record<string, unknown>>;
+  /** decisions, in `review` → the job */
+  patchImport(token: string, importId: string, decisions: ImportDecisions): Promise<Record<string, unknown>>;
+  /** `X-Projects-Authorization` carries the importer's projects token (memberships); 409 `decisionsPending {pending}` */
+  applyImport(token: string, projectsToken: string, importId: string): Promise<{ importId: string; status: string }>;
   cancelImport(token: string, importId: string): Promise<void>;
-  /** `GET /imports/:id/batches?cursor&limit≤10` — ids + app field values only (decision 67) */
-  importBatches(token: string, importId: string, query?: { cursor?: string; limit?: number }): Promise<Page<ImportBatch>>;
+  /**
+   * `GET /imports/:id/batches?cursor=<FIRST batch number>&limit≤10` — ids + app field values only (decision 67).
+   * `nextCursor` = the next batch number, null when no further batch exists YET (keep `last + 1` to read later ones).
+   */
+  importBatches(token: string, importId: string, query?: { cursor?: number; limit?: number }): Promise<Page<ImportBatch>>;
 
   // ── dispatch-api (app client) ──
   /** §21 app-channel handshake token (`dispatch:app-channel`, claim appId); `fresh` drops the cached one first */
@@ -802,11 +818,6 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       };
     },
 
-    async link(token, { subjectId, agentId }) {
-      const body = obj(await roleCall("links", token, "POST", `${cfg.personsApiUrl}/links`, { subjectId, agentId, projectId: cfg.projectId }));
-      return { linkId: str(body.id) };
-    },
-
     async healthLists(token) {
       const body = await roleCall("health-lists", token, "GET", `${cfg.personsApiUrl}/health-lists`);
       return (Array.isArray(body) ? body : [])
@@ -836,16 +847,18 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
     async createImport(token, { file, fileName, editionId, targets, appFields }) {
       const form = new FormData();
       form.set("file", file, fileName);
-      if (editionId) form.set("editionId", editionId);
-      form.set("targets", JSON.stringify(targets));
-      form.set("appFields", JSON.stringify(appFields));
+      form.set("data", JSON.stringify({ ...(editionId ? { editionId } : {}), targets, appFields }));
+      let body: Record<string, unknown>;
       try {
         // multipart: no content-type header (fetch sets the boundary); uploads get a longer timeout
-        return obj(await callWith("imports/create", `${cfg.personsApiUrl}/projects/${project()}/imports`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: form }, Math.max(timeoutMs, 30_000)));
+        body = obj(await callWith("imports/create", `${cfg.personsApiUrl}/projects/${project()}/imports`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: form }, Math.max(timeoutMs, 30_000)));
       } catch (err) {
         if (bearerRejected(err)) throw new IpalphaTokenRevoked("imports/create");
         throw err;
       }
+      const importId = str(body.importId);
+      if (!importId) throw new IpalphaUnavailable("imports/create: no importId");
+      return { importId, status: str(body.status) ?? "analysing" };
     },
 
     async getImport(token, importId) {
@@ -856,8 +869,17 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       return obj(await roleCall("imports/patch", token, "PATCH", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}`, decisions));
     },
 
-    async applyImport(token, importId) {
-      return obj(await roleCall("imports/apply", token, "POST", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}/apply`, {}));
+    async applyImport(token, projectsToken, importId) {
+      const init = jsonInit("POST", token, {});
+      init.headers = { ...(init.headers as Record<string, string>), "x-projects-authorization": `Bearer ${projectsToken}` };
+      let body: Record<string, unknown>;
+      try {
+        body = obj(await call("imports/apply", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}/apply`, init));
+      } catch (err) {
+        if (bearerRejected(err)) throw new IpalphaTokenRevoked("imports/apply");
+        throw err;
+      }
+      return { importId: str(body.importId) ?? importId, status: str(body.status) ?? "applying" };
     },
 
     async cancelImport(token, importId) {
@@ -866,7 +888,7 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
 
     async importBatches(token, importId, query = {}) {
       const params = new URLSearchParams();
-      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.cursor !== undefined) params.set("cursor", String(Math.max(1, Math.floor(query.cursor))));
       params.set("limit", String(Math.max(1, Math.min(10, query.limit ?? 10))));
       const body = await roleCall("imports/batches", token, "GET", `${cfg.personsApiUrl}/imports/${encodeURIComponent(importId)}/batches?${params.toString()}`);
       return toPage(body, toImportBatch);

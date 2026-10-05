@@ -143,6 +143,13 @@ export async function findSession(id: string): Promise<Session | null> {
   return toSession((await db.collection(COLLECTION).findOne({ _id: id as never })) as Record<string, unknown> | null);
 }
 
+/** The live sessions of a person, newest expiry first (background work acting for them — e.g. an import catch-up). */
+export async function listLiveSessionsOf(personId: string): Promise<Session[]> {
+  const db = await getDb();
+  const docs = await db.collection(COLLECTION).find({ personId, expiresAt: { $gt: new Date() } }).sort({ expiresAt: -1 }).limit(10).toArray();
+  return docs.map((d) => toSession(d as Record<string, unknown>)).filter((x): x is Session => x !== null);
+}
+
 /** Role switch: another role of the list; the offline key rotates (the offline copy is role-scoped and gets wiped). */
 export async function switchSessionRole(id: string, role: CoreRole): Promise<Session | null> {
   const db = await getDb();

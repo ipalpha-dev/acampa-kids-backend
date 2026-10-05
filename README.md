@@ -134,12 +134,18 @@ ai-api billed to the project) and the importer decides in Acampa's screens.
 Results come back batch by batch — ids + app field values only — over the ONE
 dispatch app-channel socket (`services/dispatchChannel.ts`) or the signed
 webhook (`POST /api/dispatch/webhook`), and are written into `participants`
-by personId. Idempotent: a row already stamped with the import's id is not
-touched again, webhook deliveries are de-duplicated by `X-IPAlpha-Delivery`
-(`dispatchDeliveries`, ids only, TTL 7 days). Missed batches are reconciled
-from persons-api (`GET /imports/:id/batches`) when the channel reconnects and
-when the importer reads the import. No AI, no staging, no worker, no health
-in Acampa.
+by personId. Idempotent: `importJobs` (decision 77, ids only: importId, campId,
+startedBy, status, lastBatch) applies each batch once and in order, a row
+already stamped with the import's id is not touched again, and webhook
+deliveries are de-duplicated by `X-IPAlpha-Delivery` (`dispatchDeliveries`,
+ids only, TTL 7 days). Missed batches are caught up from persons-api (`GET
+/imports/:id/batches`, cursor = next batch number) at boot, on every app-channel
+connect and when the importer reads the import — with a live coordenação
+session of whoever started it. A camp field changed by hand since the last
+import (`participants.importEdited`, keys only) is never overwritten by a
+different import value: it becomes an `importConflicts` entry that the
+campers / team page asks about ("Aplicar valor da importação" / "Manter o
+atual", decision 78). No AI, no staging, no worker, no health in Acampa.
 
 **Messages** (`services/messages.ts`, `src/messages/templates.ts`): every SMS /
 e-mail is a project template sent by notifications-api to a person id

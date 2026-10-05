@@ -104,7 +104,8 @@ export async function assignCamperGroupsAcrossTeams(teamIds: string[], groups: s
   if (!assignments.size) return 0;
   const now = new Date();
   await db.collection("participants").bulkWrite([...assignments].map(([id, team]) => ({
-    updateOne: { filter: { kind: "camper", personId: id, draft: { $ne: true } }, update: { $set: { team, updatedAt: now } } },
+    // a hand-made distribution: remembered like any manual edit (decision 78)
+    updateOne: { filter: { kind: "camper", personId: id, draft: { $ne: true } }, update: { $set: { team, updatedAt: now }, $addToSet: { importEdited: "team" } } },
   })));
   return assignments.size;
 }

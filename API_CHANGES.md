@@ -52,7 +52,7 @@ Check-in stamps: `{at, byPersonId, byRole: CoreRole, note?}`.
 | `GET /:id/changes` | `{changes:[{id, personId, at, byPersonId, byRole, medical, fields}]}` (no before/after values). |
 | `PUT /:id/parent`, `PUT /:id/health` | same field names; health written to persons-api with the acting role token (parents: `responsavel`); answer `{camper: record + health, changed}`. Option ids = `GET /api/people/health-lists`. When core refuses to READ the block: 403 `{code:"CORE_FORBIDDEN", reason:"medicalForbidden"}` and nothing is saved (notes included) — a block we cannot read is never written over. |
 | **NEW** `POST /register` | coordenação: `{name, birthDate, responsible:{name, phone}, sex? ("F"\|"M", only when the family said it), homeChurch? (≤ 120), school? {name, grade}, emergencyContact? ({name, phone, relation?} or the free text "Maria (mãe) 11 9…"), health?, …ops}` → 201 `{camper, responsible:{personId, created}, medical: "written"|"unchanged"|"refused"}`. Person fields travel in core's registration (`sex`, `homeChurch`, `data.school/emergencyContact`); **health never does** — core answers a person it knows with `created:false` and would REPLACE their block. Health is merged afterwards (read with the coordenação token, lists unioned, texts kept/appended, never blanked); `refused` = core refused the read/write, nothing was changed. 400 `SEX_INVALID` \| `HOME_CHURCH_INVALID` \| `EMERGENCY_CONTACT_INVALID`. |
-| **NEW** `POST /:id/responsibles` | coordenação: `{name, phone, email?}` → 201 `{responsible:{personId, name}, linked}` — a second responsável for the SAME kid (persons `/links`, decision 38). |
+| ~~`POST /:id/responsibles`~~ | **removed** (decision 57, CONTRACTS §23): a project role links a responsável only inside the registration / import of that kid (persons `POST /links` is steward-only — `403 linkOnlyDuringRegistration`). A second responsável comes in the spreadsheet import (2º responsável columns), or a steward links them / they accept in IPAlpha. |
 | `POST /` | `{personId, …ops}` (an existing IPAlpha person). |
 | `PUT /:id` | ops only: `team, transportation, bed, bedroom, caretakerId, invitedBy, qrToken, generalNotes, bedroomPreference`. |
 | `DELETE /:id` | `{success, membershipRemoved}`. |
@@ -106,22 +106,36 @@ calls persons-api, never stored):
 | Route | Answer |
 |---|---|
 | `GET /app-fields?subject=camper\|team` | `{subject, appFields:[{key, description, kind:"text"\|"category", categories?:[{key,label}], required}]}` — camper: `transportation` (required; buses + "Carona: …" cars), `bedroom`, `team`, `bedroomPreference`, `invitedBy`, `generalNotes` (never health); team: `roomRole` (required: caretaker / helper), `transportation`, `bedroom`, `team`, `generalNotes`. Category keys = Acampa ids |
-| `POST /` multipart `file` (.csv/.xlsx ≤ 5 MB) + `subject` | 201 `{import}`. 400 `FILE_REQUIRED` \| `FILE_TOO_LARGE` \| `FILE_TYPE_INVALID` \| `SUBJECT_INVALID`; 409 `EDITION_UNKNOWN` |
-| `GET /:id` | `{import}` (also applies batches a lost message left behind) |
-| `PATCH /:id` `{mapping?, reviews?:{id:{choice:"match"\|"new"\|"skip", personId?}}, categories?:{field:{sheetValue:categoryKey\|null}}, required?:{field:{mode:"default", value}\|{mode:"skip"}}}` | `{import}`; 400 `DECISIONS_INVALID` (unknown field / category) |
-| `POST /:id/apply` | `{import}`; core's `409 decisionsPending` arrives as 409 `CORE_REJECTED` + `reason` |
-| `DELETE /:id` | `{success:true}` (cancel; rows wiped in core) |
-| `GET /:id/results?cursor` | `{items:[{batch, rows:[{rowRef, personId, status:"created"\|"updated"\|"skipped"\|"failed", reason, appFields, unfilled}]}], nextCursor}` — ids + app field values only |
+| `POST /` multipart `file` (.csv/.xlsx ≤ 5 MB) + `subject` | 201 `{import}`. 400 `FILE_REQUIRED` \| `FILE_TOO_LARGE` \| `FILE_TYPE_INVALID` \| `SUBJECT_INVALID`; 409 `EDITION_UNKNOWN`. To persons-api: multipart `file` + `data` JSON `{editionId, targets, appFields}`; targets camper `{camper:{role:"participante", responsibleRole:"responsavel"}}`, team `{team:{role:"equipe"}}` |
+| `GET /:id` | `{import}` (also catches up batches persons-api has and this side has not applied — decision 77) |
+| `PATCH /:id` persons-api's own shape `{mapping?:{column: field\|null}, reviews?:[{id, choice?, value?, rows?}]}` | `{import}`; 400 `DECISIONS_INVALID` (unknown field, a category key the camp does not have, a text over its limit) |
+| `POST /:id/apply` | `{import}` (persons-api gets the coordenação projects token in `X-Projects-Authorization`); 409 `DECISIONS_PENDING` `{pending:[{id, kind, field?}]}` |
+| `DELETE /:id` | `{success:true}` (cancel; rows wiped in core; batches applied before it are still read) |
+| `GET /:id/results?cursor=<batch number>` | `{items:[{batch, rows:[{rowRef, personId, status:"created"\|"updated"\|"skipped"\|"failed", reason, appFields, unfilled}]}], nextCursor}` — ids + app field values only; `cursor` = the FIRST batch to return (1-based), `nextCursor` null when no further batch exists yet |
 
-`import` = `{id, subject, status:"analysing"|"review"|"applying"|"done"|"failed"|"cancelled",
-steps:[{name, done, total}], file:{name,size,sheet}|null, mapping, fields:[{key,label}],
-reviews:[{id, rowRef, kind, message, candidates:[{personId}], choice, personId}],
-appFields:[AppField + {categoryMapping, emptyRows, decision}], pendingRequired:[key],
-counts:{rows, created, updated, skipped, failed}, applied:{batches, rows}, createdAt, expiresAt}`.
-Apply stays blocked while `pendingRequired` is not empty.
+`import` = `{id, subject, status:"analysing"|"review"|"applying"|"done"|"failed"|"cancelled", failureReason
+(a failed apply resumes by applying again; `analysisFailed` is final), steps:[{name:"read"|"columns"|"matching"|
+"categories"|"observations"|"apply", done, total}], file:{name,size,sheet}|null, mapping, fields:[core field key |
+"app:<key>"], reviews:[{id, kind:"column"|"rowKind"|"invalid"|"match"|"duplicate"|"category"|"observations"|"required",
+blocking, options, rowRef, rowRefs, field, who, basis, existingPersonId, firstRowRef, choice, value, rows, resolved,
+context:{name?, original?, value?, rows?}}], appFields, counts:{rows, pending, batches, created, updated, skipped, failed},
+applied:{batches}, createdAt, expiresAt}`. Apply stays blocked while `counts.pending > 0`. `context` is the
+importer's own view of the file (never stored or logged by Acampa).
 
 Realtime (importer's sockets only): `import-progress {importId, step, done, total, status, batch?}`
-and `import-batch {importId, batch, rows, applied, skipped, unfilled}`.
+and `import-batch {importId, batch, rows, applied, skipped, unfilled, conflicts}`.
+
+**`importJobs`** (decision 77, ids only): `{_id: importId, campId, startedBy, status, lastBatch}`. Batches apply
+in order, once; at boot, on every app-channel connect and on the importer's reads, unfinished imports are caught up
+from persons-api with a live coordenação session of `startedBy`. Entries go once persons-api dropped the import.
+
+**NEW `/api/import-conflicts`** (decision 78; organização): a camp field someone changed by hand since the last
+import (`participants.importEdited`, keys only) is never overwritten by a different import value — it waits here.
+
+| Route | Answer |
+|---|---|
+| `GET /?subject=camper\|team` | `{items:[{id, personId, field, importValue, currentValue, importId, createdAt}]}` (`currentValue` = now; no-longer-different entries are dropped) |
+| `POST /resolve {ids, choice:"import"\|"keep"}` | `{applied, kept, failed:[{id, code:"BEDROOM_FULL"\|"BEDROOM_NOT_FOUND"\|"TRANSPORT_NOT_FOUND"\|"TEAM_NOT_FOUND", message}]}` |
 
 **NEW `POST /api/dispatch/webhook`** (dispatch-api only — no session): HMAC-SHA256 of the raw body
 with `IPALPHA_WEBHOOK_SECRET` in `X-IPAlpha-Signature: sha256=<hex>` (401 `SIGNATURE_INVALID`, 503

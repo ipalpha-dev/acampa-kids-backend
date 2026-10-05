@@ -230,6 +230,11 @@ interface ParticipantBase {
   generalNotes: string;
   /** the persons-api import (§20) whose batch created / last filled this row; null for regular records */
   importId: string | null;
+  /**
+   * Import-fillable fields (keys only) a person changed by hand since an import last wrote them (decision 78):
+   * a later import never overwrites them — it records an `importConflicts` entry the coordenação decides.
+   */
+  importEdited: string[];
   /** import dry-run row; hidden until apply */
   draft?: boolean;
   createdAt: Date;

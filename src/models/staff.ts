@@ -1,7 +1,7 @@
 import { getDb } from "../db";
 import type { CamperCheckin, Staff, VestStatus } from "../types";
 import { ROOM_ROLES } from "../types";
-import { baseOf, PARTICIPANTS, toCheckin } from "./participants";
+import { baseOf, importEditedOnInsert, importEditOps, PARTICIPANTS, toCheckin, type WriteSource } from "./participants";
 
 /**
  * The team of a camp: `participants` rows with `kind: "team"` (camp ops only;
@@ -56,17 +56,20 @@ export async function findStaffById(personId: string): Promise<Staff | null> {
 }
 
 /** Adds a team member (an existing IPAlpha person) to this camp. Throws on a duplicate person (unique index). */
-export async function insertStaff(personId: string, data: StaffData): Promise<Staff> {
+export async function insertStaff(personId: string, data: StaffData, source: WriteSource = "manual"): Promise<Staff> {
   const db = await getDb();
   const now = new Date();
-  const doc = { ...data, ...KIND, personId, checkin: null, vest: NO_VEST, prepDone: [], welcomeSentAt: null, foreignLookupCount: 0, foreignLookupCamperIds: [], foreignLookupAlertedAt: null, createdAt: now, updatedAt: now };
+  const doc = { ...data, ...KIND, personId, importEdited: importEditedOnInsert(data, source), checkin: null, vest: NO_VEST, prepDone: [], welcomeSentAt: null, foreignLookupCount: 0, foreignLookupCamperIds: [], foreignLookupAlertedAt: null, createdAt: now, updatedAt: now };
   await db.collection(PARTICIPANTS).insertOne(doc);
   return toStaff(doc)!;
 }
 
-export async function updateStaff(personId: string, patch: Partial<StaffData>): Promise<Staff | null> {
+/** `source: "import"` = an import batch / an import decision (decision 78: only manual writes are remembered per field). */
+export async function updateStaff(personId: string, patch: Partial<StaffData>, source: WriteSource = "manual"): Promise<Staff | null> {
   const db = await getDb();
-  const res = await db.collection(PARTICIPANTS).findOneAndUpdate({ ...KIND, personId }, { $set: { ...patch, updatedAt: new Date() } }, { returnDocument: "after" });
+  const before = source === "manual" ? await db.collection(PARTICIPANTS).findOne({ ...KIND, personId }) : null;
+  if (source === "manual" && !before) return null;
+  const res = await db.collection(PARTICIPANTS).findOneAndUpdate({ ...KIND, personId }, { $set: { ...patch, updatedAt: new Date() }, ...importEditOps(patch, before, source) }, { returnDocument: "after" });
   return toStaff(res as Record<string, unknown> | null);
 }
 

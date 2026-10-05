@@ -54,7 +54,7 @@ committed YAML or frontend `VITE_*` variables.
 | `IPALPHA_SYSTEM_CLIENT_SECRET` | Secret ref only |
 | `IPALPHA_PROJECT_ID` | the yearly Acampa project (camps = its editions; roles = its memberships) |
 | `IPALPHA_PROJECTS_API_URL` | projects-api base URL (editions, memberships, message templates) |
-| `IPALPHA_DISPATCH_URL` | optional — dispatch-api origin for the ONE app-channel socket (`/api/dispatch/socket.io`, namespace `/apps`). Empty = no socket: import batches arrive by webhook and by reconciliation when the importer reads the import |
+| `IPALPHA_DISPATCH_URL` | optional — dispatch-api origin for the ONE app-channel socket (`/api/dispatch/socket.io`, namespace `/apps`). Empty = no socket: import batches arrive by webhook and by the catch-up (boot, the importer's reads) from persons-api |
 | `IPALPHA_WEBHOOK_SECRET` | Secret ref only — the app webhook signing secret (Mordomia / Developers portal → app → webhook, shown once). Webhook URL to register: `https://<acampa host>/api/dispatch/webhook`. Empty = the webhook answers 503 |
 
 MongoDB uses `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`

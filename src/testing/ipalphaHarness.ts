@@ -14,7 +14,9 @@ import { ensureFirstCamp } from "../services/campMigration";
 import { ensureLoginStateIndexes } from "../models/ipalphaLoginStates";
 import { ensureParticipantIndexes } from "../models/participants";
 import { ensureDispatchDeliveryIndexes } from "../models/dispatchDeliveries";
-import { clearTrackedImports } from "../services/personImports";
+import { clearImportMemory } from "../services/personImports";
+import { clearImportJobs, ensureImportJobIndexes } from "../models/importJobs";
+import { ensureImportConflictIndexes } from "../models/importConflicts";
 import { ensureSessionIndexes, createSession } from "../services/session";
 import { ipalpha } from "../services/ipalpha";
 import { createIpalphaCoreClient, type RoleGrant } from "../services/ipalpha/coreClient";
@@ -38,6 +40,8 @@ export async function startTestDb(): Promise<void> {
   await ensureParticipantIndexes();
   await ensureLoginStateIndexes();
   await ensureDispatchDeliveryIndexes();
+  await ensureImportJobIndexes();
+  await ensureImportConflictIndexes();
 }
 
 export async function stopTestDb(): Promise<void> {
@@ -51,13 +55,14 @@ export async function stopTestDb(): Promise<void> {
 /** Empties everything a test touches (the camp registry stays; its edition id is forgotten). */
 export async function resetData(): Promise<void> {
   const db = await rawDb();
-  for (const name of ["sessions", "participants", "settings", "userCampState", "ipalphaLoginStates", "dispatchDeliveries", "transports", "teams", "schedule_events", "checkinLog", "camperChangeLog", "camperLookups", "occurrences", "medicationDoses", "scores", "sms_usage", "bedrooms"]) {
+  for (const name of ["sessions", "participants", "settings", "userCampState", "ipalphaLoginStates", "dispatchDeliveries", "transports", "teams", "schedule_events", "checkinLog", "camperChangeLog", "camperLookups", "occurrences", "medicationDoses", "scores", "sms_usage", "bedrooms", "importConflicts"]) {
     await db.collection(name).deleteMany({});
   }
   await db.collection("camps").updateMany({}, { $set: { editionId: null } });
   resetStartRateLimit();
   clearMembersMemo();
-  clearTrackedImports();
+  clearImportMemory();
+  await clearImportJobs();
 }
 
 // ── fake IPAlpha core ─────────────────────────────────────────────────────

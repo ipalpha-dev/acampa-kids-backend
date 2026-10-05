@@ -33,7 +33,10 @@ Do NOT:
 - rebuild an import pipeline: spreadsheets go to persons-api (`routes/imports.ts`, §20) with
   Acampa's `appFields`; results come back as ids + app field values over the ONE dispatch
   app-channel socket (`services/dispatchChannel.ts` — never open a second one) or the HMAC
-  webhook, and are applied to `participants` idempotently (`services/personImports.ts`).
+  webhook, and are applied to `participants` idempotently (`services/personImports.ts`;
+  `importJobs.lastBatch` orders them — decision 77). Never overwrite a field in
+  `participants.importEdited` from an import: record an `importConflicts` entry (decision 78);
+  every manual write goes through `updateCamper` / `updateStaff` (source "manual") so it is remembered.
   Raw observation / health text never goes into `generalNotes`;
 - check a peer (core, dispatch) in `/ready` — only Mongo + boot; peers fail at call time;
 - send a role token, a phone or health to the browser outside the role's own reads;

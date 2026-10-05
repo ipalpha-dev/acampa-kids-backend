@@ -1,6 +1,6 @@
 import { getDb } from "../db";
 import type { Camper, CamperChangeLog, CamperCheckin, CheckinKind, CheckinLog } from "../types";
-import { baseOf, PARTICIPANTS, toCheckin } from "./participants";
+import { baseOf, importEditedOnInsert, importEditOps, PARTICIPANTS, toCheckin, type WriteSource } from "./participants";
 
 export { toCheckin } from "./participants";
 
@@ -66,17 +66,20 @@ export async function findCamperByQrToken(qrToken: string): Promise<Camper | nul
 }
 
 /** Adds a kid (an existing IPAlpha person) to this camp. Throws on a duplicate person (unique index). */
-export async function insertCamper(personId: string, data: CamperData): Promise<Camper> {
+export async function insertCamper(personId: string, data: CamperData, source: WriteSource = "manual"): Promise<Camper> {
   const db = await getDb();
   const now = new Date();
-  const doc = { ...data, ...KIND, personId, checkin: null, busCheckin: null, busReturnCheckin: null, parentEditedAt: null, createdAt: now, updatedAt: now };
+  const doc = { ...data, ...KIND, personId, importEdited: importEditedOnInsert(data, source), checkin: null, busCheckin: null, busReturnCheckin: null, parentEditedAt: null, createdAt: now, updatedAt: now };
   await db.collection(PARTICIPANTS).insertOne(doc);
   return toCamper(doc)!;
 }
 
-export async function updateCamper(personId: string, patch: Partial<CamperData>): Promise<Camper | null> {
+/** `source: "import"` = an import batch / an import decision (decision 78: only manual writes are remembered per field). */
+export async function updateCamper(personId: string, patch: Partial<CamperData>, source: WriteSource = "manual"): Promise<Camper | null> {
   const db = await getDb();
-  const res = await db.collection(PARTICIPANTS).findOneAndUpdate({ ...KIND, personId }, { $set: { ...patch, updatedAt: new Date() } }, { returnDocument: "after" });
+  const before = source === "manual" ? await db.collection(PARTICIPANTS).findOne({ ...KIND, personId }) : null;
+  if (source === "manual" && !before) return null;
+  const res = await db.collection(PARTICIPANTS).findOneAndUpdate({ ...KIND, personId }, { $set: { ...patch, updatedAt: new Date() }, ...importEditOps(patch, before, source) }, { returnDocument: "after" });
   return toCamper(res as Record<string, unknown> | null);
 }
 
