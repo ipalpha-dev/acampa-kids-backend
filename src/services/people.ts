@@ -116,6 +116,28 @@ export async function writeHealth(token: string, personId: string, patch: Partia
   return toHealth(await coreClient().writeData(token, personId, MEDICAL_KIND, next));
 }
 
+/**
+ * A queued AI result over the person's current block: lists are unioned, an
+ * empty text never erases one, a new text is appended when it is not already
+ * there (the AI never removes what a family or the medical team wrote).
+ */
+export function mergeHealth(current: HealthInfo, patch: Partial<HealthInfo>): Partial<HealthInfo> {
+  const out: Partial<HealthInfo> = {};
+  for (const f of ["allergies", "drugAllergies", "healthIssues"] as const) if (patch[f]) out[f] = [...new Set([...current[f], ...patch[f]!])];
+  if (patch.neurodivergent) out.neurodivergent = true;
+  if (patch.medications?.length) {
+    const known = new Set(current.medications.map((m) => m.name.toLocaleLowerCase("pt-BR")));
+    out.medications = [...current.medications, ...patch.medications.filter((m) => !known.has(m.name.toLocaleLowerCase("pt-BR")))];
+  }
+  for (const f of ["foodRestrictions", "healthNotes", "insurance", "insuranceCard"] as const) {
+    const add = (patch[f] ?? "").trim();
+    if (!add) continue;
+    out[f] = current[f].includes(add) ? current[f] : [current[f], add].filter(Boolean).join(" ");
+  }
+  if (patch.weightKg != null && current.weightKg == null) out.weightKg = patch.weightKg;
+  return out;
+}
+
 /** Health-tag counts for the list chips (anonymized, not logged — decision 22). */
 export async function healthCounts(personIds: string[], filters: HealthTagFilter, editionId?: string | null): Promise<{ total: number; byTag: Record<string, number> }> {
   if (personIds.length === 0) return { total: 0, byTag: {} };

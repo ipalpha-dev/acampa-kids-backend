@@ -8,7 +8,10 @@ import { countHealthQueue, dropHealthQueueItem, listHealthQueue } from "../model
 import { actingToken, coordinationToken } from "../services/acting";
 import { coreClient } from "../services/ipalpha";
 import { NAMES_BATCH_MAX, PERSONS_RESOURCE } from "../services/ipalpha/coreClient";
-import { namesOf, writeHealth } from "../services/people";
+import { mergeHealth, namesOf, readHealth, writeHealth } from "../services/people";
+import { healthToCore } from "../services/coreRegistration";
+import { IpalphaRejected } from "../services/ipalpha/coreClient";
+import { EMPTY_HEALTH } from "../types";
 import { camperVisibility, resolveScope, staffVisibility } from "../services/scope";
 import { publish } from "../services/realtime";
 import { PARTICIPANT_ROLE, RESPONSIBLE_ROLE, TEAM_ROLE } from "../types";
@@ -69,24 +72,29 @@ people.get("/health-lists", async (c) => c.json({ lists: await coreClient().heal
 
 people.get("/health-queue", requireAdmin, async (c) => c.json({ pending: await countHealthQueue() }));
 
-/** Writes the pending AI health results with the coordenação token (each merged over the current block). */
+/**
+ * Writes the pending AI health results with the coordenação token: Acampa's
+ * import option ids are mapped onto the church health lists, then merged over
+ * the person's current block (never erasing what is there).
+ */
 people.post("/health-queue/flush", requireAdmin, async (c) => {
   const token = coordinationToken(c.get("session"), PERSONS_RESOURCE);
   if (!token) return fail(c, "COORDINATION_REQUIRED", "Só a coordenação grava estas informações.", 403);
   let written = 0;
   let refused = 0;
+  const lists = await coreClient().healthLists(token);
   for (const item of await listHealthQueue()) {
     try {
-      await writeHealth(token, item.personId, item.patch);
+      const current = (await readHealth(token, item.personId)) ?? { ...EMPTY_HEALTH };
+      const patch = mergeHealth(current, await healthToCore(token, item.patch, lists));
+      if (Object.keys(patch).length) await writeHealth(token, item.personId, patch, current);
       written++;
       await dropHealthQueueItem(item.personId);
     } catch (err) {
-      if ((err as { status?: number }).status === 403 || (err as { status?: number }).status === 404) {
-        refused++;
-        await dropHealthQueueItem(item.personId);
-        continue;
-      }
-      throw err;
+      if (!(err instanceof IpalphaRejected) || err.status === 401) throw err;
+      // core refused this person's write (role rules / validation): dropped, counted
+      refused++;
+      await dropHealthQueueItem(item.personId);
     }
   }
   if (written) publish("campers", "staff");
