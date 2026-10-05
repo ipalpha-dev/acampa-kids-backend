@@ -13,7 +13,8 @@ const client = new MongoClient(uri);
 await client.connect();
 const source = client.db(sourceName);
 const dry = client.db(dryName);
-const lookupCollections = ["bedrooms", "transports", "teams", "categories", "staff", "users", "camperImportDictionary"];
+// the team's names are read live from IPAlpha (IPALPHA_* env required, as in the API)
+const lookupCollections = ["bedrooms", "transports", "teams", "categories", "participants", "camps", "camperImportDictionary"];
 let closeModelDb: (() => Promise<void>) | null = null;
 
 try {
@@ -55,7 +56,7 @@ try {
         .filter((entry) => entry.kind !== "column" && (entry.raw !== entry.label || entry.value == null))
         .slice(0, 30)
         .map((entry) => ({ field: entry.field, raw: entry.raw, canonical: entry.label, matched: entry.value != null })),
-      previewSamples: result.preview.slice(0, 5).map((row) => ({ row: row.row, name: row.name, phone: row.phone, sex: row.sex, active: row.active, roomRole: row.roomRole })),
+      previewSamples: result.preview.slice(0, 5).map((row) => ({ row: row.row, sex: row.sex, active: row.active, roomRole: row.roomRole })),
       ai: getImportAiStats(),
       durationMs: Date.now() - started,
       panic: result.panicMessage,

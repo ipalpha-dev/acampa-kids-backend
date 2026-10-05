@@ -14,7 +14,7 @@ interface Env {
 }
 
 /**
- * Configurações → Superusuário (SUPER_ADMIN_PHONE only): deployment-wide
+ * Configurações → Superusuário (SUPER_ADMIN_PERSON_IDS only): deployment-wide
  * housekeeping that isn't scoped to a single camp.
  *
  *   GET  /api/super/import-cache        — how many remembered import mappings

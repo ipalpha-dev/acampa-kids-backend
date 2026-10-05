@@ -10,7 +10,7 @@ await client.connect();
 
 try {
   const db = client.db(dbName);
-  for (const collection of ["campers", "staff"]) {
+  for (const collection of ["participants"]) {
     const before = await db.collection(collection).countDocuments({ importId, aiReviewStatus: "error" });
     const res = await db.collection(collection).updateMany(
       { importId, aiReviewStatus: "error" },

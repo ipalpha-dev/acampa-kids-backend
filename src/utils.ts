@@ -74,10 +74,6 @@ export function formatBrazilPhone(e164: string): string {
   return `(${ddd}) ${rest.slice(0, 5)}-${rest.slice(5)}`;
 }
 
-/** +5511981234567 -> 5511981234567 (format Comtele expects) */
-export function toComtelePhone(e164: string): string {
-  return e164.replace(/\D/g, "");
-}
 
 /** Great-circle distance in metres between two WGS84 points (haversine). */
 export function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {

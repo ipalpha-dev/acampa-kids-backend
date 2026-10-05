@@ -11,7 +11,8 @@
  * BACKUP FILE (one zip):
  *   acampa-backup-YYYYMMDD-HHmmss.zip
  *   ├── backup.xlsx   every MongoDB collection, one tab per collection
- *   │                 (settings, categories, campers, staff… all with their ids)
+ *   │                 (settings, categories, participants… all with their ids;
+ *   │                 never `sessions` / `healthQueue` — see EXCLUDED below)
  *   └── imagens.zip   every file on the FILES_DIR volume (editor images,
  *                     album photos, thumbnails)
  *
@@ -48,7 +49,18 @@ import { SCOPED } from "../src/services/campScope";
 import pkg from "../package.json";
 
 /** the version of the backup strategy — mirror this in the app's "Sobre" page */
-export const BACKUP_VERSION = 2;
+export const BACKUP_VERSION = 3;
+
+/**
+ * v3 = people live in IPAlpha (CONTRACTS_ACAMPA §15): `participants` (camp ops
+ * keyed by personId) replace campers / staff, `users` is gone. A v1 / v2 file
+ * carries person data Acampa must not hold any more and has no person ids, so
+ * it cannot be restored into v3 (decision 33: no migration ceremony).
+ */
+const FIRST_RESTORABLE_VERSION = 3;
+
+/** never dumped: session tokens (sealed IPAlpha tokens) and health in transit */
+const EXCLUDED = new Set(["sessions", "healthQueue", "ipalphaLoginStates"]);
 
 const LEGACY_SETTINGS_ID = "global";
 
@@ -71,7 +83,8 @@ async function ensureCampForBackup(db: Db): Promise<string> {
     active: true,
     archivedAt: null,
     createdAt: new Date(),
-    createdByUserId: null,
+    createdByPersonId: null,
+    editionId: null,
   });
   return insertedId.toString();
 }
@@ -147,6 +160,9 @@ async function migrate(backup: Backup, db: Db): Promise<Backup> {
     throw new Error(
       `backup format v${backup.version} is NEWER than this script (v${BACKUP_VERSION}) — restore it with the app version that made it.`,
     );
+  }
+  if (backup.version < FIRST_RESTORABLE_VERSION) {
+    throw new Error(`backup format v${backup.version} predates IPAlpha people (v${FIRST_RESTORABLE_VERSION}): it holds person data Acampa no longer keeps and cannot be restored.`);
   }
   let v = backup.version;
   while (v < BACKUP_VERSION) {
@@ -528,7 +544,8 @@ function backupFromSheets(sheets: Map<string, string[][]>): Backup {
 // ----------------------------------------------------------------- commands --
 async function runBackup(camp?: string): Promise<void> {
   const db = await rawDb();
-  const names = (await db.listCollections().toArray()).map((c) => c.name).sort();
+  // sessions (sealed person tokens) and the transient health queue never leave the database
+  const names = (await db.listCollections().toArray()).map((c) => c.name).filter((n) => !EXCLUDED.has(n)).sort();
   const now = new Date();
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   if (camp) console.log(`📎 filtering to camp ${camp} — SCOPED collections only carry this camp's documents; every global collection is dumped in full.`);

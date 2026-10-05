@@ -92,8 +92,7 @@ export const config = {
    */
   filesDir: process.env.FILES_DIR ?? "data/files",
 
-  jwtSecret: process.env.JWT_SECRET ?? "dev-secret-change-me",
-  /** fallback session length; with IPAlpha on, auth-api's `sessionIdleHours` (entry point config) wins */
+  /** fallback session length when auth-api answers no `sessionIdleHours` (entry point config) */
   sessionHours: Number(process.env.SESSION_HOURS ?? 96),
 
   /**
@@ -107,37 +106,8 @@ export const config = {
   /** IPAlpha login (see readIpalphaConfig) */
   ipalpha: readIpalphaConfig(process.env),
 
-  otp: {
-    length: 6,
-    expireMinutes: Number(process.env.OTP_EXPIRE_MINUTES ?? 5),
-    maxAttempts: Number(process.env.OTP_MAX_ATTEMPTS ?? 3),
-    freezeMinutes: Number(process.env.ACCOUNT_FREEZE_MINUTES ?? 30),
-    resendCooldownSeconds: Number(process.env.RESEND_COOLDOWN_SECONDS ?? 60),
-  },
-
-  /** public URL of the app, appended to notification SMS (empty = no link) */
+  /** public URL of the app — the `{link}` of the message templates (empty = no link) */
   appUrl: process.env.APP_URL ?? "",
-
-  /**
-   * Origin used as a prefix for images in notification emails (`/icons/…`,
-   * `/church-logo.png`, `/api/files/…`). Must be reachable by mail clients
-   * (not localhost). `PUBLIC_ORIGIN`, else `BACKEND_PUBLIC_URL`, else `APP_URL`.
-   * Empty = mail send is refused so the missing env is obvious.
-   */
-  publicOrigin: (process.env.PUBLIC_ORIGIN || process.env.BACKEND_PUBLIC_URL || process.env.APP_URL || "").replace(/\/$/, ""),
-
-  mail: {
-    /** SendGrid HTTP API. Empty key = mock (emails printed in the console). */
-    apiKey: process.env.SENDGRID_API_KEY ?? "",
-    from: process.env.MAIL_FROM ?? "",
-    fromName: process.env.MAIL_FROM_NAME ?? "Acampa Kids",
-  },
-
-  comtele: {
-    baseUrl: "https://sms.comtele.com.br/api/v2",
-    apiKey: process.env.COMTELE_API_KEY ?? "",
-    prefix: process.env.COMTELE_PREFIX ?? "AcampaKids",
-  },
 
   /** Private InsightFace service used to index and search gallery faces. */
   face: {
@@ -148,12 +118,6 @@ export const config = {
     minDetectionScore: Number(process.env.FACE_MIN_DETECTION_SCORE ?? 0.4),
   },
 
-  /** Spreadsheet import worker notifications. Values are normalized Brazilian E.164 numbers. */
-  imports: {
-    adminPhone: process.env.IMPORT_ADMIN_PHONE ?? "",
-    superAdminPhone: process.env.IMPORT_SUPER_ADMIN_PHONE ?? "+5561985891092",
-  },
-
   /**
    * Background import worker → API callback. The worker POSTs per-record
    * review results so the API can push a websocket event; the shared secret
@@ -162,9 +126,6 @@ export const config = {
   worker: {
     secret: process.env.WORKER_SECRET ?? "",
   },
-
-  /** Account that is guaranteed the top-level admin role on every boot. */
-  superAdminPhone: process.env.SUPER_ADMIN_PHONE ?? "",
 
   /** OpenAI-compatible gateway for the editor's AI helper (empty key = feature hidden) */
   ai: {
