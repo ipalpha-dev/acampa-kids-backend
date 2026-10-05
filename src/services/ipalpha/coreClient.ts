@@ -126,6 +126,13 @@ export interface PersonName {
   personId: string;
   name: string;
   nickname: string | null;
+  /** decision 39: sex travels with the name ("F" | "M"), null when not informed */
+  sex: "F" | "M" | null;
+}
+
+/** persons `sex` ('female' | 'male', §12) → Acampa's "F" | "M" */
+export function toSexCode(v: unknown): "F" | "M" | null {
+  return v === "female" || v === "F" ? "F" : v === "male" || v === "M" ? "M" : null;
 }
 
 /** persons-api medical block (`health` storage field, §12 + persons data-validation). */
@@ -147,6 +154,7 @@ export interface PersonRow {
   personId: string;
   name: string;
   nickname: string | null;
+  sex: "F" | "M" | null;
   /** storage field → block (only the kinds asked for and allowed) */
   data: Record<string, unknown>;
 }
@@ -252,6 +260,8 @@ export interface IpalphaCoreClient {
   updateName(token: string, personId: string, input: { name?: string; nickname?: string }): Promise<void>;
   updateBirthDate(token: string, personId: string, birthDate: string): Promise<void>;
   register(token: string, input: RegistrationInput): Promise<RegistrationAnswer>;
+  /** persons `POST /links` (decision 38: roles with canRegister) — `agentId` becomes a responsible of `subjectId` */
+  link(token: string, input: { subjectId: string; agentId: string }): Promise<{ linkId: string | null }>;
   healthLists(token: string): Promise<HealthList[]>;
 
   // ── notifications-api (app client) ──
@@ -625,7 +635,7 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       return (Array.isArray(body.items) ? body.items : [])
         .map((x) => obj(x))
         .filter((x) => typeof x.personId === "string" && typeof x.name === "string")
-        .map((x) => ({ personId: x.personId as string, name: x.name as string, nickname: str(x.nickname) }));
+        .map((x) => ({ personId: x.personId as string, name: x.name as string, nickname: str(x.nickname), sex: toSexCode(x.sex) }));
     },
 
     async count(input) {
@@ -647,8 +657,8 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
         const o = obj(v);
         const personId = str(o.personId);
         if (!personId) return null;
-        const { personId: _p, name, nickname, ...data } = o;
-        return { personId, name: typeof name === "string" ? name : "", nickname: str(nickname), data };
+        const { personId: _p, name, nickname, sex, ...data } = o;
+        return { personId, name: typeof name === "string" ? name : "", nickname: str(nickname), sex: toSexCode(sex), data };
       });
     },
 
@@ -687,6 +697,11 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
           .filter((x) => typeof x.personId === "string")
           .map((x) => ({ personId: x.personId as string, created: x.created === true })),
       };
+    },
+
+    async link(token, { subjectId, agentId }) {
+      const body = obj(await roleCall("links", token, "POST", `${cfg.personsApiUrl}/links`, { subjectId, agentId, projectId: cfg.projectId }));
+      return { linkId: str(body.id) };
     },
 
     async healthLists(token) {

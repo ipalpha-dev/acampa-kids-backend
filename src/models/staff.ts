@@ -36,10 +36,10 @@ function toVest(v: unknown): VestStatus {
 export const NO_VEST: VestStatus = { delivered: null, returned: null };
 
 /** Writable camp-ops fields of a team member. */
-export type StaffData = Pick<Staff, "sex" | "active" | "team" | "transportation" | "bedroom" | "roomRole" | "generalNotes" | "importId"> &
+export type StaffData = Pick<Staff, "active" | "team" | "transportation" | "bedroom" | "roomRole" | "generalNotes" | "importId"> &
   Partial<Pick<Staff, "draft" | "aiReviewStatus" | "aiReviewError" | "aiReviewStartedAt" | "aiReviewFinishedAt" | "aiReviewAttempts" | "aiReviewNextRetryAt" | "aiReviewStructured">>;
 
-export const EMPTY_STAFF: StaffData = { sex: null, active: true, team: null, transportation: null, bedroom: null, roomRole: "helper", generalNotes: "", importId: null };
+export const EMPTY_STAFF: StaffData = { active: true, team: null, transportation: null, bedroom: null, roomRole: "helper", generalNotes: "", importId: null };
 
 export async function listStaff(filter: { active?: boolean; includeDraft?: boolean; personIds?: string[] } = {}): Promise<Staff[]> {
   const db = await getDb();

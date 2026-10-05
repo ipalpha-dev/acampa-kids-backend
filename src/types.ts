@@ -218,8 +218,6 @@ interface ParticipantBase {
   /** = personId (the IPAlpha person id) — every reference in camp ops uses it */
   _id: string;
   personId: string;
-  /** "F" | "M" | null — derived from the room's wing (girls / boys); never collected */
-  sex: CamperSex | null;
   /** id of a Team document (not a category) */
   team: string | null;
   /** id of a Transport document (bus / car) */

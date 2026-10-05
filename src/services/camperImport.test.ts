@@ -138,7 +138,6 @@ describe("camper import review delta", () => {
 
   test("person data and health go to core; the camp row keeps camp ops only", () => {
     const data = camperDataFromPreview({ row: 2, name: "Ana", birthDate: "2017-01-02", guardianName: "Maria", guardianPhone: "+5511999999999", allergies: ["x"], healthNotes: "asma", generalNotes: "gosta de futebol", probableGender: "F", blocked: false }, "import-id");
-    expect(data?.ops.sex).toBeNull();
     expect(data?.kid).toMatchObject({ name: "Ana", birthDate: "2017-01-02" });
     expect(data?.guardian).toMatchObject({ name: "Maria", phone: "+5511999999999" });
     expect(data?.health).toMatchObject({ allergies: ["x"], healthNotes: "asma" });

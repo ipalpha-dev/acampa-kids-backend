@@ -127,6 +127,33 @@ export async function registerAdult(tokens: CoordinationTokens, input: { name: s
   return { personId: person.personId, created: person.created };
 }
 
+/**
+ * One more responsável for a kid already in core (decision 38): the adult is
+ * registered (or found by phone), linked to the kid (persons `POST /links`),
+ * named as involved on the kid's `participante` membership and given the
+ * `responsavel` role — never a second copy of the kid.
+ */
+export async function addResponsible(tokens: CoordinationTokens, input: { kidId: string; guardian: GuardianInput; editionId: string }): Promise<{ guardianId: string; linked: boolean }> {
+  const { personId: guardianId } = await registerAdult(tokens, { name: input.guardian.name, phone: input.guardian.phone, email: input.guardian.email ?? null, roles: [RESPONSIBLE_ROLE], editionId: input.editionId, data: input.guardian.data });
+  let linked = true;
+  let linkId: string | null = null;
+  try {
+    linkId = (await coreClient().link(tokens.persons, { subjectId: input.kidId, agentId: guardianId })).linkId;
+  } catch (err) {
+    // an existing link answers 409; anything else is a refusal of this link only
+    if (!(err instanceof IpalphaRejected)) throw err;
+    linked = err.status === 409;
+  }
+  await addMembership(tokens.projects, {
+    personId: input.kidId,
+    role: PARTICIPANT_ROLE,
+    editionId: input.editionId,
+    ...(linkId ? { onBehalf: { by: guardianId, via: linkId } } : {}),
+    involved: [{ personId: guardianId, purpose: "responsible", kinds: [] }],
+  });
+  return { guardianId, linked };
+}
+
 /** A role for an existing person in the edition (helper roles from a staff spreadsheet). */
 export async function grantRole(tokens: CoordinationTokens, personId: string, role: string, editionId: string): Promise<boolean> {
   try {

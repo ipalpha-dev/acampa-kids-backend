@@ -88,8 +88,8 @@ export async function wipeBedrooms(): Promise<number> {
   const { deletedCount } = await db.collection("bedrooms").deleteMany({});
   const now = new Date();
   await Promise.all([
-    db.collection("participants").updateMany({ kind: "camper", $or: [{ bedroom: { $ne: null } }, { bed: { $ne: null } }, { caretakerId: { $ne: null } }] }, { $set: { bedroom: null, bed: null, caretakerId: null, sex: null, updatedAt: now } }),
-    db.collection("participants").updateMany({ kind: "team", bedroom: { $ne: null } }, { $set: { bedroom: null, sex: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ kind: "camper", $or: [{ bedroom: { $ne: null } }, { bed: { $ne: null } }, { caretakerId: { $ne: null } }] }, { $set: { bedroom: null, bed: null, caretakerId: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ kind: "team", bedroom: { $ne: null } }, { $set: { bedroom: null, updatedAt: now } }),
   ]);
   return deletedCount;
 }

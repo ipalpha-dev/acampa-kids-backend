@@ -58,14 +58,14 @@ people.post("/names", async (c) => {
   const known = await knownIds(c);
   const allowed = known.all ? ids : ids.filter((id) => known.ids.has(id));
   const names = await namesOf(allowed);
-  return c.json({ items: allowed.filter((id) => names.has(id)).map((id) => ({ personId: id, name: names.get(id)!.name, nickname: names.get(id)!.nickname })) });
+  return c.json({ items: allowed.filter((id) => names.has(id)).map((id) => ({ personId: id, name: names.get(id)!.name, nickname: names.get(id)!.nickname, sex: names.get(id)!.sex })) });
 });
 
 people.get("/search", requireManager, async (c) => {
   const role = c.req.query("role") ?? PARTICIPANT_ROLE;
   if (![PARTICIPANT_ROLE, TEAM_ROLE, RESPONSIBLE_ROLE].includes(role)) return fail(c, "ROLE_INVALID", "Papel inválido.");
   const page = await coreClient().listPeople(actingToken(c, PERSONS_RESOURCE), { role, q: c.req.query("q") || undefined, cursor: c.req.query("cursor") || undefined, limit: 50 });
-  return c.json({ items: page.items.map((p) => ({ personId: p.personId, name: p.name, nickname: p.nickname })), nextCursor: page.nextCursor });
+  return c.json({ items: page.items.map((p) => ({ personId: p.personId, name: p.name, nickname: p.nickname, sex: p.sex })), nextCursor: page.nextCursor });
 });
 
 people.get("/health-lists", async (c) => c.json({ lists: await coreClient().healthLists(actingToken(c, PERSONS_RESOURCE)) }));

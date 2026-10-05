@@ -41,9 +41,9 @@ export function firstName(name: string): string {
 }
 
 /** `items` with `name` / `nickname` merged from core (one paged batch per 200). */
-export async function withNames<T extends { id: string }>(items: T[]): Promise<(T & { name: string; nickname: string | null })[]> {
+export async function withNames<T extends { id: string }>(items: T[]): Promise<(T & { name: string; nickname: string | null; sex: "F" | "M" | null })[]> {
   const names = await namesOf(items.map((i) => i.id));
-  return items.map((i) => ({ ...i, name: names.get(i.id)?.name ?? "", nickname: names.get(i.id)?.nickname ?? null }));
+  return items.map((i) => ({ ...i, name: names.get(i.id)?.name ?? "", nickname: names.get(i.id)?.nickname ?? null, sex: names.get(i.id)?.sex ?? null }));
 }
 
 function str(v: unknown, max = 2000): string {

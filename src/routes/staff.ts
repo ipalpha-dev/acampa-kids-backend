@@ -3,7 +3,7 @@ import { createMiddleware } from "hono/factory";
 import { publish } from "../services/realtime";
 import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireManager, requireRole } from "../middleware/roles";
-import { countStaffPerBedroom, findBedroomById, sexFromBedroomId } from "../models/bedrooms";
+import { countStaffPerBedroom, findBedroomById } from "../models/bedrooms";
 import { countCampersPerBedroom } from "../models/campers";
 import { listCampers, reassignCampers, setCaretakerOf, updateCamper } from "../models/campers";
 import { listEvents, listRoles, unassignStaffEverywhere } from "../models/schedule";
@@ -77,16 +77,14 @@ export function serializeStaffList(list: Staff[], scope: Scope) {
   return list.map((s) => serializeStaffFor(s, scope)).filter((x): x is NonNullable<typeof x> => x !== null);
 }
 
-/** Bedroom change: the room's wing decides the derived sex. */
 async function setStaffBedroom(id: string, bedroom: string | null, extra: Partial<StaffData>) {
-  return updateStaff(id, { ...extra, bedroom, sex: await sexFromBedroomId(bedroom) });
+  return updateStaff(id, { ...extra, bedroom });
 }
 
 function serialize(s: Staff) {
   return {
     id: s._id,
     personId: s.personId,
-    sex: s.sex,
     active: s.active,
     team: s.team,
     bedroom: s.bedroom,
@@ -158,7 +156,7 @@ staff.get("/", requireRole("admin", "staff", "parent"), async (c) => {
   const nameQ = (c.req.query("q") ?? "").trim();
   const [list, scope] = await Promise.all([listStaff({ active }), resolveScope(c.get("user"))]);
   let visible = list.filter((s) => staffVisibility(scope, s) !== "none");
-  let names = new Map<string, { name: string; nickname: string | null }>();
+  let names = new Map<string, { name: string; nickname: string | null; sex: "F" | "M" | null }>();
   if (nameQ) {
     names = await namesOf(visible.map((s) => s._id));
     visible = visible.filter((s) => nameMatches(names.get(s._id)?.name ?? "", nameQ) || nameMatches(names.get(s._id)?.nickname ?? "", nameQ));
@@ -172,6 +170,7 @@ staff.get("/", requireRole("admin", "staff", "parent"), async (c) => {
     ...serializeStaffFor(s, scope)!,
     name: names.get(s._id)?.name ?? "",
     nickname: names.get(s._id)?.nickname ?? null,
+    sex: names.get(s._id)?.sex ?? null,
     ...(mayHealth ? { hasHealth: health.has(s._id) ? hasHealthInfo(health.get(s._id)) : false } : {}),
   }));
   return c.json({ items, nextCursor: page.nextCursor, total: visible.length });
@@ -185,7 +184,7 @@ staff.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
   if (!s || !out) return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
   const name = (await namesOf([s._id])).get(s._id);
   const withHealth = staffVisibility(scope, s) === "full";
-  return c.json({ staff: { ...out, name: name?.name ?? "", nickname: name?.nickname ?? null, ...(withHealth ? { health: await readHealth(actingToken(c, PERSONS_RESOURCE), s._id) } : {}) } });
+  return c.json({ staff: { ...out, name: name?.name ?? "", nickname: name?.nickname ?? null, sex: name?.sex ?? null, ...(withHealth ? { health: await readHealth(actingToken(c, PERSONS_RESOURCE), s._id) } : {}) } });
 });
 
 /**
@@ -463,7 +462,7 @@ staff.post("/register", async (c) => {
   if (!person) return fail(c, "REGISTRATION_FAILED", "O IPAlpha não confirmou o cadastro.", 502);
   if (await participantKind(person.personId)) return fail(c, "ALREADY_IN_CAMP", "Esta pessoa já está neste acampamento.", 409);
   await coreClient().addMembership(projectsToken, { personId: person.personId, role: TEAM_ROLE, editionId });
-  const created = await insertStaff(person.personId, { ...EMPTY_STAFF, ...result.patch, sex: await sexFromBedroomId(result.patch.bedroom) });
+  const created = await insertStaff(person.personId, { ...EMPTY_STAFF, ...result.patch });
   publish("staff", "bedrooms");
   void syncWelcomes();
   return c.json({ staff: { ...serialize(created), name }, created: person.created }, 201);
@@ -480,7 +479,7 @@ staff.post("/", async (c) => {
   if (!("patch" in result)) return fail(c, result.code, result.message, result.status);
   const full = await bedroomFullMessage(result.patch.bedroom ?? null, null);
   if (full) return fail(c, "BEDROOM_FULL", full, 409);
-  const created = await insertStaff(personId, { ...EMPTY_STAFF, ...result.patch, sex: await sexFromBedroomId(result.patch.bedroom) });
+  const created = await insertStaff(personId, { ...EMPTY_STAFF, ...result.patch });
   publish("staff", "bedrooms");
   void syncWelcomes();
   return c.json({ staff: serialize(created) }, 201);
@@ -497,7 +496,6 @@ staff.put("/:id", async (c) => {
   if (result.patch.bedroom !== undefined && result.patch.bedroom !== existing.bedroom) {
     const full = await bedroomFullMessage(result.patch.bedroom, existing.bedroom);
     if (full) return fail(c, "BEDROOM_FULL", full, 409);
-    result.patch.sex = await sexFromBedroomId(result.patch.bedroom);
   }
   const updated = await updateStaff(existing._id, result.patch);
   // left the room, or stopped being a caretaker there → their kids are orphans now
@@ -567,9 +565,8 @@ staff.post("/:id/move", async (c) => {
     const occupied = (st.get(target) ?? 0) + (ca.get(target) ?? 0);
     if (room && occupied + 1 + myKids.length > bedroomCapacity(room)) return fail(c, "BEDROOM_FULL", `O quarto ${room.name} não tem lugar para esta pessoa e ${myKids.length} crianças.`, 409);
     await setStaffBedroom(me._id, target, { roomRole: "caretaker" });
-    const sex = await sexFromBedroomId(target);
     for (const k of myKids) {
-      await updateCamper(k._id, { bedroom: target, bed: null, caretakerId: me._id, sex });
+      await updateCamper(k._id, { bedroom: target, bed: null, caretakerId: me._id });
       touched.add(k._id);
     }
   } else {

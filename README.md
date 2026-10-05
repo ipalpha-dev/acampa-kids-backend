@@ -31,27 +31,17 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | Variable | Description |
 |---|---|
 | `MONGODB_URI` / `MONGODB_DB` | MongoDB connection. Code defaults to `mongodb://localhost:27017` / `camping`; the local compose container uses host port `27019` |
-| `FILES_DIR` | folder holding the uploaded image bytes (editor pictures + the photo album's photos and thumbnails; Mongo keeps only the metadata). Default `data/files`. **Mount a volume here in production** — images stored inside Mongo by older versions are migrated to disk on first read |
-| `COMTELE_API_KEY` | Comtele API key (get it at https://sms.comtele.com.br). **Empty = mock mode**: OTP codes are printed to the server console instead of being sent by SMS |
-| `OTP_EXPIRE_MINUTES` | OTP lifetime (default `5`) |
-| `OTP_MAX_ATTEMPTS` | wrong attempts before freezing the account (default `3`) |
-| `ACCOUNT_FREEZE_MINUTES` | how long the account stays frozen (default `30`) |
-| `SESSION_HOURS` | session token lifetime (default `96`, 4 days); an IPAlpha login uses the `sessionIdleHours` auth-api returned for it |
-| `TRUST_PROXY_HOPS` | proxies in front of the API that append to `X-Forwarded-For` (default `1` = Traefik ingress). The client IP is that many entries from the right; `0` = socket address only |
-| `IPALPHA_*` | IPAlpha login (optional; all required ones or the feature is off) — see [IPAlpha login](#ipalpha-login-core-auth-api-) and `DEPLOYMENT.md` |
-| `APP_URL` | public URL of the frontend, appended to notification SMS (optional) |
-| `PUBLIC_ORIGIN` | public origin of the site (frontend + `/api`). Prefixes images in notification emails. Empty = mail send is refused. Alias: `BACKEND_PUBLIC_URL` |
-| `SENDGRID_API_KEY` | SendGrid API key for `POST https://api.sendgrid.com/v3/mail/send`. **Empty = mock mode**: emails are printed to the server console |
-| `MAIL_FROM` / `MAIL_FROM_NAME` | From-address (verified SendGrid sender, required with the API key to send) and display name (default `Acampa Kids`) |
-| `FACE_SERVICE_URL` | private face service (repo `ipalpha-acampa-kids-2025-face-service`, sibling folder `../face-service`) used to index gallery faces and run the parents' photo search. **Empty = face search disabled** (parents still see the published album) |
-| `FACE_MATCH_THRESHOLD` | cosine similarity a gallery face must reach to count as a match (default `0.22`) — low so parents find their kid; a few other children in the results is acceptable |
-| `FACE_MIN_DETECTION_SCORE` | detections below this are ignored, both when indexing and when reading the reference (default `0.4`) |
-| `NOTIFY_COALESCE_SECONDS` | changes to the same person within this window become one SMS (default `20`) |
-| `AI_BASE_URL` / `AI_API_KEY` | OpenAI-compatible API used by the existing editor AI helpers |
-| `AI_LIVE_BASE_URL` / `AI_LIVE_API_KEY` | OpenAI **Live** API for the spoken, two-way assistant (`POST /v1/live/sessions`). An OpenAI-compatible gateway is not enough. **Empty key = the drawer shows as unavailable** |
-| `AI_LIVE_MODEL` | voice model that runs the conversation (default `gpt-live-1`) |
-| `AI_LIVE_VOICE` | the voice it answers in (default `marin`; Brazilian Portuguese: `bossa` feminine or `tempo` masculine) |
-| `AI_LIVE_BACKEND_MODEL` | reasoning model GPT-Live delegates to, and the one that actually reads MongoDB (default `gpt-5.6-terra`) |
+| `FILES_DIR` | folder holding the uploaded image bytes (Mongo keeps only the metadata). Default `data/files`. **Mount a volume here in production** |
+| `IPALPHA_*` (+ `SESSION_TOKEN_KEY`) | IPAlpha core — identity, people, roles, messages. **All required**: without them nobody can sign in (the API still boots). See [Identity, people and roles](#identity-people-and-roles-ipalpha-core-) |
+| `SESSION_HOURS` | fallback session idle length (default `96`) when auth-api answers no `sessionIdleHours` |
+| `SUPER_ADMIN_PERSON_IDS` | comma list of IPAlpha person ids — the deployment owners (seeds, import caches, archived-year writes) |
+| `TRUST_PROXY_HOPS` | proxies in front of the API that append to `X-Forwarded-For` (default `1` = Traefik ingress); `0` = socket address only |
+| `APP_URL` | public URL of the frontend — the `{link}` of the message templates |
+| `NOTIFY_COALESCE_SECONDS` | messages to the same person with the same template inside this window collapse into one (default `20`) |
+| `FACE_SERVICE_URL` | private face service used by the parents' photo search. **Empty = face search disabled** |
+| `FACE_MATCH_THRESHOLD` / `FACE_MIN_DETECTION_SCORE` | face match / detection thresholds (defaults `0.22` / `0.4`) |
+| `AI_BASE_URL` / `AI_API_KEY` | OpenAI-compatible API used by the editor AI helpers |
+| `AI_LIVE_*` | OpenAI **Live** API for the spoken assistant (empty key = unavailable) |
 
 ## Read-only camp assistant
 
@@ -71,109 +61,61 @@ The full-screen focus view holds a spoken conversation. It is a real two-way cal
 - Tool calls come back down the browser's data channel and are executed by `POST /api/assistant/tool`, which re-checks the caller's session and role — the browser never touches Mongo.
 - Sessions are billed per minute, so closing the drawer hangs up.
 
-## Login flow (roles + phone + OTP)
+## Identity, people and roles (IPAlpha core) 🔑
 
-1. User picks one of 4 roles: `parent`, `staff`, `health_staff`, `admin`.
-   **The same person may hold several roles** (e.g. parent + staff + admin) —
-   the selected role is sent to the backend, checked against the person's
-   roles (`ROLE_NOT_ALLOWED` otherwise) and becomes the session's `activeRole`.
-2. Enters their Brazilian mobile number (DDD + 9 digits).
-3. Backend sends a 6-digit OTP (valid for **5 minutes**):
-   - with `COMTELE_API_KEY` set → real SMS via Comtele `POST /tokenmanager`, validated via `PUT /tokenmanager`
-   - without a key → code logged to console, validated locally
-4. **3 wrong attempts freeze the account** for `ACCOUNT_FREEZE_MINUTES`.
-5. On success the backend issues a JWT bound to a MongoDB session doc, expiring **4 days** later.
+Acampa owns **camp operations only** (CONTRACTS_ACAMPA §15). Identity, people
+(names, birth dates, documents, contacts, family links, health) and roles live
+in IPAlpha: persons-api and projects-api. Every person reference in Acampa's
+Mongo is an IPAlpha **person id**; nothing about the person is stored, cached
+or logged. All core HTTP goes through `services/ipalpha/coreClient.ts`.
 
-> **"admin" in the route tables below** means `requireManager`: the admin
-> role **or** a team member listed in Settings → Organizadores (see
-> [Organizers](#organizers-admin-like-team-members-)). Only categories,
-> the organizers list, the notification switches, `/welcome-preview` and
-> `/api/ai/usage` are `requireAdmin` (the real admin role).
+**Roles** are memberships of the one yearly Acampa project (camps = its
+editions, `camps.editionId`): per edition `participante` (kids — never sign
+in), `responsavel`, `equipe`, `saude`, `organizacao`, `organizacao-jogos`,
+`pontuacao`, `coletes`, `fotografia`, `checkin`, `checkin-onibus`; project-wide
+`coordenacao` (every edition). They are granted in Mordomia (or by Acampa's
+imports with the coordenação token). `services/scope.ts#ROLE_FLAGS` maps a role
+onto what it sees; the WINDOWS (check-in, bus trips, vests, team / parent
+access) stay camp ops in `settings`, and so does which vehicle each
+`checkin-onibus` person stands at (`settings.busHelpers`). Audiences used by the
+route guards: `admin` = coordenação, `staff` = any team / helper role, `parent`
+= responsável. Unknown future helper keys behave as `equipe`.
 
-### Endpoints
+**Login** — both paths end with one IPAlpha token per live role of the person
+in the camp's edition (+ project-wide), kept **sealed** (AES-256-GCM,
+`SESSION_TOKEN_KEY`) in the Acampa session; the browser only holds an opaque
+session token (stored hashed):
 
-| Method | Path | Body | Result |
-|---|---|---|---|
-| POST | `/api/auth/otp/request` | `{ phone, role }` | sends OTP → `{ expiresAt, roles, delivery }` |
-| POST | `/api/auth/otp/verify` | `{ phone, role, code }` | → `{ token, tokenExpiresAt, user: { …, roles, activeRole } }` |
-| GET | `/api/auth/me` | (Bearer token) | → `{ user }` |
-| POST | `/api/auth/role` | `{ role }` (Bearer token) | the SAME person switches profile (mãe que também é da equipe): revokes this session and issues a new one → `{ token, tokenExpiresAt, user }`. `ROLE_FORBIDDEN` when the role isn't among their available ones; the target role's access window still applies |
+| Route | What |
+|---|---|
+| `GET /api/auth/ipalpha/config` | public: `{enabled, authOrigin, clientId, entryPoint}` |
+| `POST /api/auth/ipalpha/start` | PAR (persons + projects + auth resources, `project_id`) → popup URL |
+| `POST /api/auth/ipalpha/complete` | `{code, state}` → session |
+| `POST /api/auth/otp/request` | `{phone}` → auth-api sends the code (relay v2) → `{challenge}` (sealed, no phone kept) |
+| `POST /api/auth/otp/verify` | `{challenge, code}` → session |
+| `GET /api/auth/me` · `POST /api/auth/role` · `POST /api/auth/camp` · `POST /api/auth/logout` | who am I (name read live) · switch role (re-checked live in projects-api, no SMS) · switch year (coordenação) · logout |
+| `GET /api/auth/offline-key` | per-session key for the encrypted offline copy (rotated by a new session / role / camp switch) |
 
-| POST | `/api/auth/logout` | (Bearer token) | revokes the session |
-| GET | `/health` | — | liveness check |
+No role in the project → `NOT_IN_PROJECT`. The session lands on the most
+capable role whose access window is open (`STAFF_ACCESS_*` when none is).
+Idle length = auth-api's `sessionIdleHours`, sliding. **Any 401 from core on
+the acting role token ends the session** (`401 SESSION_ENDED`,
+`services/coreErrors.ts`). Super admins (`SUPER_ADMIN_PERSON_IDS`) still need a
+role to sign in.
 
-**Available profiles** (`services/roles.ts#availableRolesOf`). `users.roles` is
-only what the account was created with, and it goes stale: the admin puts
-someone on the team roster, or enrols a kid naming them as guardian, without
-ever touching their account. So the profiles offered — the `roles` sent to the
-client, and what `/api/auth/role` accepts — come from the DATA:
+**People at use** (`services/people.ts`, `routes/people.ts`): names through the
+app client (`persons:app-names`, ≤ 200 per call, the lists are PAGED), health /
+contacts / documents with the ACTING role token (persons-api role rules
+decide; logged for the person), health-tag chips through the anonymized count
+endpoint. Lists never show health details (neutral ♥ only) unless filtered by a
+health tag or narrowed by name to ≤ 6 people (decision 31).
 
-- **`parent` ⇔ at least one kid with that `guardianPhone`.** It is a fact, not
-  a grant: a stored `parent` with no kid enrolled is **dropped** (the mother of
-  last year's camper is not a responsible this year).
-- **`staff` ⇔ an ACTIVE `staff` record with that phone.** Being admin does not
-  create a roster row. An administrator who also serves on the team (a real
-  Equipe record) receives both profiles and chooses one after OTP.
-- `admin` and `health_staff` are never derived: they are granted.
-
-The role a login LANDS on is `pickActiveRole` over **that** list, so an admin
-always lands on admin. An account the data gives no profile at all gets
-`NO_PROFILE` (403) instead of an SMS. Live sessions are re-checked on every
-request and on the WebSocket upgrade (`middleware/auth#roleNoLongerValid`): a
-parent session without kids, or an admin's `staff` session, is revoked (401).
-
-Error responses carry machine-readable codes: `PHONE_INVALID`, `USER_NOT_FOUND`, `NO_PROFILE` (the phone has no profile at this year's camp), `ROLE_NOT_ALLOWED` (phone exists but doesn't hold the selected role — includes `availableRoles`), `OTP_COOLDOWN`, `OTP_EXPIRED`, `OTP_INVALID` (with `attemptsLeft`), `ACCOUNT_FROZEN` (with `minutesLeft`), `UNAUTHORIZED`.
-
-## IPAlpha login (core auth-api) 🔑
-
-Optional, on only when every required `IPALPHA_*` variable is set (see
-[`DEPLOYMENT.md`](./DEPLOYMENT.md); boot logs the missing **names**, never
-values). IPAlpha owns identity; Acampa keeps its own roles, access windows,
-freeze rules and sessions. Code: `routes/ipalpha.ts`, `services/ipalpha/`
-(all core HTTP behind `coreClient.ts`), shared login gates in `services/login.ts`.
-
-| Method | Path | Body | Result |
-|---|---|---|---|
-| GET | `/api/auth/ipalpha/config` | — | `{ enabled, authOrigin, clientId, entryPoint }` (public; `enabled:false` hides the button) |
-| POST | `/api/auth/ipalpha/start` | `{ personHint? }` | stores `{state, codeVerifier}` (`ipalphaLoginStates`, TTL 10 min, one-time), PARs server-side with the client secret + PKCE S256, `response_mode=web_message`, resource `ipalpha:persons` (+ `project_id`, `login_hint`) → `{ url }` for the popup |
-| POST | `/api/auth/ipalpha/complete` | `{ code, state }` (or `{ error, state }`) | state consumed once → code exchanged server-side → token verified locally (JWKS, `iss`, `aud=ipalpha:persons`, `token_use=external_access`, `azp`) → account by `ipalphaPersonIds`, else by the person's **verified** phone read fresh from persons-api (+ roster / guardian provisioning) → person id bound → same profile / frozen / window gates as the phone login → the exact `/otp/verify` answer |
-
-- **Legacy phone + code** keeps its request/response shapes. With IPAlpha on,
-  `/otp/request` relays to auth-api (`/internal/login/relay/start`, forwarding
-  the client IP — the `X-Forwarded-For` entry our ingress appended, i.e. the
-  last one with `TRUST_PROXY_HOPS=1`, else the socket; only valid IPs) and stores only the relay `challengeId`
-  on `users.otp` (`provider: "ipalpha"`, no code); `/otp/verify` relays the
-  check, binds the returned person id and opens the session. auth reasons map
-  to the existing codes: `invalidCode` → `OTP_INVALID`, `tryAgainLater` /
-  `tooManyAttempts` → on verify `ACCOUNT_FROZEN` (frozen locally too), on
-  request `OTP_COOLDOWN` (never frozen); `tooManyRequests` / `resendTooSoon` →
-  `OTP_COOLDOWN`, `challengeExpired` → `OTP_EXPIRED`. Only a 401 token
-  rejection (`invalidToken` / no reason) refreshes the system token and
-  retries once — a 401 `invalidCode` is never sent twice.
-  `personNotFound` keeps the local SMS path (roster phones not in core yet).
-  The Settings → Testes SMS redirect does not apply to relayed codes.
-- **Session length**: the `sessionIdleHours` of the answer that proved this
-  login (relay verify `sessionIdleHours`, popup `/oauth/token`
-  `session_idle_hours`); absent or a local code → `SESSION_HOURS`. Stored on
-  the session (`sessions.hours`) and reused on profile / camp switches.
-- **`/start` limit**: 20 per minute per client IP, in memory per pod →
-  429 `IPALPHA_RATE_LIMITED` (+ `secondsLeft`, `Retry-After`).
-- **Camp activation** with `IPALPHA_PROJECT_ID` + `IPALPHA_PROJECTS_API_URL`:
-  `current-by-year?year=<camp.year>` on projects-api — best effort, logged,
-  never blocks the activation.
-- New error codes: `IPALPHA_DENIED`, `IPALPHA_STATE_INVALID`,
-  `IPALPHA_CODE_INVALID`, `IPALPHA_DISABLED` (404, feature off),
-  `IPALPHA_UNAVAILABLE` (503 — core unreachable / 5xx; the app shows its maintenance scene),
-  `IPALPHA_MISCONFIGURED` (500 — core refused our PAR / token request:
-  credentials, entry point, params; logged as an error),
-  `IPALPHA_RATE_LIMITED` (429, `/start` only).
-
-**Do not:** store or cache person tokens or any core profile/person data
-(only `users.ipalphaPersonIds` — ids, nothing else); log tokens, codes or
-phones; read persons-api ahead of use; trust an unverified phone; return
-secrets from `/config`. Only system tokens are cached, in memory, until 30 s
-before expiry. Tests: `bun test` (fake core + local ES256 JWKS +
-mongodb-memory-server, synthetic data — `src/testing/`, never shipped).
+**Messages** (`services/messages.ts`, `src/messages/templates.ts`): every SMS /
+e-mail is a project template sent by notifications-api to a person id
+(language, contact and access log are core's). The catalog holds the default
+copy in 5 languages; `POST /api/settings/message-templates/seed` (or
+`bun scripts/templates-json.ts` for provisioning) creates them, and Settings
+edits them through `projects:templates`.
 
 ## Realtime feed (WebSocket) 📡
 
@@ -182,7 +124,7 @@ localStorage and **never polls**. Instead each logged-in client keeps one
 WebSocket open and the server pushes the data.
 
 ```
-GET /api/realtime?token=<jwt>   (upgrade: websocket)
+GET /api/realtime?token=<session token>   (upgrade: websocket)
 ```
 
 The token goes in the query string because browsers can't set headers on a
@@ -193,7 +135,7 @@ Messages (server → client, JSON):
 
 | `type` | when | payload |
 |---|---|---|
-| `snapshot` | right after connect, or after the client sends `"refresh"` | `data: { campers, staff, bedrooms, categories, roles, events }` — only what the session's role may read (same rules as the REST `requireRole` guards; parents only get `categories`) |
+| `snapshot` | right after connect, or after the client sends `"refresh"` | `data: { campers, staff, bedrooms, categories, roles, events, … }` — only what the session's role may read. `campers` / `staff` are **camp-ops records keyed by person id: no names, no health** (names come from the paged REST lists / `POST /api/people/names`) |
 | `update` | after **any** write (debounced 25 ms) | `data` with just the collections that changed, whole lists |
 | `ping` | every 30 s | keep-alive; client answers `"pong"` |
 
@@ -309,91 +251,40 @@ Error codes: `ROLE_NOT_FOUND`, `EVENT_NOT_FOUND`, `NAME_INVALID`, `NAME_DUPLICAT
 
 ## Campers (acampantes)
 
-Full CRUD (admin). Linked to bedroom, bed (`cama`), team,
-transport, allergies and chronic conditions (category option ids); guardian /
-insurance / emergency contact kept as text. `weightKg` is a number (one
-decimal, 5–200) or null — `WEIGHT_INVALID` otherwise.
+Kids are `participants` rows with `kind: "camper"` (camp ops: room, bed,
+caretaker, team, vehicle, check-ins, `invitedBy`, `generalNotes`,
+`bedroomPreference`, QR token), `id` = the IPAlpha person id. Name, birth date,
+documents, school, responsáveis and health live in core. `GET /api/campers` is
+paged (`{items, nextCursor, total}`) with the page's names; see
+[`API_CHANGES.md`](./API_CHANGES.md) for every route and shape.
 
-**Caretaker (`caretakerId`)** — the staff member responsible for the kid: must
-sleep in the kid's room with `roomRole: "caretaker"` (409 `CARETAKER_INVALID`
-otherwise). A room change without `caretakerId` makes the kid an **orphan**
-(`caretakerId: null`) — orphans are listed first on the admin page. When a
-caretaker leaves the room / becomes a helper / is deleted, their kids become
-orphans.
+**Caretaker (`caretakerId`)** — the team member (person id) responsible for the
+kid: must sleep in the kid's room with `roomRole: "caretaker"` (409
+`CARETAKER_INVALID`). A room change without `caretakerId` makes the kid an
+**orphan**; a caretaker leaving the room makes their kids orphans.
 
 **What the team sees** (services/scope.ts): a caretaker gets the kids under
-their care any time; the other kids of their room — and every kid for a
-helper — only WHILE THE CAMP IS HAPPENING (first → last programme day, São
-Paulo). Those come as **care** records (`contactsHidden: true`): health,
-notes, preferences, room / team / bus and the guardian's **name + phone** (to
-reach the parents) — no emergency contact, insurance, e-mail or document
-data. Admin, medical team and check-in helpers keep the full record.
-Colleagues in the same room reach a team member as **name + phone + room
-role + team** (`redacted: true`: no transport, health or check-in).
+their care any time; the rest of their room only WHILE THE CAMP IS HAPPENING —
+as **care** records. Coordenação, saúde and check-in keep the full view; health
+itself is read with the acting role token, so core's role rules have the last
+word.
 
-**Medication (`medications`)** — a list, one entry per medicine:
-`{ name, dose, times: ["HH:MM"], asNeeded, notes }`. `times` are the fixed
-moments of the day it is given (the medical checklist ticks each one); `asNeeded`
-= no fixed time. Neither = schedule not confirmed yet. ≤ 20 medicines, ≤ 12 times
-each, `MEDICATIONS_INVALID` otherwise. Staff use the same `medications` shape.
-
-| Method | Path | Who | Body |
-|---|---|---|---|
-| GET | `/api/campers?bedroom=<id>` | admin, staff, health_staff | — |
-| GET | `/api/campers/:id` | admin, staff, health_staff | — |
-| GET | `/api/campers/:id/detail` | admin, staff, health_staff | `{ camper, bedroom, caretakers (staff in the room), roommates }` |
-| GET | `/api/campers/lookup/:id` | admin, staff, health_staff — **only while the camp is on** (403 `CAMP_NOT_ACTIVE` otherwise) | emergency badge scan ("Ler crachá") → `{ camper, belonged, foreignLookupCount, foreignLookupBlocked, bedroom?, caretaker? }`; out-of-scope kids come as CARE records, are logged and count towards the alert / block thresholds |
-| POST | `/api/campers` | admin | all camper fields (`bedroom` must have a free bed → 409 `BEDROOM_FULL`) |
-| PUT | `/api/campers/:id` | admin | partial |
-| DELETE | `/api/campers/:id` | admin | — |
-
-Bedroom occupancy (`occupied`, `available`) now counts **campers + staff**, and
-the response also carries `occupiedCampers` / `occupiedStaff`.
-
-**Detail endpoints** (what the admin sees when clicking a person or a room):
-
-| Method | Path | Returns |
-|---|---|---|
-| GET | `/api/staff/:id/detail` | `{ staff, bedroom, schedule: [{ eventId, date, startTime, endTime, title, emoji, role, detail, implicit, defaultRole }], campers, roommates }` — `implicit: true` entries came from the person's **position**, not an escala; `defaultRole` is the função that would fall on that position in the event (or null) |
-| GET | `/api/bedrooms/:id/detail` | `{ bedroom, campers, staff }` |
+**Health** (`PUT /:id/health` — saúde / coordenação; `PUT /:id/parent` — the
+responsável) is written to persons-api (`medical`); the change log keeps only
+WHICH fields changed and who changed them. New kids come from imports or
+`POST /api/campers/register` (coordenação: persons registration + `participante`
+/ `responsavel` memberships in the edition).
 
 ## Staff (equipe)
 
-Camp volunteers, stored in the `staff` collection (unique by phone). Picker
-fields store category **option ids** and are validated against these category
-keys: `team → equipe`, `transportation → transporte`, `allergies → alergias`,
-`healthIssues → condicao-cronica`. `bedroom` is a **Bedroom id** — assigning
-someone to a full room fails with 409 `BEDROOM_FULL`.
-`foodRestrictions` and `healthNotes` are free text (≤ 500 chars); `medications` is the same list as on campers.
-`phone` is the person's **login** and is therefore **required and unique** on
-`POST /api/staff` / `PUT /api/staff/:id`: an empty phone gets 400
-`PHONE_REQUIRED` and a phone already on the roster gets 409 `PHONE_DUPLICATE`.
-(Bulk imports write through the model, so records that arrived without a phone
-stay readable — the form asks for one the first time they are edited.)
-`roomRole` is `"caretaker"` (responsável: looks after specific kids) or
-`"helper"` (auxiliar, the default).
-
-**Admins and the roster.** Admin / super-admin logins live on `users` and do
-**not** need a `staff` record. Adding an admin (wizard or `POST /api/admins`)
-only grants the role. If they also serve on the team, create a normal Equipe
-row; deleting that row removes them from Equipe and keeps the login. Cleanup
-→ Equipe wipes roster rows and never touches `users`.
-
-| Method | Path | Who | Body |
-|---|---|---|---|
-| GET | `/api/staff?active=true\|false` | admin, staff, health_staff | — |
-| GET | `/api/staff/:id` | admin, staff, health_staff | — |
-| POST | `/api/staff` | admin | `{ name, phone (obrigatório, único), active?, team?, bedroom?, transportation?, allergies?, foodRestrictions?, healthIssues?, medications? }` |
-| PUT | `/api/staff/:id` | admin | partial (same fields + `roomRole`) |
-| POST | `/api/staff/:id/move` | admin | `{ bedroom, kids: "orphan" \| "bring" \| "assign" \| "swap", assignTo?, swapWith? }` — moves a caretaker and decides what happens to their kids: stay orphans, come along (room + bed cleared), go to `assignTo` (same room; a helper is promoted) or swap with `swapWith` (target room: both people switch rooms, each takes the other's kids) |
-| DELETE | `/api/staff/:id` | admin | — (their kids become orphans) |
-| POST / DELETE | `/api/staff/:id/checkin` | admin | marks / unmarks the person as arrived (roll call) |
-| GET | `/api/staff/me/checkin` | staff, health_staff, admin | → `{ allowed, reason, date, opensAt, location, staff }` — can the caller check themselves in right now? |
-| POST | `/api/staff/me/checkin` | staff, health_staff, admin | `{ lat, lng, accuracyM? }` → `{ staff, distanceM }` |
-
-Error codes: `STAFF_NOT_FOUND`, `NAME_INVALID`, `PHONE_INVALID`, `PHONE_DUPLICATE` (409),
-`ACTIVE_INVALID`, `TEAM_INVALID`, `BEDROOM_INVALID`, `BEDROOM_FULL` (409), `TRANSPORTATION_INVALID`,
-`ALLERGIES_INVALID`, `HEALTHISSUES_INVALID`.
+Team members are `participants` rows with `kind: "team"` (active, room, room
+role `caretaker`/`helper`, team, vehicle, check-in, vest, Preparação ticks,
+notes), `id` = person id. Whether they may sign in, and as what, comes from
+their project roles. `GET /api/staff` is paged with names; new people come
+from imports or `POST /api/staff/register` (coordenação: registration +
+`equipe` membership); `POST /api/staff {personId}` adds an existing person.
+`POST /api/staff/:id/move` keeps its caretaker semantics (orphan / bring /
+assign / swap).
 
 ### Self check-in (departure day) 📍
 
@@ -411,7 +302,7 @@ both rules hold — checked on the server, never trusted from the client:
    (`checkinLocations`: church, camp site… the nearest one wins; plus the
    GPS accuracy, capped at 200 m so a bogus accuracy can't be abused).
 
-The session must be linked to an active staff record by phone. Errors:
+The session's person must be on this camp's team (active). Errors:
 `NOT_LINKED`, `INACTIVE`, `NO_SCHEDULE`, `NOT_TODAY`, `NOT_YET`, `ALREADY_CHECKED_IN` (409),
 `LOCATION_REQUIRED`, `TOO_FAR` (carries `distanceM`). A successful self
 check-in stamps `checkin` with the person's own user and writes the same
@@ -491,177 +382,39 @@ are uploaded separately via `/api/files` and referenced by URL).
 Errors: `TITLE_INVALID` (≤ 120 chars), `CONTENT_INVALID`, `IDS_INVALID`,
 `INSTRUCTION_NOT_FOUND`.
 
-## Settings (admin) ⚙️
+## Settings ⚙️
 
-One document (`settings`, `_id: "global"`) with the camp-wide configuration.
-Until an admin saves it, the defaults apply.
-
-| Method | Path | Who | Body |
-|---|---|---|---|
-| GET | `/api/settings` | any logged-in role | — |
-| GET | `/api/settings/welcome-preview` | admin | → `{ staff: { count, windowOpen, names }, parents: { … } }` — who would get the welcome SMS right now |
-| PUT | `/api/settings` | admin, organizer (`organizers` / `notifications` admin-only) | `{ checkinLocations?: [{ id, name, lat, lng, radiusM }], notifications?: { bedroomChanges?, roleChanges?, checkinConfirmation?, …, checkinReminder? }, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, scoreHelpers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }], parentAccessWindow?: { from, until } }` |
-
-`checkinLocations` defaults to one spot, "Igreja" = Igreja Presbiteriana em Alphaville (a legacy single `checkinLocation` document is read as that spot)
-(`-23.48053637134259, -46.83077891444747`, radius 300 m). `radiusM` must be
-between 50 and 5000. `notifications` keys are booleans (all default **`false`**);
-the patch is partial. `checkinReminder.at` is the ISO instant at which the
-whole team is texted to do their check-in (`null` = no reminder); the response
-also carries the read-only `checkinReminder.sentAt`, reset whenever `at` changes. The response also carries `smsEnabled` (read-only:
-whether a Comtele key is configured). Errors: `LOCATION_INVALID`,
-`NOTIFICATIONS_INVALID`, `WINDOW_INVALID`, `REMINDER_INVALID`, `HELPERS_INVALID`, `ORGANIZERS_INVALID`, `CONTACTS_INVALID`, `NOTHING_TO_UPDATE`.
-
-### SMS redirect (Settings → Testes) 📵
-
-`smsRedirect: { enabled, staffPhone, parentPhone }` — admin only in `PUT
-/api/settings`. While `enabled`, `services/comtele.ts#resolveSmsTarget`
-reroutes **every** text: the ones meant for a team member (login code +
-notifications) go to `staffPhone`, the ones meant for a parent / guardian
-(login code, welcome, bus check-in, parent content) go to `parentPhone`.
-A null phone for an audience drops that audience's texts (OTP request →
-503 `SMS_REDIRECT_UNSET`). Admin logins are never redirected. The OTP
-response reports `delivery: "redirect"` so the login screen says where
-the code went. Must be OFF before the camp — Notificações shows a red
-banner while it is on.
-
-### Contacts shared with parents 📞
-
-`parentContacts: [{ id, title, staffId }]` is an ordered list managed by the admin. Each entry points to one active staff member and gives that person a purpose-specific title such as "Coordenação do acampamento". Parents see them (name + phone) while the parents' window is open.
+One document per camp with the camp-wide configuration: meeting points,
+notification toggles, the windows (check-in, return bus, team / parent access,
+score suspense), `busHelpers {helpers:[{personId, vehicleId}]}` and
+`parentContacts [{id, title, personId}]`. **Who holds which helper role is not
+here any more** — it is a project role in projects-api (Mordomia). Message
+templates: `GET|PATCH /api/settings/message-templates[/:slug]`, `POST …/seed`,
+`POST …/:slug/reset` (coordenação).
 
 ## Parents 👨‍👩‍👧
 
-A parent is a `users` doc with the `parent` role whose phone matches
-`Camper.guardianPhone` (staff who are also parents just gain the role).
-`services/scope.ts#resolveParentScope`:
+A parent is a person holding the `responsavel` role in the camp's edition AND
+named as involved responsável on their kids' `participante` memberships
+(`services/members.ts#kidsOfResponsible`). `resolveParentScope` gives them their
+own kids (full), the kids' rooms, the `parentContacts` always and, inside the
+parents' window, the team of those rooms (contact view — phones are read from
+core with the responsável token). Health edits (`PUT /api/campers/:id/parent`)
+go to persons-api; medical changes notify the saúde team, the coordenação and
+the caretaker. `settings.parentAccessWindow` gates their sessions.
 
-- **campers**: only their own kids, full record (while `kidsRoomsDraft` the
-  room, bed and caretaker are blanked).
-- **bedrooms**: the kids' rooms.
-- **staff**: ONLY while the **parents' window** is open — the team of the
-  kids' rooms and the `parentContacts`, as `redacted` records with `name`,
-  `phone`, `bedroom`, `roomRole` (no vest, health, team or check-in).
-  Outside the window nothing.
-- **events**: events with `visibleToParents`, with `roles` / `assignments` emptied.
-  **roles**: none.
-- categories (active options), teams, settings.
+## Helper roles 🙋
 
-The parents' window (`services/camp.ts#parentWindow`, read-only
-`settings.parentWindow: { from, until, open }`) runs from `checkinWindow.from`
-(one hour before the first event when unset) to the end of the last event.
-`services/realtime.ts#rearmWindows` arms timers at both edges (re-armed on
-every settings / event write and at boot) so the staff records are pushed /
-withdrawn live.
-
-| Method | Path | Who | Body |
-|---|---|---|---|
-| PUT | `/api/campers/:id/parent` | parent (own kid) | any of `allergies, drugAllergies, healthIssues, medications, foodRestrictions, healthNotes, weightKg, insurance, insuranceCard, generalNotes` — other keys ignored → `{ camper, changed }` |
-| GET | `/api/campers/:id/changes` | admin | → `{ changes: [{ id, at, byName, medical, changes: [{ field, before, after }] }] }` (newest first) |
-
-Every real change is appended to `camperChangeLog` and texted
-(`notifications.parentEdits`): a MEDICAL field (anything but `generalNotes`)
-→ the medical team, every admin and the kid's caretaker; observations alone
-→ the caretaker only (`services/notify.ts#notifyParentEdit`, sent at once).
-Parents may also `GET` campers, staff, bedrooms, teams and the schedule
-(scoped as above).
-
-**Access window.** `settings.parentAccessWindow: { from, until }` (Settings →
-Geral) gates parent logins and sessions exactly like `staffAccessWindow` does
-for the ordinary team (`STAFF_ACCESS_NOT_YET` / `STAFF_ACCESS_ENDED` with
-`audience: "parent"`, sockets closed with 4401 at the edge). Both ends null =
-always. Parents are NEVER texted about rooms, roles or any other change —
-only the welcome and the bus check-in.
-
-### Check-in helpers (team members running the kids' roll calls) 🙋🚌
-
-`checkinWindow: { from: ISO | null, until: ISO | null }` opens the church and outbound-bus roll calls. `busReturnWindow` separately opens the return-bus roll call days later. Each response adds `open` (read-only).
-
-| List | Roll call | What a listed person receives while the window is open |
-|---|---|---|
-| `checkinHelpers` | church check-in (`POST/DELETE /api/campers/:id/checkin`) | **every camper, full record** (health included — they confirm it with the parents) and every bedroom |
-| `busHelpers` | bus boarding on the outbound and return trips (`POST/DELETE /api/campers/:id/checkin/bus` and `/bus-return`) | `{ helpers: [{ staffId, vehicleId }] }` — each person is **linked to one vehicle** (an active `transporte` option; independent from `staff.transportation`, they work the *door*, they need not ride in it) and receives **only the campers of that vehicle** as **name-only records** (`redacted: true`: name, age, room, team, check-in stamps — health, contacts, notes and weight blanked) and every bedroom |
-
-`services/scope.ts` evaluates `checkinHelper` / `busHelper` on every
-request and on every realtime push; `camperVisibility()` decides `full` /
-`name` / `none` per kid (kids in the person's own room stay `full`) and
-`routes/campers.ts#serializeCamperFor` applies it everywhere a camper leaves
-the server (lists, `/detail`, the snapshot, the check-in responses). The
-check-in handlers check the permission **per kid**: `403
-CHECKIN_WINDOW_CLOSED` to anyone who is not admin nor a helper of *that* roll
-call inside the window — a bus helper cannot touch the church check-in, nor a
-kid from another vehicle. Other staff members stay invisible to helpers.
-Outside the window nothing extra is sent;
-`services/realtime.ts#scheduleCheckinWindow` arms timers at both edges (on
-save and on boot) so the scoped collections are re-pushed the moment the
-window opens or closes — helpers gain / lose the data without a reload.
-
-### Organizers (admin-like team members) 📋
-
-`organizers: { staffIds: string[] }` — no time window. A listed person's
-scope is the **admin's** (`{ all: true, admin: false }`, `services/scope.ts`):
-every camper, staff member, bedroom and the whole programme, and
-`middleware/roles.ts#requireManager` lets them do the admin's writes —
-campers, staff (CRUD + roll call), bedrooms, teams, documents, check-in
-reset and `PUT /api/settings`. Occurrences: only the ones organizers
-registered (the admin sees every group). Four areas stay with the real admin
-(`requireAdmin`): the `organizers` list itself and the `notifications`
-switches (both 403 in `PUT /api/settings`, except `notifications.checkinReminder`),
-categories, `/welcome-preview`, `/api/ai/usage` ("Sobre"). Saving the list
-publishes every scoped collection so their phones update at once.
-
-### Medical team (see every kid, always) 🩺
-
-`medicalStaff: { staffIds: string[] }` — **no time window**. A listed person's
-scope gets `medical: true` (`services/scope.ts`): `camperVisibility` is
-`"full"` for **every camper** (health included) and `canSeeBedroom` is true
-for **every bedroom**, before / during / after the camp — which also gives
-them every vehicle. Strictly read-only: no camper / bedroom writes, no
-check-ins (those keep their own rules). Occurrences: only the ones the
-medical team registered. Staff and programme: as any team member. Saving
-the list publishes `campers`, `bedrooms`; the frontend's window-close purge
-skips medical members.
-
-### Game organizers (Settings → Jogos) 🏆
-
-`gameOrganizers: { staffIds: string[] }` — **no time window**. Scope
-`organizer: true` + `gameOrganizer: true`: they see **every staff member in
-full** and the **whole programme**, `requireOrganizer` lets them write the
-schedule (events, roles, assignments, editor images), and they write the
-scoreboard (`POST /api/scores`, `POST /api/scores/reset/:teamId`,
-`DELETE /api/scores/:id`). No other admin rights (campers, rooms, settings).
-Joining the list sends the enrolment SMS.
-
-### Score helpers (ajudantes do placar) 📷
-
-`scoreHelpers: { staffIds: string[] }` — **no time window**. People who only
-run the bulk **QR scan** tied to a programme event: `POST /api/scores/scan`
-(the kid's QR at a door → the kid's team gets the event's points) and
-`PUT /api/scores/scan/:eventId`. Scope `scoreHelper: true`: every camper
-reaches them as a `"name"` record (name + team, `redacted`), so the scan can
-be resolved locally. They never give / take points by team (`POST
-/api/scores` is 403), never zero a team, `DELETE` only their **own scan**
-lines, and get no organizer rights. Joining the list sends the enrolment SMS.
-
-### Vest helpers (coletes) 🦺
-
-`vestHelpers: { staffIds: string[] }` — open before / during the camp and
-up to **7 days after** it ends (`services/camp.ts#VEST_GRACE_DAYS`: the vests
-come back in the days after); the admin / organizers are never gated. The people who
-hand out the team vests at the start of the camp and take them back at the
-end (the admin does not do it). A listed person's scope gets `vestHelper:
-true`: `staffVisibility` is `"contact"` for **every staff member** — the
-record travels `redacted` with only `name`, `phone` and `vest` (never health,
-room, team or check-in). They may call:
-
-| Method | Path | Who | Effect |
-|---|---|---|---|
-| POST / DELETE | `/api/staff/:id/vest/delivery` | admin, vest helper | stamps / clears `vest.delivered` |
-| POST / DELETE | `/api/staff/:id/vest/return` | admin, vest helper | stamps / clears `vest.returned` (needs a delivery) |
-
-`Staff.vest = { delivered: CamperCheckin | null, returned: CamperCheckin | null }`.
-Errors: `ALREADY_DELIVERED`, `NOT_DELIVERED`, `ALREADY_RETURNED`,
-`NOT_RETURNED` (409). `POST /api/settings/checkin/reset` clears the vests too.
-Joining the list sends the same enrolment SMS as the other lists
-(`notifications.enrolments`).
+| Role key | What it adds (on top of the person's own team row, when they have one) |
+|---|---|
+| `organizacao` | the coordenação's data scope and writes, minus its own settings |
+| `organizacao-jogos` | programme writes + the scoreboard |
+| `pontuacao` | the bulk QR scan by event |
+| `saude` | every kid in full + health edits + the medication checklist, always |
+| `checkin` | the church roll call while the check-in window is open |
+| `checkin-onibus` | the roll call at the door of the vehicle in `settings.busHelpers` (either trip window) |
+| `coletes` | every team member's vest, until a week after the camp |
+| `fotografia` | uploads / publishes the album |
 
 ## Teams (times) 🚩 and scoreboard (placar) 🏆
 
@@ -749,42 +502,19 @@ keep the album unpublished until the photos are reviewed, and drop the
 `gallery` collection (embeddings included) when the camp's retention period
 ends.
 
-## SMS notifications to the team 📲
+## Messages (notifications) 📲
 
-`services/notify.ts` texts the team members concerned by a change so they
-open the app and read their instructions. The SMS is a short nudge and never
-carries details — the app is the source of truth:
-
-> AcampaKids: João, houve uma mudança na sua escala (função). Abra o app para ver suas instruções. https://…
-
-| Toggle (`settings.notifications`) | Fires when | Who gets it |
-|---|---|---|
-| `bedroomChanges` | a camper's `caretakerId` changes (`POST/PUT/DELETE /api/campers`, `POST /api/staff/:id/move`) | the caretaker who lost the kid and the one who received it — never helpers or the other caretakers of the room |
-| `roleChanges` | a person is assigned / reassigned (role or detail) / removed in an event, the event's date or time changes, the event is deleted, or a role's name / instructions / "for everyone" flag changes | each person whose duty in that event changed (explicit assignment or "for everyone" default) |
-| `checkinConfirmation` | a team member's church check-in is recorded (`POST /api/staff/me/checkin` or the admin roll call `POST /api/staff/:id/checkin`) | that person — *"seu check-in foi feito com sucesso. Lembre-se de conferir as crianças do seu quarto no app."* Sent at once (not coalesced); undoing a check-in sends nothing |
-| `occurrences` | an occurrence is registered (`POST /api/occurrences`, by an admin or the medical team) | every admin account with a phone, except the one who registered it — names who registered and who is involved (never the description). Sent at once; admins are not gated by the team access window |
-| `busCheckin` | a kid's BUS check-in is recorded (`POST /api/campers/:id/checkin/bus`) | the kid's guardian — *"a Ana está a caminho de um fim de semana incrível para aprender sobre Jesus! Aproveite o fim de semana livre: vamos cuidar muito bem dela."* (gendered by `Camper.sex`, falling back to `Camper.probableGender`). Sent at once; undo sends nothing |
-| `parentWelcome` | the parents' access window (`settings.parentAccessWindow`) is open — checked at boot, at the window edges, when the window / toggle is edited, hourly | every parent account with a kid and a phone, ONCE ever (`users.welcomeSentAt`, atomic claim) — *"a Ana está inscrita no Acampa Kids! Acompanhe tudo pelo app. Entre com o celular … em <app>"*. **Off by default.** Switching a welcome toggle on (this one or `enrolments`) texts everyone pending at once — the admin UI previews the count via `GET /api/settings/welcome-preview` and asks first |
-| `parentEdits` | a parent edited their kid's "Informações de saúde" (`PUT /api/campers/:id/parent`) | medical field changed → medical team + every admin + the kid's caretaker; observations only → the caretaker. Sent at once |
-| `checkinReminder` | the instant `settings.checkinReminder.at` is reached (timer re-armed on every settings write and at boot, hourly safety net) | every active team member with a phone who has no check-in yet — *"chegou a hora do seu check-in!"*. **Nothing goes out while the date is unset**; sent ONCE per date (atomic claim on `sentAt`), picking a new date re-arms it. Not gated by the team access window |
-
-Rules: only staff with a phone are texted; the notifier diffs BEFORE/AFTER
-records so no-op edits (e.g. renaming a kid) send nothing; every change for the
-same person within `NOTIFY_COALESCE_SECONDS` (default 20) is merged into ONE
-SMS; delivery is fire-and-forget and never blocks or fails the write. Without
-`COMTELE_API_KEY` the texts are printed to the console. `APP_URL` (optional)
-is appended to the message.
-
-## Multi-role users
-
-- Users are unique by **phone**; each user has a `roles: string[]` array.
-- The profiles a person may actually enter with come from the data, not from
-  that array — see [Available profiles](#endpoints)
-  (`services/roles#availableRolesOf`): `parent` only while a kid of theirs is
-  enrolled, `staff` only from an active roster record and never for an admin.
-- The login lands on the highest-privilege available profile and the session
-  stores it as the active role (JWT + session doc); the switcher
-  (`POST /api/auth/role`) accepts nothing outside that same list.
+`services/notify.ts` decides WHO is told WHAT; `services/messages.ts` sends the
+project template by person id. Toggles in `settings.notifications` (all off by
+default) as before: room / caretaker changes, duties in the programme, own
+room / team / vehicle, check-in confirmation and reminder, occurrences
+(coordenação), family health edits, bus boarding (the kid's responsáveis),
+welcomes (team / families, once per camp), photos published, content changes.
+Plain `equipe` members are messaged only inside the team access window; helper
+roles and parent contacts always. Messages to the same person with the same
+template inside `NOTIFY_COALESCE_SECONDS` collapse into the last one. Birthday
+notices are off: the kids' birth dates are not readable by the app client (no
+core seam yet).
 
 ## Multi-year camps
 
@@ -846,16 +576,11 @@ camp other than the active one.
 
 ### Sessions & switching years
 
-- The JWT and its `sessions` document carry a `campId` (JWT claim `camp`);
-  `verifySessionToken` returns it, and sessions created before this feature
-  fall back to the active camp.
-- Login (`/api/auth/otp/verify`) always lands on the **active** camp.
-- `POST /api/auth/camp { campId }` — a global admin, or a staff/health_staff
-  session that is an **organizer of the active camp**
-  (`services/campAccess.ts#canSwitchCamps`, evaluated in the active camp
-  regardless of which camp the session is currently in). Anyone else gets
-  `403 CAMP_FORBIDDEN`. Revokes the current session and issues a new one,
-  same role, in the target camp.
+- The `sessions` document carries a `campId`; login always lands on the
+  **active** camp.
+- `POST /api/auth/camp { campId }` — the coordenação (project-wide role, sees
+  every edition) or a super admin. Anyone else gets `403 CAMP_FORBIDDEN`. The
+  same session moves to the target camp (the offline key rotates).
 - A **history session** (its camp ≠ the active one): `activeRole` is forced to
   `admin` for every read (so list/detail endpoints and the realtime snapshot
   answer with the full manager view); `middleware/camp.ts#campWriteGuard`

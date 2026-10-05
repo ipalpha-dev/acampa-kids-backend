@@ -34,6 +34,8 @@ beforeEach(async () => {
   await resetData();
   core = createFakeCore();
   world = emptyWorld();
+  world.sex.set(KID_A, "female");
+  world.sex.set(KID_B, "male");
   for (const [id, name] of [[ADMIN, "Coordenadora Teste"], [CARE, "Líder Teste"], [MEDIC, "Saúde Teste"], [PARENT, "Família Teste"], [KID_A, "Ana Pequena"], [KID_B, "Bruno Pequeno"]]) world.names.set(id, name);
   world.health.set(KID_A, { allergies: ["amendoim"], drugAllergies: [], healthIssues: [], neurodivergent: false, medications: [{ name: "Ritalina", dose: "10mg", times: ["08:00"], asNeeded: false, notes: "" }], foodRestrictions: "", healthNotes: "asma leve", weightKg: 30, insurance: "", insuranceCard: "" });
   world.memberships.push(
@@ -47,8 +49,8 @@ beforeEach(async () => {
   installFakeCore(core, world);
   enableIpalpha(core, keys);
   roomId = (await insertBedroom({ name: "101", group: "girls", bunkBeds: 2, singleBeds: 1, notes: "" }))._id;
-  await insertStaff(CARE, { ...EMPTY_STAFF, bedroom: roomId, roomRole: "caretaker", sex: "F" });
-  await insertCamper(KID_A, { ...EMPTY_CAMPER, bedroom: roomId, caretakerId: CARE, sex: "F", generalNotes: "gosta de pintar" });
+  await insertStaff(CARE, { ...EMPTY_STAFF, bedroom: roomId, roomRole: "caretaker" });
+  await insertCamper(KID_A, { ...EMPTY_CAMPER, bedroom: roomId, caretakerId: CARE, generalNotes: "gosta de pintar" });
   await insertCamper(KID_B, { ...EMPTY_CAMPER });
 });
 
@@ -59,7 +61,7 @@ describe("campers: camp ops + names live, health only with the acting role token
     expect(res.status).toBe(200);
     expect(res.body.total).toBe(2);
     expect(res.body.items).toHaveLength(1);
-    expect(res.body.items[0]).toMatchObject({ id: KID_A, name: "Ana Pequena", hasHealth: true });
+    expect(res.body.items[0]).toMatchObject({ id: KID_A, name: "Ana Pequena", sex: "F", hasHealth: true });
     expect(res.body.items[0].health).toBeUndefined();
     const next = await call("GET", `/api/campers?limit=1&cursor=${res.body.nextCursor}`, undefined, token);
     expect(next.body.items[0]).toMatchObject({ id: KID_B, name: "Bruno Pequeno", hasHealth: false });
@@ -152,6 +154,17 @@ describe("campers: camp ops + names live, health only with the acting role token
     expect(JSON.stringify(row)).not.toContain("98888");
   });
 
+  test("a second responsável joins the SAME kid through persons /links (decision 38)", async () => {
+    const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    const res = await call("POST", `/api/campers/${KID_A}/responsibles`, { name: "tio paulo", phone: "11977776666" }, token);
+    expect(res.status).toBe(201);
+    const guardianId = res.body.responsible.personId;
+    expect(world.links).toEqual([{ subjectId: KID_A, agentId: guardianId, projectId: "project-test-1" } as never]);
+    expect(world.memberships.find((m) => m.personId === KID_A && m.role === "participante")?.involved?.map((i) => i.personId)).toContain(guardianId);
+    expect(world.memberships).toContainEqual(expect.objectContaining({ personId: guardianId, role: "responsavel", editionId: TEST_EDITION }));
+    expect(core.callsTo("POST /registrations").map((c) => (c.json as { children?: unknown }).children)).toEqual([undefined]);
+  });
+
   test("only the coordenação registers people", async () => {
     world.memberships.push({ personId: "person-org", role: "organizacao", editionId: TEST_EDITION });
     const token = await sessionFor(keys, "person-org", ["organizacao"]);
@@ -203,7 +216,7 @@ describe("/api/people", () => {
   test("names: a team member only learns the names of people in their scope", async () => {
     const care = await sessionFor(keys, CARE, ["equipe"]);
     const res = await call("POST", "/api/people/names", { personIds: [KID_A, KID_B, ADMIN] }, care);
-    expect(res.body.items).toEqual([{ personId: KID_A, name: "Ana Pequena", nickname: null }]);
+    expect(res.body.items).toEqual([{ personId: KID_A, name: "Ana Pequena", nickname: null, sex: "F" }]);
     const admin = await sessionFor(keys, ADMIN, ["coordenacao"]);
     expect((await call("POST", "/api/people/names", { personIds: [KID_A, KID_B] }, admin)).body.items).toHaveLength(2);
     expect((await call("POST", "/api/people/names", { personIds: Array.from({ length: 201 }, (_, i) => `p${i}`) }, admin)).status).toBe(400);

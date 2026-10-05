@@ -57,6 +57,8 @@ export async function sendMessage(key: TemplateKey, recipients: SendInput[], lab
       for (const [k, val] of Object.entries(r.variables ?? {})) v[k] = String(val);
       if (vars.includes("name") && v.name === undefined) v.name = firstName(names.get(r.personId)?.name ?? "");
       if (vars.includes("link") && v.link === undefined) v.link = link;
+      // notifications-api refuses the whole batch when a declared variable is missing (§18): never leave one out
+      for (const k of vars) v[k] ??= "";
       return { personId: r.personId, variables: v };
     });
     const editionId = await campEditionId();

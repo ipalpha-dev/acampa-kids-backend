@@ -1,5 +1,5 @@
 import { getDb } from "../db";
-import type { CamperAiReviewStatus, CamperCheckin, CamperSex, CoreRole } from "../types";
+import type { CamperAiReviewStatus, CamperCheckin, CoreRole } from "../types";
 
 /**
  * `participants` (CONTRACTS §15, approved shape): one row per person per camp
@@ -19,10 +19,6 @@ export function toCheckin(v: unknown): CamperCheckin | null {
   return { at: o.at, byPersonId: (o.byPersonId as string) ?? "", byRole: (o.byRole as CoreRole) ?? "equipe", ...(typeof o.note === "string" && o.note ? { note: o.note } : {}) };
 }
 
-export function toSex(v: unknown): CamperSex | null {
-  return v === "F" || v === "M" ? v : null;
-}
-
 export function toAiStatus(v: unknown): CamperAiReviewStatus | null {
   return (["pending", "processing", "structured", "reviewed", "error"] as CamperAiReviewStatus[]).includes(v as CamperAiReviewStatus) ? (v as CamperAiReviewStatus) : null;
 }
@@ -32,7 +28,6 @@ export function baseOf(doc: Record<string, unknown>) {
   return {
     _id: doc.personId as string,
     personId: doc.personId as string,
-    sex: toSex(doc.sex),
     team: (doc.team as string) ?? null,
     transportation: (doc.transportation as string) ?? null,
     bedroom: (doc.bedroom as string) ?? null,

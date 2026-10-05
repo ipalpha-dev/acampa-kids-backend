@@ -3,7 +3,7 @@ import { publish } from "../services/realtime";
 import { notifyBusCheckin, notifyCamperChange, notifyForeignLookupAlert, notifyParentEdit } from "../services/notify";
 import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireManager, requireRole } from "../middleware/roles";
-import { findBedroomById, sexFromBedroomId } from "../models/bedrooms";
+import { findBedroomById } from "../models/bedrooms";
 import { insertCamperLookup } from "../models/camperLookups";
 import { CHECKIN_FIELD, deleteCamper, EMPTY_CAMPER, findCamperById, insertCamper, listCamperChanges, listCampers, listCheckinLog, logCamperChange, logCheckin, setCamperCheckin, updateCamper, type CamperData } from "../models/campers";
 import { FOREIGN_LOOKUP_ALERT_AT, FOREIGN_LOOKUP_BLOCK_AT, findStaffById, listStaff, markForeignLookupAlerted, recordForeignLookup } from "../models/staff";
@@ -13,7 +13,8 @@ import { isInvalid, parseBedroom, parseMedications, parseSingle, parseTeam, pars
 import { serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 import { campInProgress, campPeriod } from "../services/camp";
-import { actingToken, campEditionId, coordinationToken } from "../services/acting";
+import { actingToken, campEditionId, coordinationContext, coordinationToken } from "../services/acting";
+import { addResponsible } from "../services/coreRegistration";
 import { coreClient } from "../services/ipalpha";
 import { PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
 import { hasHealthInfo, healthCounts, matchesHealthTag, nameMatches, namesOf, pageOf, readHealth, readHealthMany, tagFilter, writeHealth } from "../services/people";
@@ -48,7 +49,6 @@ export function serializeCamper(k: Camper) {
   return {
     id: k._id,
     personId: k.personId,
-    sex: k.sex,
     invitedBy: k.invitedBy,
     caretakerId: k.caretakerId,
     qrToken: k.qrToken,
@@ -211,7 +211,7 @@ campers.get("/", requireRole("admin", "staff", "parent"), async (c) => {
   let visible = list.filter((k) => camperVisibility(scope, k) !== "none");
   const mayHealth = (k: Camper) => healthAllowed(scope, k);
 
-  let names = new Map<string, { name: string; nickname: string | null }>();
+  let names = new Map<string, { name: string; nickname: string | null; sex: "F" | "M" | null }>();
   if (q) {
     names = await namesOf(visible.map((k) => k._id));
     visible = visible.filter((k) => nameMatches(names.get(k._id)?.name ?? "", q) || nameMatches(names.get(k._id)?.nickname ?? "", q));
@@ -236,6 +236,7 @@ campers.get("/", requireRole("admin", "staff", "parent"), async (c) => {
       ...serializeCamperFor(k, scope)!,
       name: names.get(k._id)?.name ?? "",
       nickname: names.get(k._id)?.nickname ?? null,
+      sex: names.get(k._id)?.sex ?? null,
       ...(mayHealth(k) ? { hasHealth: h ? hasHealthInfo(h) : false } : {}),
       ...(detail && h ? { health: h } : {}),
     };
@@ -330,6 +331,7 @@ campers.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
       ...out,
       name: names.get(k._id)?.name ?? "",
       nickname: names.get(k._id)?.nickname ?? null,
+      sex: names.get(k._id)?.sex ?? null,
       ...(withHealth ? { health } : {}),
       responsibles: responsibles.map((id) => ({ personId: id, name: rNames.get(id)?.name ?? "" })),
     },
@@ -510,10 +512,30 @@ campers.post("/register", async (c) => {
   });
   await client.addMembership(projectsToken, { personId: reg.responsible.personId, role: RESPONSIBLE_ROLE, editionId });
   if (Object.keys(health.patch).length) await writeHealth(personsToken, child.personId, health.patch);
-  const created = await insertCamper(child.personId, { ...EMPTY_CAMPER, ...data, sex: await sexFromBedroomId(data.bedroom) });
+  const created = await insertCamper(child.personId, { ...EMPTY_CAMPER, ...data });
   publish("campers", "bedrooms");
   void notifyCamperChange(null, created);
   return c.json({ camper: { ...serializeCamper(created), name }, responsible: { personId: reg.responsible.personId, created: reg.responsible.created } }, 201);
+});
+
+/**
+ * POST /api/campers/:id/responsibles { name, phone, email? } — one more
+ * responsável for a kid already in core (coordenação; decision 38): the adult
+ * is registered or found by phone, linked to the kid (persons `POST /links`),
+ * involved on the kid's membership and given `responsavel`.
+ */
+campers.post("/:id/responsibles", async (c) => {
+  const kid = await findCamperById(c.req.param("id"));
+  if (!kid) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
+  const body = await c.req.json<{ name?: unknown; phone?: unknown; email?: unknown }>().catch(() => null);
+  const name = typeof body?.name === "string" ? titleCaseName(body.name) : "";
+  const phone = typeof body?.phone === "string" ? normalizeBrazilPhone(body.phone) : null;
+  if (!name || !phone) return fail(c, "RESPONSIBLE_INVALID", "Informe o nome e o celular do responsável.");
+  const ctx = await coordinationContext(c.get("session"));
+  if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status);
+  const result = await addResponsible(ctx.tokens, { kidId: kid._id, guardian: { name, phone, email: typeof body?.email === "string" && body.email ? body.email : undefined }, editionId: ctx.editionId });
+  void publish("campers");
+  return c.json({ responsible: { personId: result.guardianId, name }, linked: result.linked }, 201);
 });
 
 /** POST /api/campers { personId, ...camp ops } — an existing IPAlpha person joins this camp's kids. */
@@ -530,7 +552,7 @@ campers.post("/", async (c) => {
   if (full) return fail(c, "BEDROOM_FULL", full, 409);
   const bad = await caretakerConsistent(data.bedroom ?? null, data.caretakerId ?? null);
   if (bad) return fail(c, "CARETAKER_INVALID", bad, 409);
-  const created = await insertCamper(personId, { ...EMPTY_CAMPER, ...data, sex: await sexFromBedroomId(data.bedroom) });
+  const created = await insertCamper(personId, { ...EMPTY_CAMPER, ...data });
   publish("campers", "bedrooms");
   void notifyCamperChange(null, created);
   return c.json({ camper: serializeCamper(created) }, 201);
@@ -549,7 +571,6 @@ campers.put("/:id", async (c) => {
     const full = await bedroomFullMessage(patch.bedroom, existing.bedroom);
     if (full) return fail(c, "BEDROOM_FULL", full, 409);
     if (patch.caretakerId === undefined) patch.caretakerId = null;
-    patch.sex = await sexFromBedroomId(patch.bedroom);
   }
   const bedroom = patch.bedroom !== undefined ? patch.bedroom : existing.bedroom;
   const caretakerId = patch.caretakerId !== undefined ? patch.caretakerId : existing.caretakerId;

@@ -1,0 +1,98 @@
+# API changes — IPAlpha people rewrite (CONTRACTS_ACAMPA §15)
+
+For the frontend (§16). People, roles and contacts live in IPAlpha; Acampa's API serves
+camp operations + person data read live. Every person id below is an **IPAlpha person
+id**; `Camper.id` / `Staff.id` / `caretakerId` / `staffId` (assignments) **are** person ids.
+
+## Cross-cutting
+
+- Any authenticated route may answer `401 {code:"SESSION_ENDED"}` (core revoked / expired
+  the acting role token — go to login, wipe the offline copy), `503 IPALPHA_UNAVAILABLE`
+  (maintenance screen) or `403 {code:"CORE_FORBIDDEN", reason}` (core's role rules).
+- The session token is opaque (not a JWT); idle length is sliding (`sessionIdleHours`).
+- `byUserId`/`byName`/`camperName`/`createdByName` snapshots are gone everywhere → ids only
+  (`byPersonId`, `personId`). Resolve names with `POST /api/people/names`.
+- Audience (`requireRole`) is `admin` (coordenação) | `staff` (any team/helper role) |
+  `parent` (responsável). `health_staff` is gone.
+
+## Auth `/api/auth`
+
+| Route | Change |
+|---|---|
+| `POST /otp/request {phone, locale?}` | → `{success, challenge, codeLength, expiresAt, expireMinutes, delivery:"sms"}`. Errors `PHONE_INVALID`, `NOT_IN_PROJECT` (404), `OTP_COOLDOWN`, `IPALPHA_UNAVAILABLE`. Removed `phone/role/roles/reused`, `USER_NOT_FOUND`, `NO_PROFILE`, `SMS_*`, mock delivery. |
+| `POST /otp/verify {challenge, code}` | **body changed** (was `{phone, code}`) → login answer. Errors `OTP_INVALID(+attemptsLeft)`, `OTP_EXPIRED`, `ACCOUNT_FROZEN(+minutesLeft)`, `NOT_IN_PROJECT`, `STAFF_ACCESS_*`. |
+| `POST /ipalpha/complete {code, state}` | → login answer; `NOT_IN_PROJECT` (403) replaces `NO_PROFILE`. |
+| login answer | `{success, token, tokenExpiresAt, sessionIdleHours, user, camp, camps?}`; `user = {id, personId, name, roles: CoreRole[], activeRole: CoreRole, audience, superAdmin}` (no `phone`, `locale`). |
+| `GET /me` | `{user, camp, camps?}` (same `user` shape, name read live). |
+| `POST /role {role: CoreRole}` | Keeps the SAME token → `{success, tokenExpiresAt, user, camp, camps?}`. Re-checked live; a role gone → 403 `ROLE_FORBIDDEN` and it leaves `user.roles`. Offline key rotates. |
+| `POST /camp {campId}` | Same token; coordenação / super admin only. Offline key rotates. |
+| **NEW** `GET /offline-key` | `{key (base64, 32 B), alg:"AES-GCM", role, healthAllowed, sessionExpiresAt, campEndsAt}` — `no-store`; wipe the IndexedDB copy on logout, role/camp switch, 401, and after `campEndsAt`. |
+
+CoreRole keys: `coordenacao, organizacao, organizacao-jogos, pontuacao, saude, coletes,
+fotografia, checkin, checkin-onibus, equipe, responsavel` (+ future helper keys = equipe).
+
+## Campers `/api/campers` (camp ops only)
+
+Record: `{id, personId, sex, invitedBy, caretakerId, qrToken, team, transportation, bed,
+bedroom, generalNotes, bedroomPreference, checkin, busCheckin, busReturnCheckin,
+parentEditedAt, importId, aiReview*, createdAt, updatedAt}` (+ `contactsHidden` / `redacted`
+views). **Removed:** `name, birthDate, probableGender, cpf, rg, school, schoolGrade, church,
+externalId, weightKg, allergies, drugAllergies, healthIssues, neurodivergent, medications,
+foodRestrictions, healthNotes, insurance, insuranceCard, emergencyContact, guardian*`.
+Check-in stamps: `{at, byPersonId, byRole: CoreRole, note?}`.
+
+| Route | Change |
+|---|---|
+| `GET /?cursor&limit≤200&bedroom&q&tag` | **paged** → `{items, nextCursor, total}`; item = record + `name, nickname` (+ `hasHealth` for roles allowed health; + `health` only with `tag=allergies:<optionId>\|drugAllergies:<id>\|healthIssues:<id>\|medications\|neurodivergent\|foodRestrictions` or a `q` with ≤ 6 matches). |
+| **NEW** `GET /health-counts?tags=a,b` | `{total, byTag}` (anonymized chips). |
+| `GET /:id` | `{camper: record + name, nickname, health? , responsibles:[{personId, name}]}`. |
+| `GET /lookup/:id` | camper adds `name`, `health`; `caretaker {id, name}`. |
+| `GET /:id/detail` | records only (names via `/api/people/names`). |
+| `GET /checkin/log`, `/:id/checkin/log` | `{log:[{id, who, personId, kind, action, at, byPersonId, byRole, note}]}`. |
+| `GET /:id/changes` | `{changes:[{id, personId, at, byPersonId, byRole, medical, fields}]}` (no before/after values). |
+| `PUT /:id/parent`, `PUT /:id/health` | same field names; health written to persons-api; answer `{camper: record + health, changed}`. Option ids = `GET /api/people/health-lists`. |
+| **NEW** `POST /register` | coordenação: `{name, birthDate, responsible:{name, phone}, health?, …ops}` → 201 `{camper, responsible:{personId, created}}`. |
+| `POST /` | `{personId, …ops}` (an existing IPAlpha person). |
+| `PUT /:id` | ops only: `team, transportation, bed, bedroom, caretakerId, invitedBy, qrToken, generalNotes, bedroomPreference`. |
+| `DELETE /:id` | `{success, membershipRemoved}`. |
+
+## Staff `/api/staff` (camp ops only)
+
+Record: `{id, personId, sex, active, team, bedroom, roomRole, transportation, generalNotes,
+aiReview*, checkin, vest, prepDone, foreignLookupCount, foreignLookupCamperIds, createdAt,
+updatedAt}`. **Removed:** `name, phone, email, document, birthDate, admin, probableGender,
+allergies…, medications, healthNotes, foreignLookupNames`. Contact views carry no phone —
+read it with `GET /api/people/:personId/data/phone` (core's role rules decide).
+
+| Route | Change |
+|---|---|
+| `GET /?active&cursor&limit&q` | **paged** `{items, nextCursor, total}`; item + `name, nickname` (+ `hasHealth` for managers). |
+| `GET /:id` | `{staff: record + name, nickname, health? (self / managers)}`. |
+| **NEW** `POST /register` | coordenação: `{name, phone, …ops}` → registration + `equipe` membership. |
+| `POST /` | `{personId, …ops}`. `PUT /:id`: `active, team, transportation, bedroom, roomRole, generalNotes`. `DELETE` → `{success, membershipRemoved}`. |
+
+## NEW `/api/people`
+
+`POST /names {personIds≤200}` → `{items:[{personId, name, nickname}]}` (only people the viewer
+may know) · `GET /search?role=participante|equipe|responsavel&q&cursor` (managers) ·
+`GET /health-lists` · `GET|PATCH /:personId/data/:kind` (phone, email, document, address,
+medical, school, emergencyContact, churchRelationship — acting role token) ·
+`GET /health-queue` `{pending}` + `POST /health-queue/flush` `{written, refused, pending}`
+(coordenação; call after `ai-review-done` events).
+
+## Other routes
+
+- Medications: **NEW** `GET /prescriptions?cursor` → `{items:[{personId, name, medications}], nextCursor}`; `POST` body `{personId, medName, slot, day?, note?}` (was `camperId`); dose `{id, personId, medKey, medName, dose, day, slot, givenAt, byPersonId, note}`.
+- Occurrences: record `{id, campers: personId[], staff: personId[], description, createdBy:{personId, role, group}, createdAt}`.
+- Scores: `{…, camperId (personId), byPersonId}` (no `camperName`, `by`); scan answer adds `camperName` (first name).
+- Gallery photo: `byPersonId` (was `byName`). Files: `byPersonId`.
+- Settings: removed `checkinHelpers, organizers, gameOrganizers, scoreHelpers, medicalStaff, vestHelpers, photographers, smsRedirect, smsEnabled, mailEnabled` (helper roles are managed in Mordomia); `busHelpers {helpers:[{personId, vehicleId}]}`, `parentContacts [{id, title, personId}]`, `foreignLookupOffenders [{personId, count, camperIds, blocked}]`, `superAdmin`. Removed `GET|POST /sample-emails`. `GET /welcome-preview` → `personIds` instead of names.
+- **NEW** templates (coordenação): `GET /api/settings/message-templates` → `{templates:[{slug, name, channel, variables, subject, body (5 langs), live, version, customized, defaults}]}` · `POST /message-templates/seed` · `PATCH /message-templates/:slug {name?, body?, subject?}` (400 `TEMPLATE_INVALID`) · `POST /message-templates/:slug/reset`.
+- Admins: `GET /api/admins` → `{admins:[{personId, name, superAdmin}], appUrl}`; `POST /api/admins` and `/handover` removed (roles are granted in Mordomia).
+- Camps: `POST /:id/delete/request` → `{success, expiresAt, delivery:"sms"}` (no phone); `/:id/campers` rows `{id, name, sex, bedroom, team, matched}`; `/:id/staff` rows `{id, name, roomRole, bedroom, team, matched}`; import results may carry `membershipsFailed`.
+- Imports: `/camper-imports/:id/leaders` and `/staff-imports/:id/members` → `{staff:{id, name}}`; `apply` needs the coordenação role; after apply `rows`/`preview` are emptied.
+- Bedrooms `apply/preview`: `messages:[{staffId, messages:[{key, variables}], text}]`.
+- Cleanup: staff keep groups are only `busHelpers`, `parentContacts`.
+- Removed: `POST /api/ai/guess-sex`.
+- Realtime snapshot/update: `campers`/`staff` are the records above (no names, no health).
+- Backups are format v3 (mirror `BACKUP_VERSION = 3` on the "Sobre" page).

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import sampleJson from "../sample/camp.json";
 import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireAdmin } from "../middleware/roles";
-import { insertBedroom, sexOfGroup } from "../models/bedrooms";
+import { insertBedroom } from "../models/bedrooms";
 import { EMPTY_CAMPER, findCamperById, insertCamper, listCampers } from "../models/campers";
 import { EMPTY_STAFF, insertStaff, listStaff } from "../models/staff";
 import { insertTeam } from "../models/teams";
@@ -72,7 +72,6 @@ wizard.post("/sample", requireAdmin, async (c) => {
     const { personId } = await registerAdult(ctx.tokens, { name: s.name, phone: s.phone, roles: [TEAM_ROLE], editionId: ctx.editionId, health: s.healthNotes ? { healthNotes: s.healthNotes } : undefined });
     await insertStaff(personId, {
       ...EMPTY_STAFF,
-      sex: sexOfGroup(s.roomGroup),
       active: s.active,
       team: s.team ? teamId.get(s.team) ?? null : null,
       bedroom: s.room && s.roomGroup ? roomId.get(`${s.roomGroup}:${s.room}`) ?? null : null,
@@ -102,7 +101,6 @@ wizard.post("/sample", requireAdmin, async (c) => {
     const bedroom = k.room && k.roomGroup ? roomId.get(`${k.roomGroup}:${k.room}`) ?? null : null;
     await insertCamper(kidId, {
       ...EMPTY_CAMPER,
-      sex: sexOfGroup(k.roomGroup) ?? (k.sex as CamperSex),
       invitedBy: k.invitedBy,
       qrToken: crypto.randomUUID(),
       team: k.team ? teamId.get(k.team) ?? null : null,

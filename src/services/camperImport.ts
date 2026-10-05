@@ -7,16 +7,16 @@ import { appendCategoryOption, listCategories, newOptionId } from "../models/cat
 import { EMPTY_STAFF, insertStaff, listStaff } from "../models/staff";
 import { insertTeam, listTeams, TEAM_PALETTE } from "../models/teams";
 import { insertTransport, listTransports, nextTransportOrder } from "../models/transports";
-import { busColorName, BUS_COLORS, CAMPER_CATEGORY_KEYS, bedroomCapacity, TEAM_ROLE, type BedroomGroup, type CamperImportDictionaryEntry, type CamperImportReviewItem, type CamperSex, type Category, type HealthInfo, type Staff } from "../types";
+import { busColorName, BUS_COLORS, CAMPER_CATEGORY_KEYS, bedroomCapacity, EMPTY_HEALTH, TEAM_ROLE, type BedroomGroup, type CamperImportDictionaryEntry, type CamperImportReviewItem, type CamperSex, type Category, type HealthInfo, type Staff } from "../types";
 import { formatBrazilPhone, formatCpf, normalizeBrazilPhone, titleCaseName } from "../utils";
 import { transportLabel } from "../routes/transports";
-import { bestImportMatch, bestImportMatches, classifyImportItems, dedupeImportValues, guessNamesSex, mapImportColumns, matchLeaderWithAi, askDateParser, SPLIT_CATEGORY_FIELDS } from "./importAi";
+import { bestImportMatch, bestImportMatches, classifyImportItems, dedupeImportValues, mapImportColumns, matchLeaderWithAi, askDateParser, SPLIT_CATEGORY_FIELDS } from "./importAi";
 import { getDb } from "../db";
 import { listImportDictionary, type CamperImportColumn, type CamperImportCreatedItem } from "../models/camperImports";
 import { namesOf } from "./people";
 import { IpalphaRejected } from "./ipalpha/coreClient";
-import { documentsOf, emergencyContactOf, registerAdult, registerKid, type CoordinationTokens } from "./coreRegistration";
-import { sexOfGroup } from "../models/bedrooms";
+import { addResponsible, documentsOf, emergencyContactOf, healthToCore, registerAdult, registerKid, type CoordinationTokens } from "./coreRegistration";
+import { mergeHealth, readHealth, writeHealth } from "./people";
 
 /** A team member with the name read live from core (imports match leaders by name). */
 export type NamedStaff = Staff & { name: string };
@@ -569,8 +569,9 @@ export async function resolveBedroom(raw: string, names: string[], lookups: Impo
   let id = deterministicMatch(raw, candidates);
   if (id) return id;
   const name = numberFrom(raw) || titleCaseName(raw).slice(0, 30);
-  const sex = await guessNamesSex(names.slice(0, 7).map((n) => n.split(" ")[0]), signal);
-  const inferred = sex === "M" ? "boys" : sex === "F" ? "girls" : normalize(raw).includes("menin") ? (normalize(raw).includes("menina") ? "girls" : "boys") : null;
+  // the wing comes from the room's own name ("Meninas 3"); never guessed from the people's names (decision 39)
+  void names;
+  const inferred = normalize(raw).includes("menin") ? (normalize(raw).includes("menina") ? "girls" : "boys") : null;
   // Never silently put a mixed or ambiguous group in the boys' wing. Staff
   // import will ask for the room; campers may remain without one, as allowed.
   if (!inferred) return null;
@@ -1111,7 +1112,6 @@ export async function insertImportCampers(rows: Record<string, unknown>[], impor
       skipped.push({ row: row.row, name: row.name, reason: "Quarto sem camas" });
       continue;
     }
-    data.ops.sex = sexOfGroup(room?.group);
     const existingId = typeof row.existingCamperId === "string" ? row.existingCamperId : "";
     const choice = String(row.duplicateChoice ?? "");
     if (choice === "keep") {
@@ -1123,6 +1123,16 @@ export async function insertImportCampers(rows: Record<string, unknown>[], impor
       if (!camper) {
         skipped.push({ row: row.row, name: row.name, reason: "Cadastro existente não encontrado" });
         continue;
+      }
+      try {
+        // the sheet's responsável joins the SAME kid (link, decision 38) — never a second copy of the kid
+        if (data.guardian.phone && data.guardian.name) await addResponsible(ctx.tokens, { kidId: existingId, guardian: { name: data.guardian.name, phone: data.guardian.phone, email: data.guardian.email || undefined, data: data.guardian.data }, editionId: ctx.editionId });
+        const current = (await readHealth(ctx.tokens.persons, existingId)) ?? { ...EMPTY_HEALTH };
+        const patch = mergeHealth(current, await healthToCore(ctx.tokens.persons, data.health));
+        if (Object.keys(patch).length) await writeHealth(ctx.tokens.persons, existingId, patch, current);
+      } catch (err) {
+        if (!(err instanceof IpalphaRejected)) throw err;
+        skipped.push({ row: row.row, name: row.name, reason: `Atualizado no acampamento; o IPAlpha recusou parte dos dados (${err.reason})` });
       }
       updated++;
       continue;

@@ -7,8 +7,8 @@
  * ones) and the settings screen edits the live copy through `projects:templates`.
  *
  * Rules: slug `^[a-z0-9-]{3,60}$`; every `{var}` of every language is listed in
- * `variables`; SMS bodies ≤ 320 chars per language (with variables filled in,
- * keep them short). Copy is pastoral (workspace AGENTS.md): gentle, no labels
+ * `variables`; SMS bodies ≤ 160 chars per language WITH realistic values
+ * filled in (decision 45 — templates.test.ts renders them). Copy is pastoral (workspace AGENTS.md): gentle, no labels
  * about family shape, health or status; "responsável" / "família".
  */
 
@@ -74,11 +74,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "room", "link"],
     body: t(
-      "Acampa Kids: {name}, seu check-in está feito! Quarto: {room}. Veja as crianças do seu quarto em {link}",
-      "Acampa Kids: {name}, you're checked in! Room: {room}. See the kids in your room at {link}",
-      "Acampa Kids: {name}, ¡tu check-in está hecho! Habitación: {room}. Mira los niños de tu habitación en {link}",
-      "Acampa Kids : {name}, ton enregistrement est fait ! Chambre : {room}. Vois les enfants de ta chambre sur {link}",
-      "Acampa Kids: {name}, dein Check-in ist erledigt! Zimmer: {room}. Die Kinder deines Zimmers: {link}",
+      "Acampa Kids: {name}, check-in feito! Quarto: {room}. Veja suas crianças: {link}",
+      "Acampa Kids: {name}, you're checked in! Room: {room}. Your kids: {link}",
+      "Acampa Kids: {name}, ¡check-in hecho! Habitación: {room}. Tus niños: {link}",
+      "Acampa Kids : {name}, enregistrement fait ! Chambre : {room}. Tes enfants : {link}",
+      "Acampa Kids: {name}, Check-in erledigt! Zimmer: {room}. Deine Kinder: {link}",
     ),
   },
   {
@@ -87,11 +87,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "link"],
     body: t(
-      "Acampa Kids: {name}, chegou a hora do seu check-in! Ao chegar, faça o check-in em {link}",
-      "Acampa Kids: {name}, it's check-in time! When you arrive, check in at {link}",
-      "Acampa Kids: {name}, ¡es hora de tu check-in! Al llegar, hazlo en {link}",
-      "Acampa Kids : {name}, c'est l'heure de ton enregistrement ! En arrivant, fais-le sur {link}",
-      "Acampa Kids: {name}, Zeit für deinen Check-in! Bei Ankunft hier einchecken: {link}",
+      "Acampa Kids: {name}, hora do seu check-in! Ao chegar, faça em {link}",
+      "Acampa Kids: {name}, check-in time! When you arrive, use {link}",
+      "Acampa Kids: {name}, ¡hora de tu check-in! Al llegar, usa {link}",
+      "Acampa Kids : {name}, c'est l'heure de l'enregistrement ! Sur place : {link}",
+      "Acampa Kids: {name}, Zeit für den Check-in! Bei Ankunft: {link}",
     ),
   },
   {
@@ -100,11 +100,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "kid", "room"],
     body: t(
-      "Acampa Kids: {name}, hoje é aniversário de {kid} ({room})! 🎂 Vamos fazer este dia especial.",
-      "Acampa Kids: {name}, today is {kid}'s birthday ({room})! 🎂 Let's make it a special day.",
-      "Acampa Kids: {name}, ¡hoy es el cumpleaños de {kid} ({room})! 🎂 Hagamos de este un día especial.",
-      "Acampa Kids : {name}, c'est l'anniversaire de {kid} aujourd'hui ({room}) ! 🎂 Rendons cette journée spéciale.",
-      "Acampa Kids: {name}, heute hat {kid} Geburtstag ({room})! 🎂 Machen wir den Tag besonders.",
+      "Acampa Kids: {name}, hoje é aniversário de {kid} ({room})! 🎂 Vamos fazer o dia especial.",
+      "Acampa Kids: {name}, today is {kid}'s birthday ({room})! 🎂 Let's make it special.",
+      "Acampa Kids: {name}, ¡hoy cumple años {kid} ({room})! 🎂 Hagamos un día especial.",
+      "Acampa Kids : {name}, c'est l'anniversaire de {kid} ({room}) ! 🎂 Rendons ce jour spécial.",
+      "Acampa Kids: {name}, heute hat {kid} Geburtstag ({room})! 🎂 Machen wir ihn besonders.",
     ),
   },
   {
@@ -113,11 +113,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "kid", "link"],
     body: t(
-      "Acampa Kids: {name}, a família de {kid} atualizou as informações de saúde. Veja em {link}",
-      "Acampa Kids: {name}, {kid}'s family updated the health information. See {link}",
-      "Acampa Kids: {name}, la familia de {kid} actualizó la información de salud. Mira en {link}",
-      "Acampa Kids : {name}, la famille de {kid} a mis à jour les informations de santé. Voir {link}",
-      "Acampa Kids: {name}, die Familie von {kid} hat die Gesundheitsangaben aktualisiert. Siehe {link}",
+      "Acampa Kids: {name}, a família de {kid} atualizou a saúde. Veja: {link}",
+      "Acampa Kids: {name}, {kid}'s family updated the health info. See {link}",
+      "Acampa Kids: {name}, la familia de {kid} actualizó la salud. Mira: {link}",
+      "Acampa Kids : {name}, la famille de {kid} a mis à jour la santé. Voir {link}",
+      "Acampa Kids: {name}, die Familie von {kid} hat die Gesundheit aktualisiert: {link}",
     ),
   },
   {
@@ -126,11 +126,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "kid", "link"],
     body: t(
-      "Acampa Kids: {name}, a família de {kid} atualizou as observações. Veja em {link}",
+      "Acampa Kids: {name}, a família de {kid} atualizou as observações. Veja: {link}",
       "Acampa Kids: {name}, {kid}'s family updated the notes. See {link}",
-      "Acampa Kids: {name}, la familia de {kid} actualizó las observaciones. Mira en {link}",
-      "Acampa Kids : {name}, la famille de {kid} a mis à jour les remarques. Voir {link}",
-      "Acampa Kids: {name}, die Familie von {kid} hat die Hinweise aktualisiert. Siehe {link}",
+      "Acampa Kids: {name}, la familia de {kid} actualizó las notas. Mira: {link}",
+      "Acampa Kids : {name}, la famille de {kid} a mis à jour les notes. Voir {link}",
+      "Acampa Kids: {name}, die Familie von {kid} hat die Hinweise aktualisiert: {link}",
     ),
   },
   {
@@ -139,11 +139,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "link"],
     body: t(
-      "Acampa Kids: {name}, uma nova ocorrência foi registrada. Veja em {link}",
+      "Acampa Kids: {name}, uma nova ocorrência foi registrada. Veja: {link}",
       "Acampa Kids: {name}, a new incident note was recorded. See {link}",
-      "Acampa Kids: {name}, se registró una nueva ocurrencia. Mira en {link}",
-      "Acampa Kids : {name}, un nouvel événement a été enregistré. Voir {link}",
-      "Acampa Kids: {name}, ein neuer Vorfall wurde eingetragen. Siehe {link}",
+      "Acampa Kids: {name}, se registró una nueva ocurrencia. Mira: {link}",
+      "Acampa Kids : {name}, un nouvel événement a été noté. Voir {link}",
+      "Acampa Kids: {name}, ein neuer Vorfall wurde notiert: {link}",
     ),
   },
   {
@@ -152,11 +152,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "staff", "count", "link"],
     body: t(
-      "Acampa Kids: {name}, {staff} já leu o crachá de {count} crianças de outros quartos. Veja em {link}",
-      "Acampa Kids: {name}, {staff} has scanned the badges of {count} kids from other rooms. See {link}",
-      "Acampa Kids: {name}, {staff} ya leyó la credencial de {count} niños de otras habitaciones. Mira en {link}",
-      "Acampa Kids : {name}, {staff} a déjà scanné le badge de {count} enfants d'autres chambres. Voir {link}",
-      "Acampa Kids: {name}, {staff} hat die Ausweise von {count} Kindern aus anderen Zimmern gescannt. Siehe {link}",
+      "Acampa Kids: {name}, {staff} leu {count} crachás de outros quartos. Veja: {link}",
+      "Acampa Kids: {name}, {staff} scanned {count} badges from other rooms. See {link}",
+      "Acampa Kids: {name}, {staff} leyó {count} credenciales de otras habitaciones: {link}",
+      "Acampa Kids : {name}, {staff} a scanné {count} badges d'autres chambres : {link}",
+      "Acampa Kids: {name}, {staff} hat {count} Ausweise anderer Zimmer gescannt: {link}",
     ),
   },
   {
@@ -165,11 +165,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "kid", "room", "link"],
     body: t(
-      "Acampa Kids: {name}, {kid} agora está sob seus cuidados ({room}). Veja em {link}",
+      "Acampa Kids: {name}, {kid} agora está com você ({room}). Veja: {link}",
       "Acampa Kids: {name}, {kid} is now in your care ({room}). See {link}",
-      "Acampa Kids: {name}, {kid} ahora está a tu cuidado ({room}). Mira en {link}",
-      "Acampa Kids : {name}, {kid} est maintenant sous ta responsabilité ({room}). Voir {link}",
-      "Acampa Kids: {name}, {kid} ist jetzt in deiner Obhut ({room}). Siehe {link}",
+      "Acampa Kids: {name}, {kid} ahora está contigo ({room}). Mira: {link}",
+      "Acampa Kids : {name}, {kid} est maintenant avec toi ({room}). Voir {link}",
+      "Acampa Kids: {name}, {kid} ist jetzt bei dir ({room}): {link}",
     ),
   },
   {
@@ -178,11 +178,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "kid", "link"],
     body: t(
-      "Acampa Kids: {name}, {kid} passou a ser cuidado(a) por outra pessoa da equipe. Veja em {link}",
-      "Acampa Kids: {name}, {kid} is now looked after by another team member. See {link}",
-      "Acampa Kids: {name}, {kid} ahora está al cuidado de otra persona del equipo. Mira en {link}",
-      "Acampa Kids : {name}, {kid} est maintenant suivi(e) par une autre personne de l'équipe. Voir {link}",
-      "Acampa Kids: {name}, {kid} wird jetzt von jemand anderem aus dem Team betreut. Siehe {link}",
+      "Acampa Kids: {name}, {kid} agora fica com outra pessoa da equipe. Veja: {link}",
+      "Acampa Kids: {name}, {kid} is now with another team member. See {link}",
+      "Acampa Kids: {name}, {kid} ahora está con otra persona del equipo: {link}",
+      "Acampa Kids : {name}, {kid} est maintenant avec un autre membre : {link}",
+      "Acampa Kids: {name}, {kid} ist jetzt bei jemand anderem im Team: {link}",
     ),
   },
   {
@@ -191,11 +191,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "room", "link"],
     body: t(
-      "Acampa Kids: {name}, seu quarto agora é: {room}. Veja em {link}",
-      "Acampa Kids: {name}, your room is now: {room}. See {link}",
-      "Acampa Kids: {name}, tu habitación ahora es: {room}. Mira en {link}",
-      "Acampa Kids : {name}, ta chambre est maintenant : {room}. Voir {link}",
-      "Acampa Kids: {name}, dein Zimmer ist jetzt: {room}. Siehe {link}",
+      "Acampa Kids: {name}, seu quarto agora é {room}. Veja: {link}",
+      "Acampa Kids: {name}, your room is now {room}. See {link}",
+      "Acampa Kids: {name}, tu habitación ahora es {room}. Mira: {link}",
+      "Acampa Kids : {name}, ta chambre est maintenant {room}. Voir {link}",
+      "Acampa Kids: {name}, dein Zimmer ist jetzt {room}: {link}",
     ),
   },
   {
@@ -204,11 +204,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "link"],
     body: t(
-      "Acampa Kids: {name}, agora você é líder no seu quarto e cuida de algumas crianças. Veja em {link}",
-      "Acampa Kids: {name}, you are now a room leader and look after some kids. See {link}",
-      "Acampa Kids: {name}, ahora eres líder en tu habitación y cuidas a algunos niños. Mira en {link}",
-      "Acampa Kids : {name}, tu es maintenant responsable de chambre et tu t'occupes de quelques enfants. Voir {link}",
-      "Acampa Kids: {name}, du bist jetzt Zimmerleitung und betreust einige Kinder. Siehe {link}",
+      "Acampa Kids: {name}, agora você é líder no seu quarto. Veja: {link}",
+      "Acampa Kids: {name}, you are now a room leader. See {link}",
+      "Acampa Kids: {name}, ahora eres líder de tu habitación. Mira: {link}",
+      "Acampa Kids : {name}, tu es maintenant responsable de chambre : {link}",
+      "Acampa Kids: {name}, du bist jetzt Zimmerleitung: {link}",
     ),
   },
   {
@@ -217,11 +217,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "link"],
     body: t(
-      "Acampa Kids: {name}, agora você ajuda como auxiliar no seu quarto. Veja em {link}",
-      "Acampa Kids: {name}, you now help out as a room assistant. See {link}",
-      "Acampa Kids: {name}, ahora ayudas como auxiliar en tu habitación. Mira en {link}",
-      "Acampa Kids : {name}, tu aides maintenant comme assistant(e) de chambre. Voir {link}",
-      "Acampa Kids: {name}, du hilfst jetzt als Zimmerhilfe mit. Siehe {link}",
+      "Acampa Kids: {name}, agora você é auxiliar no seu quarto. Veja: {link}",
+      "Acampa Kids: {name}, you now help as a room assistant. See {link}",
+      "Acampa Kids: {name}, ahora ayudas como auxiliar en tu habitación: {link}",
+      "Acampa Kids : {name}, tu aides maintenant comme assistant(e) : {link}",
+      "Acampa Kids: {name}, du hilfst jetzt als Zimmerhilfe: {link}",
     ),
   },
   {
@@ -230,11 +230,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "team", "link"],
     body: t(
-      "Acampa Kids: {name}, seu time agora é: {team}. Veja em {link}",
-      "Acampa Kids: {name}, your team is now: {team}. See {link}",
-      "Acampa Kids: {name}, tu equipo ahora es: {team}. Mira en {link}",
-      "Acampa Kids : {name}, ton équipe est maintenant : {team}. Voir {link}",
-      "Acampa Kids: {name}, dein Team ist jetzt: {team}. Siehe {link}",
+      "Acampa Kids: {name}, seu time agora é {team}. Veja: {link}",
+      "Acampa Kids: {name}, your team is now {team}. See {link}",
+      "Acampa Kids: {name}, tu equipo ahora es {team}. Mira: {link}",
+      "Acampa Kids : {name}, ton équipe est maintenant {team} : {link}",
+      "Acampa Kids: {name}, dein Team ist jetzt {team}: {link}",
     ),
   },
   {
@@ -243,11 +243,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "bus", "link"],
     body: t(
-      "Acampa Kids: {name}, seu transporte agora é: {bus}. Veja em {link}",
-      "Acampa Kids: {name}, your transport is now: {bus}. See {link}",
-      "Acampa Kids: {name}, tu transporte ahora es: {bus}. Mira en {link}",
-      "Acampa Kids : {name}, ton transport est maintenant : {bus}. Voir {link}",
-      "Acampa Kids: {name}, dein Transport ist jetzt: {bus}. Siehe {link}",
+      "Acampa Kids: {name}, seu transporte agora é {bus}. Veja: {link}",
+      "Acampa Kids: {name}, your transport is now {bus}. See {link}",
+      "Acampa Kids: {name}, tu transporte ahora es {bus}. Mira: {link}",
+      "Acampa Kids : {name}, ton transport est maintenant {bus} : {link}",
+      "Acampa Kids: {name}, dein Transport ist jetzt {bus}: {link}",
     ),
   },
   {
@@ -256,11 +256,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "event", "duty", "link"],
     body: t(
-      "Acampa Kids: {name}, em {event} você serve em: {duty}. Veja em {link}",
-      "Acampa Kids: {name}, at {event} you serve in: {duty}. See {link}",
-      "Acampa Kids: {name}, en {event} sirves en: {duty}. Mira en {link}",
-      "Acampa Kids : {name}, pendant {event} tu sers à : {duty}. Voir {link}",
-      "Acampa Kids: {name}, bei {event} dienst du bei: {duty}. Siehe {link}",
+      "Acampa Kids: {name}, em {event} você serve em {duty}. {link}",
+      "Acampa Kids: {name}, at {event} you serve in {duty}. {link}",
+      "Acampa Kids: {name}, en {event} sirves en {duty}. {link}",
+      "Acampa Kids : {name}, à {event} tu sers à {duty}. {link}",
+      "Acampa Kids: {name}, bei {event} dienst du bei {duty}. {link}",
     ),
   },
   {
@@ -269,11 +269,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "event", "link"],
     body: t(
-      "Acampa Kids: {name}, sua função em {event} mudou. Veja sua programação em {link}",
-      "Acampa Kids: {name}, your duty at {event} changed. See your schedule at {link}",
-      "Acampa Kids: {name}, tu función en {event} cambió. Mira tu programa en {link}",
-      "Acampa Kids : {name}, ta fonction pendant {event} a changé. Vois ton programme sur {link}",
-      "Acampa Kids: {name}, deine Aufgabe bei {event} hat sich geändert. Dein Plan: {link}",
+      "Acampa Kids: {name}, sua função em {event} mudou. Veja: {link}",
+      "Acampa Kids: {name}, your duty at {event} changed. See {link}",
+      "Acampa Kids: {name}, tu función en {event} cambió. Mira: {link}",
+      "Acampa Kids : {name}, ta fonction à {event} a changé : {link}",
+      "Acampa Kids: {name}, deine Aufgabe bei {event} hat sich geändert: {link}",
     ),
   },
   {
@@ -282,11 +282,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "event", "link"],
     body: t(
-      "Acampa Kids: {name}, a atividade {event} saiu da programação. Veja em {link}",
-      "Acampa Kids: {name}, the activity {event} was removed from the schedule. See {link}",
-      "Acampa Kids: {name}, la actividad {event} salió del programa. Mira en {link}",
-      "Acampa Kids : {name}, l'activité {event} a été retirée du programme. Voir {link}",
-      "Acampa Kids: {name}, die Aktivität {event} wurde aus dem Plan genommen. Siehe {link}",
+      "Acampa Kids: {name}, {event} saiu da programação. Veja: {link}",
+      "Acampa Kids: {name}, {event} was removed from the schedule. See {link}",
+      "Acampa Kids: {name}, {event} salió del programa. Mira: {link}",
+      "Acampa Kids : {name}, {event} a été retiré du programme : {link}",
+      "Acampa Kids: {name}, {event} wurde aus dem Plan genommen: {link}",
     ),
   },
   {
@@ -295,11 +295,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "event", "when", "link"],
     body: t(
-      "Acampa Kids: {name}, {event} agora é {when}. Veja em {link}",
-      "Acampa Kids: {name}, {event} is now {when}. See {link}",
-      "Acampa Kids: {name}, {event} ahora es {when}. Mira en {link}",
-      "Acampa Kids : {name}, {event} a lieu maintenant {when}. Voir {link}",
-      "Acampa Kids: {name}, {event} ist jetzt {when}. Siehe {link}",
+      "Acampa Kids: {name}, {event} agora é {when}. {link}",
+      "Acampa Kids: {name}, {event} is now {when}. {link}",
+      "Acampa Kids: {name}, {event} ahora es {when}. {link}",
+      "Acampa Kids : {name}, {event} a lieu {when}. {link}",
+      "Acampa Kids: {name}, {event} ist jetzt {when}. {link}",
     ),
   },
   {
@@ -308,11 +308,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "title", "link"],
     body: t(
-      "Acampa Kids: {name}, as instruções \"{title}\" foram atualizadas. Leia em {link}",
-      "Acampa Kids: {name}, the instructions \"{title}\" were updated. Read at {link}",
-      "Acampa Kids: {name}, las instrucciones \"{title}\" fueron actualizadas. Lee en {link}",
-      "Acampa Kids : {name}, les consignes « {title} » ont été mises à jour. Lire sur {link}",
-      "Acampa Kids: {name}, die Anleitung „{title}“ wurde aktualisiert. Lesen: {link}",
+      "Acampa Kids: {name}, as instruções \"{title}\" mudaram. Leia: {link}",
+      "Acampa Kids: {name}, the instructions \"{title}\" changed. Read: {link}",
+      "Acampa Kids: {name}, las instrucciones \"{title}\" cambiaron. Lee: {link}",
+      "Acampa Kids : {name}, les consignes « {title} » ont changé : {link}",
+      "Acampa Kids: {name}, die Anleitung „{title}“ wurde geändert: {link}",
     ),
   },
   {
@@ -321,11 +321,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "title", "link"],
     body: t(
-      "Acampa Kids: {name}, a preparação \"{title}\" foi atualizada. Veja em {link}",
-      "Acampa Kids: {name}, the preparation \"{title}\" was updated. See {link}",
-      "Acampa Kids: {name}, la preparación \"{title}\" fue actualizada. Mira en {link}",
-      "Acampa Kids : {name}, la préparation « {title} » a été mise à jour. Voir {link}",
-      "Acampa Kids: {name}, die Vorbereitung „{title}“ wurde aktualisiert. Siehe {link}",
+      "Acampa Kids: {name}, a preparação \"{title}\" mudou. Veja: {link}",
+      "Acampa Kids: {name}, the preparation \"{title}\" changed. See {link}",
+      "Acampa Kids: {name}, la preparación \"{title}\" cambió. Mira: {link}",
+      "Acampa Kids : {name}, la préparation « {title} » a changé : {link}",
+      "Acampa Kids: {name}, die Vorbereitung „{title}“ wurde geändert: {link}",
     ),
   },
   {
@@ -338,7 +338,7 @@ const SMS: TemplateDefault[] = [
       "Acampa Kids: {name}, the camp photos are in the app 📷 {link}",
       "Acampa Kids: {name}, las fotos del campamento ya están en la app 📷 {link}",
       "Acampa Kids : {name}, les photos du camp sont dans l'appli 📷 {link}",
-      "Acampa Kids: {name}, die Fotos vom Camp sind in der App 📷 {link}",
+      "Acampa Kids: {name}, die Camp-Fotos sind in der App 📷 {link}",
     ),
   },
   {
@@ -349,8 +349,8 @@ const SMS: TemplateDefault[] = [
     body: t(
       "Acampa Kids: {name}, {kid} já está com a nossa equipe a caminho de um fim de semana incrível! 🚌",
       "Acampa Kids: {name}, {kid} is with our team on the way to an amazing weekend! 🚌",
-      "Acampa Kids: {name}, ¡{kid} ya está con nuestro equipo camino a un fin de semana increíble! 🚌",
-      "Acampa Kids : {name}, {kid} est avec notre équipe, en route pour un week-end génial ! 🚌",
+      "Acampa Kids: {name}, ¡{kid} ya está con nuestro equipo rumbo a un fin de semana increíble! 🚌",
+      "Acampa Kids : {name}, {kid} est avec notre équipe, en route pour un super week-end ! 🚌",
       "Acampa Kids: {name}, {kid} ist bei unserem Team, unterwegs zu einem tollen Wochenende! 🚌",
     ),
   },
@@ -360,11 +360,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "kids", "link"],
     body: t(
-      "Acampa Kids: {name}, que alegria ter {kids} no acampamento! Acompanhe tudo pelo app: {link}",
-      "Acampa Kids: {name}, we're so glad to have {kids} at camp! Follow everything in the app: {link}",
-      "Acampa Kids: {name}, ¡qué alegría tener a {kids} en el campamento! Sigue todo en la app: {link}",
-      "Acampa Kids : {name}, quelle joie d'accueillir {kids} au camp ! Suis tout dans l'appli : {link}",
-      "Acampa Kids: {name}, wie schön, dass {kids} beim Camp dabei ist! Alles in der App: {link}",
+      "Acampa Kids: {name}, que alegria ter {kids} no acampamento! Acompanhe pelo app: {link}",
+      "Acampa Kids: {name}, so glad to have {kids} at camp! Follow along in the app: {link}",
+      "Acampa Kids: {name}, ¡qué alegría tener a {kids} en el campamento! Síguelo en {link}",
+      "Acampa Kids : {name}, quelle joie d'accueillir {kids} ! Suis le camp sur {link}",
+      "Acampa Kids: {name}, schön, dass {kids} dabei ist! Alles in der App: {link}",
     ),
   },
   {
@@ -373,10 +373,10 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "link"],
     body: t(
-      "Acampa Kids: {name}, que bom servir com você! O app da equipe já está liberado: {link}",
-      "Acampa Kids: {name}, so glad to serve with you! The team app is open: {link}",
-      "Acampa Kids: {name}, ¡qué bueno servir contigo! La app del equipo ya está abierta: {link}",
-      "Acampa Kids : {name}, quelle joie de servir avec toi ! L'appli de l'équipe est ouverte : {link}",
+      "Acampa Kids: {name}, que bom servir com você! O app da equipe está liberado: {link}",
+      "Acampa Kids: {name}, glad to serve with you! The team app is open: {link}",
+      "Acampa Kids: {name}, ¡qué bueno servir contigo! La app del equipo está abierta: {link}",
+      "Acampa Kids : {name}, quelle joie de servir avec toi ! L'appli est ouverte : {link}",
       "Acampa Kids: {name}, schön, mit dir zu dienen! Die Team-App ist offen: {link}",
     ),
   },
@@ -386,11 +386,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "count", "link"],
     body: t(
-      "Acampa Kids: {name}, a importação terminou: {count} cadastros revisados. Veja em {link}",
+      "Acampa Kids: {name}, a importação terminou: {count} cadastros revisados. Veja: {link}",
       "Acampa Kids: {name}, the import finished: {count} records reviewed. See {link}",
-      "Acampa Kids: {name}, la importación terminó: {count} registros revisados. Mira en {link}",
-      "Acampa Kids : {name}, l'import est terminé : {count} fiches vérifiées. Voir {link}",
-      "Acampa Kids: {name}, der Import ist fertig: {count} Einträge geprüft. Siehe {link}",
+      "Acampa Kids: {name}, la importación terminó: {count} registros revisados: {link}",
+      "Acampa Kids : {name}, import terminé : {count} fiches vérifiées. Voir {link}",
+      "Acampa Kids: {name}, Import fertig: {count} Einträge geprüft: {link}",
     ),
   },
   {
@@ -399,11 +399,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "failed", "total", "link"],
     body: t(
-      "Acampa Kids: {name}, {failed} de {total} cadastros da importação precisam de revisão. Veja em {link}",
-      "Acampa Kids: {name}, {failed} of {total} imported records need a review. See {link}",
-      "Acampa Kids: {name}, {failed} de {total} registros importados necesitan revisión. Mira en {link}",
-      "Acampa Kids : {name}, {failed} fiches importées sur {total} demandent une vérification. Voir {link}",
-      "Acampa Kids: {name}, {failed} von {total} importierten Einträgen brauchen eine Prüfung. Siehe {link}",
+      "Acampa Kids: {name}, {failed} de {total} cadastros importados precisam de revisão: {link}",
+      "Acampa Kids: {name}, {failed} of {total} imported records need a review: {link}",
+      "Acampa Kids: {name}, {failed} de {total} registros importados necesitan revisión: {link}",
+      "Acampa Kids : {name}, {failed} fiches sur {total} sont à vérifier : {link}",
+      "Acampa Kids: {name}, {failed} von {total} Einträgen brauchen eine Prüfung: {link}",
     ),
   },
   {
@@ -412,11 +412,11 @@ const SMS: TemplateDefault[] = [
     channel: "sms",
     variables: ["name", "code", "minutes"],
     body: t(
-      "Acampa Kids: {name}, o código para apagar este ano do acampamento é {code}. Vale por {minutes} min.",
-      "Acampa Kids: {name}, the code to delete this camp year is {code}. Valid for {minutes} min.",
-      "Acampa Kids: {name}, el código para borrar este año del campamento es {code}. Vale por {minutes} min.",
-      "Acampa Kids : {name}, le code pour supprimer cette année du camp est {code}. Valable {minutes} min.",
-      "Acampa Kids: {name}, der Code zum Löschen dieses Camp-Jahres ist {code}. Gültig {minutes} Min.",
+      "Acampa Kids: {name}, o código para apagar este ano do acampamento é {code}. Vale {minutes} min.",
+      "Acampa Kids: {name}, the code to delete this camp year is {code}. Valid {minutes} min.",
+      "Acampa Kids: {name}, el código para borrar este año es {code}. Vale {minutes} min.",
+      "Acampa Kids : {name}, le code pour supprimer cette année est {code}. Valable {minutes} min.",
+      "Acampa Kids: {name}, der Code zum Löschen dieses Jahres ist {code}. {minutes} Min. gültig.",
     ),
   },
 ];
@@ -492,7 +492,7 @@ export function hasEmailTwin(slug: string): boolean {
   return TEMPLATE_DEFAULTS.some((d) => d.slug === emailSlug(slug));
 }
 
-export const SMS_BODY_MAX = 320;
+export const SMS_BODY_MAX = 160;
 export const SLUG_RE = /^[a-z0-9-]{3,60}$/;
 
 /** Placeholders used in a text (`{var}`). */

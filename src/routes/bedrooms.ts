@@ -3,14 +3,12 @@ import { publish } from "../services/realtime";
 import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireManager, requireRole } from "../middleware/roles";
 import {
-  applyBedroomGroupToOccupants,
   countStaffPerBedroom,
   deleteBedroom,
   findBedroomById,
   findBedroomByName,
   insertBedroom,
   listBedrooms,
-  sexOfGroup,
   updateBedroom,
   type BedroomData,
 } from "../models/bedrooms";
@@ -215,7 +213,6 @@ bedrooms.put("/:id", async (c) => {
 
   const updated = await updateBedroom(existing._id, result.patch);
   if (result.patch.group && result.patch.group !== existing.group) {
-    if (await applyBedroomGroupToOccupants(existing._id, result.patch.group)) publish("campers", "staff");
   }
   const occ = await occupancy();
   publish("bedrooms");
@@ -274,6 +271,8 @@ bedrooms.post("/apply", async (c) => {
   const roomById = new Map(rooms.map((b) => [b._id, b]));
   const staffById = new Map(staffAll.map((s) => [s._id, s]));
   const camperById = new Map(campersAll.map((k) => [k._id, k]));
+  // decision 39: the kid's sex comes from IPAlpha with the name — the wing check reads it live
+  const sexOf = await namesOf(camperMoves.map((m) => m.id));
 
   // ── validate the placements against the FINAL state they produce ──
   const finalStaff = new Map(staffAll.map((s) => [s._id, { ...s }]));
@@ -299,7 +298,8 @@ bedrooms.post("/apply", async (c) => {
       const room = roomById.get(bedroom)!;
       if (room.group === "staff") return fail(c, "BEDROOM_INVALID", "Uma criança não dorme em quarto da equipe.");
       const wing = room.group === "girls" ? "F" : "M";
-      if (k.sex && k.sex !== wing) {
+      const sex = sexOf.get(k._id)?.sex ?? null;
+      if (sex && sex !== wing) {
         return fail(c, "SEX_INVALID", `Uma das crianças não pode dormir na ala ${room.group === "girls" ? "das meninas" : "dos meninos"}.`);
       }
     }
@@ -321,7 +321,7 @@ bedrooms.post("/apply", async (c) => {
     if (bedroom === s.bedroom && roomRole === s.roomRole) continue; // no-op
     if (roomRole !== s.roomRole) roleChanged = true;
     // the girls / boys wing decides the (derived) sex
-    await updateStaff(m.id, { bedroom, roomRole, ...(bedroom !== s.bedroom ? { sex: sexOfGroup(bedroom ? roomById.get(bedroom)?.group : null) } : {}) });
+    await updateStaff(m.id, { bedroom, roomRole });
     staffApplied++;
   }
 
@@ -331,7 +331,7 @@ bedrooms.post("/apply", async (c) => {
     const bedroom = asRoom(m.bedroom);
     const caretakerId = asRoom(m.caretakerId);
     if (bedroom === k.bedroom && caretakerId === k.caretakerId) continue; // no-op
-    await updateCamper(m.id, { bedroom, caretakerId, ...(bedroom !== k.bedroom ? { bed: null, sex: sexOfGroup(bedroom ? roomById.get(bedroom)?.group : null) } : {}) });
+    await updateCamper(m.id, { bedroom, caretakerId, ...(bedroom !== k.bedroom ? { bed: null } : {}) });
     campersApplied++;
   }
 

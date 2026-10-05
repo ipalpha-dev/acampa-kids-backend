@@ -7,7 +7,6 @@ import { listTeams } from "../models/teams";
 import { listTransports } from "../models/transports";
 import { STAFF_CATEGORY_KEYS, TEAM_ROLE, type CamperImportDictionaryEntry, type CamperSex, type HealthInfo, type StaffImportReviewItem } from "../types";
 import { titleCaseName } from "../utils";
-import { sexFromBedroomId } from "../models/bedrooms";
 import { classifyImportItems, dedupeImportValues, mapImportColumns, SPLIT_CATEGORY_FIELDS } from "./importAi";
 import { concatOtherColumns, IMPORT_ID_VALUE_RE, importPhone, isEmptyCategoryValue, isIgnoredImportColumn, namedStaff, narrativeOnlyAtoms, normalizeImportValue, parseBuiltInDate, parseImportSex, parseSpreadsheet, resolveBedroom, resolveCategoryValues, resolveTeam, resolveTransport, sourceMap, splitCategoryText, validEmail, valueOf, type ImportCoreContext, type ImportLookups, type NamedStaff } from "./camperImport";
 import { documentsOf, registerAdult } from "./coreRegistration";
@@ -202,7 +201,6 @@ export function staffDataFromPreview(row: Record<string, unknown>, importId: str
       team: (row.team as string | null) ?? null,
       bedroom: (row.bedroom as string | null) ?? null,
       transportation: (row.transportation as string | null) ?? null,
-      sex: (row.sex as CamperSex | null) ?? null,
       draft,
       importId,
       aiReviewStatus: draft ? null : "pending",
@@ -256,7 +254,6 @@ export async function insertImportStaff(rows: Record<string, unknown>[], importI
       skipped.push({ row: row.row, name: row.name, reason: "Sem celular: cadastre a pessoa no IPAlpha antes" });
       continue;
     }
-    data.ops.sex = await sexFromBedroomId(data.ops.bedroom);
     try {
       const { personId, created } = await registerAdult(ctx.tokens, { name: data.person.name, phone: data.person.phone, email: data.person.email, birthDate: data.person.birthDate, roles: data.roles, editionId: ctx.editionId, data: data.person.data, health: data.health });
       eligiblePhones++;

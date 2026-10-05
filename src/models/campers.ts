@@ -32,10 +32,10 @@ function toCamper(doc: Record<string, unknown> | null): Camper | null {
 }
 
 /** Writable camp-ops fields of a kid. */
-export type CamperData = Pick<Camper, "sex" | "team" | "transportation" | "bedroom" | "bed" | "caretakerId" | "qrToken" | "invitedBy" | "generalNotes" | "bedroomPreference" | "importId"> &
+export type CamperData = Pick<Camper, "team" | "transportation" | "bedroom" | "bed" | "caretakerId" | "qrToken" | "invitedBy" | "generalNotes" | "bedroomPreference" | "importId"> &
   Partial<Pick<Camper, "draft" | "aiReviewStatus" | "aiReviewError" | "aiReviewStartedAt" | "aiReviewFinishedAt" | "aiReviewAttempts" | "aiReviewNextRetryAt" | "aiReviewStructured">>;
 
-export const EMPTY_CAMPER: CamperData = { sex: null, team: null, transportation: null, bedroom: null, bed: null, caretakerId: null, qrToken: "", invitedBy: "", generalNotes: "", bedroomPreference: "", importId: null };
+export const EMPTY_CAMPER: CamperData = { team: null, transportation: null, bedroom: null, bed: null, caretakerId: null, qrToken: "", invitedBy: "", generalNotes: "", bedroomPreference: "", importId: null };
 
 /** which document field holds each kind of check-in */
 export const CHECKIN_FIELD: Record<CheckinKind, "checkin" | "busCheckin" | "busReturnCheckin"> = {

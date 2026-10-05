@@ -292,7 +292,7 @@ async function importStaff(sourceStaff: Staff[], opts: ImportOptions, idMap: Map
       continue;
     }
     if (opts.core && !(await grantRole(opts.core.tokens, src._id, "equipe", opts.core.editionId))) membershipsFailed++;
-    await insertStaff(src._id, { ...ops, sex: src.bedroom && ops.bedroom ? src.sex : null, active: true, importId: null });
+    await insertStaff(src._id, { ...ops, active: true, importId: null });
     target.add(src._id);
     created++;
   }
@@ -326,7 +326,6 @@ async function importCampers(sourceCampers: Camper[], opts: ImportOptions, idMap
       }
     }
     await insertCamper(src._id, {
-      sex: null,
       invitedBy: src.invitedBy,
       generalNotes: src.generalNotes,
       bedroomPreference: src.bedroomPreference,
@@ -570,7 +569,7 @@ export async function searchCampCampers(campId: string, q: string, limit = 50): 
     .filter(({ name }) => !query || normalizeKey(name).includes(query))
     .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"))
     .slice(0, limit)
-    .map(({ k, name }) => ({ id: k._id, name, sex: k.sex, bedroom: k.bedroom ? bedroomName.get(k.bedroom) ?? null : null, team: k.team ? teamName.get(k.team) ?? null : null, matched: active.has(k._id) }));
+    .map(({ k, name }) => ({ id: k._id, name, sex: names.get(k._id)?.sex ?? null, bedroom: k.bedroom ? bedroomName.get(k.bedroom) ?? null : null, team: k.team ? teamName.get(k.team) ?? null : null, matched: active.has(k._id) }));
 }
 
 /** Team of `campId`, filtered by `q` (name, live); `matched` = already on the ACTIVE camp's team. */

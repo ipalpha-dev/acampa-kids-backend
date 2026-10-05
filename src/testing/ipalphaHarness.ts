@@ -85,11 +85,14 @@ export interface FakeMembership {
 /** The state the fake core answers from (tests mutate it directly). */
 export interface FakeWorld {
   names: Map<string, string>;
+  /** persons `sex` ('female' | 'male') — returned with the name (decision 39) */
+  sex: Map<string, string>;
   health: Map<string, Record<string, unknown>>;
   memberships: FakeMembership[];
   editions: { id: string; year: number; current: boolean }[];
   templates: Map<string, Record<string, unknown>>;
   messages: { slug: string; recipients: { personId: string; variables: Record<string, string> }[] }[];
+  links: { subjectId: string; agentId: string }[];
   /** bearer tokens core refuses with 401 (revoked mid-session) */
   revoked: Set<string>;
   nextId: number;
@@ -245,9 +248,9 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   core.on(`POST ${P}/memberships`, (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
     const body = call.json as FakeMembership;
-    if (!world.memberships.some((m) => m.personId === body.personId && m.role === body.role && m.editionId === body.editionId)) {
-      world.memberships.push({ personId: body.personId, role: body.role, editionId: body.editionId, involved: body.involved });
-    }
+    const existing = world.memberships.find((m) => m.personId === body.personId && m.role === body.role && m.editionId === body.editionId);
+    if (!existing) world.memberships.push({ personId: body.personId, role: body.role, editionId: body.editionId, involved: body.involved });
+    else for (const i of body.involved ?? []) if (!(existing.involved ?? []).some((x) => x.personId === i.personId)) existing.involved = [...(existing.involved ?? []), i];
     return json({ id: "m-new", personId: body.personId, role: body.role, editionId: body.editionId, involved: body.involved ?? [] }, 201);
   });
   core.on(`DELETE ${P}/memberships/:personId/:role`, (call) => {
@@ -268,10 +271,17 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     const responsible = make(body.responsible!.name);
     return json({ responsible: { personId: responsible, created: true }, children: (body.children ?? []).map((c) => ({ personId: make(c.name), created: true, linkId: `link-${world.nextId}` })) }, 201);
   });
+  core.on("POST /links", (call) => {
+    if (refused(call)) return json({ reason: "invalidToken" }, 401);
+    const body = call.json as { subjectId: string; agentId: string };
+    if (world.links.some((l) => l.subjectId === body.subjectId && l.agentId === body.agentId)) return json({ reason: "linkExists" }, 409);
+    world.links.push(body);
+    return json({ id: `link-${world.links.length}`, basis: "minor", status: "active" }, 201);
+  });
   core.on(`POST ${P}/people/names`, (call) => {
     const ids = (call.json as { personIds: string[] }).personIds;
     if (ids.length > 200) return json({ reason: "validationFailed" }, 400);
-    return json({ items: ids.filter((id) => world.names.has(id)).map((id) => ({ personId: id, name: world.names.get(id) })) });
+    return json({ items: ids.filter((id) => world.names.has(id)).map((id) => ({ personId: id, name: world.names.get(id), ...(world.sex.has(id) ? { sex: world.sex.get(id) } : {}) })) });
   });
   core.on(`POST ${P}/people/count`, (call) => {
     const body = call.json as { personIds?: string[]; filters: { healthTags?: { allergies?: string[] } } };
@@ -324,7 +334,7 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
 }
 
 export function emptyWorld(): FakeWorld {
-  return { names: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], templates: new Map(), messages: [], revoked: new Set(), nextId: 0 };
+  return { links: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], templates: new Map(), messages: [], revoked: new Set(), nextId: 0 };
 }
 
 /** Opens an Acampa session for `personId` holding `roles` (tokens signed like auth-api's) and returns the browser token. */

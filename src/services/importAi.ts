@@ -505,8 +505,6 @@ export async function matchLeaderWithAi(
   return typeof answer?.id === "string" && staff.some((s) => s.id === answer.id) ? answer.id : null;
 }
 
-// sex guesses run on Jev (narrow yes/no decisions) — see guessCamperSexAi.ts
-export { guessNamesSex, guessIndividualNamesSex } from "./guessCamperSexAi";
 
 // ---------------------------------------------------------------------------
 // date parser synthesis (smart model, only when the built-in parser fails)

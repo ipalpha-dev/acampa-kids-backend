@@ -24,7 +24,6 @@ describe("staff import review delta",()=>{
   });
   test("only the room wing sets the sex; the person goes to core and the duty columns become project roles",()=>{
     const data=staffDataFromPreview({name:"Ana",phone:"+5511999999999",sex:null,probableGender:"F",organizer:true,checkinHelper:true,vestHelper:false},"import-1");
-    expect(data.ops.sex).toBeNull();
     expect(data.person).toMatchObject({name:"Ana",phone:"+5511999999999"});
     expect(data.roles).toEqual(["equipe","organizacao","checkin"]);
     expect(JSON.stringify(data.ops)).not.toContain("Ana");

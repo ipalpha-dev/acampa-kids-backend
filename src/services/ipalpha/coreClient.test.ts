@@ -55,7 +55,7 @@ describe("core client", () => {
     const { core, api } = client();
     let n = 0;
     core.on("POST /projects/project-test-1/people/names", () => (++n === 1 ? json({ reason: "invalidToken" }, 401) : json({ items: [{ personId: "p1", name: "Ana" }] })));
-    expect(await api.names(["p1"])).toEqual([{ personId: "p1", name: "Ana", nickname: null }]);
+    expect(await api.names(["p1"])).toEqual([{ personId: "p1", name: "Ana", nickname: null, sex: null }]);
     expect(core.callsTo("POST /oauth/token")).toHaveLength(2);
     expect(core.callsTo("POST /oauth/token")[0].form?.get("scope")).toBe("persons:app-names");
   });
