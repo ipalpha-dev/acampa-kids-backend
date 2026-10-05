@@ -316,11 +316,20 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     return json({ personIds: [...world.birthdays].filter((id) => live.has(id)).sort() });
   });
   core.on(`POST ${P}/people/count`, (call) => {
-    const body = call.json as { personIds?: string[]; filters: { healthTags?: { allergies?: string[] } } };
-    const ids = body.personIds ?? [];
+    // §23: project + role (+ edition) — never person ids
+    const body = call.json as { personIds?: unknown; role: string; editionId?: string; filters: { healthTags?: { allergies?: string[] } } };
+    if (body.personIds !== undefined || !body.role) return json({ reason: "validationFailed" }, 400);
+    const ids = [...new Set(world.memberships.filter((m) => m.role === body.role && (!body.editionId || m.editionId === body.editionId)).map((m) => m.personId))];
     const byTag: Record<string, number> = {};
     for (const tag of body.filters.healthTags?.allergies ?? []) byTag[tag] = ids.filter((id) => ((world.health.get(id)?.allergies as string[]) ?? []).includes(tag)).length;
     return json({ total: ids.length, byTag });
+  });
+  core.on(`POST ${P}/people/health-flags`, (call) => {
+    if (refused(call)) return json({ reason: "invalidToken" }, 401);
+    const ids = (call.json as { personIds: string[] }).personIds;
+    if (ids.length > 200) return json({ reason: "validationFailed" }, 400);
+    const has = (h: Record<string, unknown> | undefined) => !!h && Object.values(h).some((v) => (Array.isArray(v) ? v.length > 0 : typeof v === "string" ? v.trim() !== "" : v === true));
+    return json({ items: ids.filter((id) => !world.medicalForbidden.has(id)).map((id) => ({ personId: id, hasHealthInfo: has(world.health.get(id)) })) });
   });
   core.on(`GET ${P}/people`, (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);

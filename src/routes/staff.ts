@@ -10,8 +10,9 @@ import { listEvents, listRoles, unassignStaffEverywhere } from "../models/schedu
 import { serializeCamperList } from "./campers";
 import { deleteStaff, EMPTY_STAFF, findStaffById, insertStaff, listStaff, NO_VEST, setStaffCheckin, setStaffPrepDone, setStaffVest, updateStaff, type StaffData } from "../models/staff";
 import { participantKind } from "../models/participants";
+import { editionRolesOf } from "../services/members";
 import { logCheckin } from "../models/campers";
-import { bedroomCapacity, ROOM_ROLES, TEAM_ROLE, type RoomRole, type SessionUser, type Staff } from "../types";
+import { bedroomCapacity, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, ROOM_ROLES, TEAM_ROLE, type RoomRole, type SessionUser, type Staff } from "../types";
 import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseTeam, parseText, parseTransport } from "./_validate";
 import { listTeams } from "../models/teams";
@@ -22,7 +23,7 @@ import { notifyCaretakerChange, notifyCheckin, notifyStaffChange, syncWelcomes }
 import { actingToken, campEditionId, coordinationToken } from "../services/acting";
 import { coreClient } from "../services/ipalpha";
 import { PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
-import { hasHealthInfo, nameMatches, namesOf, pageOf, readHealth, readHealthMany } from "../services/people";
+import { healthFlagsOf, nameMatches, namesOf, pageOf, readHealth } from "../services/people";
 import { registrationData, registrationExtras, registrationProfile } from "../services/coreRegistration";
 
 type Env = { Variables: AuthVariables };
@@ -166,13 +167,14 @@ staff.get("/", requireRole("admin", "staff", "parent"), async (c) => {
   const missing = page.items.filter((s) => !names.has(s._id)).map((s) => s._id);
   if (missing.length) for (const [id, n] of await namesOf(missing)) names.set(id, n);
   const mayHealth = scope.all || scope.organizer;
-  const health = mayHealth ? await readHealthMany(actingToken(c, PERSONS_RESOURCE), page.items.map((s) => s._id)) : new Map();
+  // the neutral ♥: core's light flag (decision 69) — never a full medical read for a list
+  const flags = mayHealth ? await healthFlagsOf(actingToken(c, PERSONS_RESOURCE), page.items.map((s) => s._id)) : new Map<string, boolean>();
   const items = page.items.map((s) => ({
     ...serializeStaffFor(s, scope)!,
     name: names.get(s._id)?.name ?? "",
     nickname: names.get(s._id)?.nickname ?? null,
     sex: names.get(s._id)?.sex ?? null,
-    ...(mayHealth ? { hasHealth: health.has(s._id) ? hasHealthInfo(health.get(s._id)) : false } : {}),
+    ...(mayHealth ? { hasHealth: flags.get(s._id) === true } : {}),
   }));
   return c.json({ items, nextCursor: page.nextCursor, total: visible.length });
 });
@@ -479,6 +481,8 @@ staff.post("/", async (c) => {
   const personId = typeof body.personId === "string" ? body.personId.trim() : "";
   if (!personId) return fail(c, "PERSON_REQUIRED", "Escolha a pessoa no IPAlpha.");
   if (await participantKind(personId)) return fail(c, "ALREADY_IN_CAMP", "Esta pessoa já está neste acampamento.", 409);
+  // only someone serving in THIS camp's edition (equipe or a helper role) becomes a team row
+  if (!(await editionRolesOf(personId)).some((r) => r !== PARTICIPANT_ROLE && r !== RESPONSIBLE_ROLE)) return fail(c, "NOT_IN_EDITION", "Esta pessoa ainda não serve nesta edição no IPAlpha.", 409);
   const result = await buildPatch(body);
   if (!("patch" in result)) return fail(c, result.code, result.message, result.status);
   const full = await bedroomFullMessage(result.patch.bedroom ?? null, null);

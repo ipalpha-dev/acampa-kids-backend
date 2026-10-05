@@ -41,7 +41,6 @@ const SYSTEM_TOKEN_SKEW_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 8_000;
 /** core caps (§11/§12) */
 export const NAMES_BATCH_MAX = 200;
-export const COUNT_IDS_MAX = 2000;
 export const MESSAGE_RECIPIENTS_MAX = 200;
 
 /** core answered 4xx with a reason (`{reason}` or OAuth `{error}`) */
@@ -274,8 +273,8 @@ export interface IpalphaCoreClient {
    * non-leap years) — with `editionId` that edition + project-wide. No dates, no names; one anonymized query log in core.
    */
   birthdaysToday(editionId?: string): Promise<string[]>;
-  /** anonymized counts (app client — §12); never logged by core */
-  count(input: { personIds?: string[]; editionId?: string; filters: { healthTags?: HealthTagFilter } }): Promise<CountAnswer>;
+  /** anonymized counts of a project ROLE's members (app client — §23: project + role (+ edition), never person ids); not logged by core */
+  count(input: { role: string; editionId?: string; filters: { healthTags?: HealthTagFilter } }): Promise<CountAnswer>;
 
   // ── persons-api (per-role token) ──
   listPeople(token: string, query: { role: string; kinds?: string[]; cursor?: string; limit?: number; q?: string }): Promise<Page<PersonRow>>;
@@ -287,6 +286,11 @@ export interface IpalphaCoreClient {
   /** persons `POST /links` (decision 38: roles with canRegister) — `agentId` becomes a responsible of `subjectId` */
   link(token: string, input: { subjectId: string; agentId: string }): Promise<{ linkId: string | null }>;
   healthLists(token: string): Promise<HealthList[]>;
+  /**
+   * §23 light flag for the list ♥ (decision 69): does each person have ANY health info? ≤ 200 ids, role token whose
+   * role may read `medical` of the targets. Logged by core as a basic-register view, never as a health read.
+   */
+  healthFlags(token: string, personIds: string[]): Promise<Map<string, boolean>>;
 
   // ── notifications-api (app client) ──
   sendTemplate(input: { templateSlug: string; recipients: MessageRecipient[]; editionId?: string }): Promise<{ personId: string; status: MessageStatus }[]>;
@@ -668,7 +672,6 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
     },
 
     async count(input) {
-      if (input.personIds && input.personIds.length > COUNT_IDS_MAX) throw new Error(`count: at most ${COUNT_IDS_MAX} ids per call`);
       const body = obj(await systemCall("people/count", PERSONS_RESOURCE, SCOPES.appNames, "POST", `${cfg.personsApiUrl}/projects/${project()}/people/count`, input));
       const byTag: Record<string, number> = {};
       for (const [k, v] of Object.entries(obj(body.byTag))) if (typeof v === "number") byTag[k] = v;
@@ -745,6 +748,18 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
             .filter((o) => typeof o.id === "string")
             .map((o) => ({ id: o.id as string, label: (typeof o.label === "string" ? o.label : obj(o.label)) as HealthList["options"][number]["label"], order: typeof o.order === "number" ? o.order : 0, active: o.active !== false })),
         }));
+    },
+
+    async healthFlags(token, personIds) {
+      const out = new Map<string, boolean>();
+      if (personIds.length === 0) return out;
+      if (personIds.length > NAMES_BATCH_MAX) throw new Error(`healthFlags: at most ${NAMES_BATCH_MAX} ids per call`);
+      const body = obj(await roleCall("people/health-flags", token, "POST", `${cfg.personsApiUrl}/projects/${project()}/people/health-flags`, { personIds }));
+      for (const x of Array.isArray(body.items) ? body.items : []) {
+        const o = obj(x);
+        if (typeof o.personId === "string") out.set(o.personId, o.hasHealthInfo === true);
+      }
+      return out;
     },
 
     async sendTemplate({ templateSlug, recipients, editionId }) {

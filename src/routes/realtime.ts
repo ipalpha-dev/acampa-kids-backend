@@ -64,8 +64,12 @@ realtime.get(
         // the client answers pings and may ask for a fresh snapshot
         const text = typeof evt.data === "string" ? evt.data : "";
         if (text === "refresh") {
-          void withCamp(campId, () =>
-            loadCollections(viewer)
+          // the CURRENT key of this socket (a role / camp switch re-keys it — services/realtime.ts)
+          const current = client;
+          if (!current) return;
+          const now = { activeRole: current.role, coreRole: current.coreRole, personId: current.personId };
+          void withCamp(current.campId, () =>
+            loadCollections(now)
               .then((data) => ws.send(JSON.stringify({ type: "snapshot", at: new Date().toISOString(), data })))
               .catch(() => {}),
           );

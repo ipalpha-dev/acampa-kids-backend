@@ -196,6 +196,8 @@ export async function sendBirthdayNotices(now = new Date()): Promise<void> {
     const kidNames = await firstNames(kids.map((k) => k._id));
     let helperSet: Promise<Set<string>> | null = null;
     const helpers = () => (helperSet ??= helperIds());
+    let notified = 0;
+    let messages = 0;
     for (const kid of kids) {
       if (!(await claimBirthdayNotice(kid._id, today))) continue;
       const room = await bedroomName(kid.bedroom);
@@ -208,8 +210,11 @@ export async function sendBirthdayNotices(now = new Date()): Promise<void> {
       const sent = await sendMessage("birthday", recipients, "birthday");
       // nothing went out (core down / refused): lift the marker so the hourly run tries again today
       if (!sent || sent.sent === 0) await releaseBirthdayNotice(kid._id, today);
-      console.log(`🎂 birthday of ${kid._id} today → ${sent?.sent ?? 0}/${recipients.length} team member(s) of room ${kid.bedroom}`);
+      notified++;
+      messages += sent?.sent ?? 0;
     }
+    // counts only — no person id, room or date that would tie the line to one kid's birthday
+    if (notified) console.log(`🎂 birthday notices: ${notified} kid(s) → ${messages} message(s) sent`);
   } catch (err) {
     console.error("notify: birthday notices failed", err instanceof Error ? err.message : err);
   }

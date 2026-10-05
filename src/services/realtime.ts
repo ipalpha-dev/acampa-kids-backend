@@ -108,6 +108,66 @@ async function flush(): Promise<void> {
   }
 }
 
+// ── session lifecycle: a socket never outlives (or out-scopes) its session ──
+
+/**
+ * The session ended (logout, SESSION_ENDED after a core 401, revocation,
+ * access window): its sockets get `SESSION_ENDED` and close with 4401, so the
+ * phone returns to login and wipes its offline copy at once.
+ */
+export function closeSessionSockets(sessionId: string, reason = "session ended"): number {
+  return closeWhere((c) => c.sessionId === sessionId, reason);
+}
+
+/** Every socket of a person (logged out everywhere). */
+export function closePersonSockets(personId: string, reason = "session ended"): number {
+  return closeWhere((c) => c.personId === personId, reason);
+}
+
+function closeWhere(match: (c: RealtimeClient) => boolean, reason: string): number {
+  let closed = 0;
+  for (const client of [...clients]) {
+    if (!match(client)) continue;
+    clients.delete(client);
+    closed++;
+    try {
+      client.ws.send(JSON.stringify({ type: "error", code: "SESSION_ENDED", message: "Sua sessão terminou. Entre de novo." }));
+      client.ws.close(4401, reason);
+    } catch {
+      /* already gone */
+    }
+  }
+  return closed;
+}
+
+/**
+ * Role / camp switch: the session's open sockets are RE-KEYED to the new
+ * acting role (and camp) and receive a fresh snapshot of that scope — never
+ * another update of the previous role's data.
+ */
+export async function rekeySessionSockets(next: { id: string; role: Role; coreRole: CoreRole; campId: string }): Promise<number> {
+  const mine = [...clients].filter((c) => c.sessionId === next.id);
+  if (mine.length === 0) return 0;
+  const { loadCollections } = await import("./snapshot");
+  for (const client of mine) {
+    client.role = next.role;
+    client.coreRole = next.coreRole;
+    client.campId = next.campId;
+  }
+  await withCamp(next.campId, async () => {
+    try {
+      const data = await loadCollections({ activeRole: next.role, coreRole: next.coreRole, personId: mine[0].personId });
+      const payload = JSON.stringify({ type: "snapshot", at: new Date().toISOString(), data });
+      for (const client of mine) safeSend(client, payload);
+    } catch (err) {
+      console.error("realtime: re-key snapshot failed", err instanceof Error ? err.message : err);
+      // never leave a socket on a scope it no longer has: close it, the client reconnects
+      for (const client of mine) closeWhere((c) => c === client, "role changed");
+    }
+  });
+  return mine.length;
+}
+
 /** targeted event, not a collection replace: one record's background review advanced */
 export type AiReviewedKind = "camper" | "staff";
 export type AiReviewedStatus = "structured" | "reviewed" | "error";
@@ -261,14 +321,18 @@ export function scheduleBirthdayNotices(): void {
 }
 
 // ── safety net: an instant further than setTimeout's limit (~24 days) can't be armed, so re-check hourly
-setInterval(
-  () =>
-    void withCamp(activeCampId(), async () => {
-      const m = await import("./notify");
-      await Promise.all([m.syncWelcomes(), m.syncParentWelcomes(), m.sendCheckinReminder(), m.sendBirthdayNotices()]);
-    }),
-  60 * 60_000,
-);
+setInterval(() => {
+  let campId: string;
+  try {
+    campId = activeCampId();
+  } catch {
+    return; // boot has not finished (Mongo still down) — nothing to catch up yet
+  }
+  void withCamp(campId, async () => {
+    const m = await import("./notify");
+    await Promise.all([m.syncWelcomes(), m.syncParentWelcomes(), m.sendCheckinReminder(), m.sendBirthdayNotices()]);
+  });
+}, 60 * 60_000);
 
 // ── heartbeat (lets phones notice a dead connection and reconnect) ─────────
 

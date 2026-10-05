@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { config } from "./config";
 import { onAppError } from "./services/coreErrors";
+import { bootGate, live, ready } from "./services/readiness";
 import { campWriteGuard } from "./middleware/camp";
 import peopleRoutes from "./routes/people";
 import teamRoutes from "./routes/teams";
@@ -38,8 +39,13 @@ import superRoutes from "./routes/super";
  * The HTTP app (every route + the core error handler), without the boot side
  * effects of index.ts — so feature tests mount exactly what production serves.
  */
-export function createApp(opts: { logRequests?: boolean } = {}): Hono {
+export function createApp(opts: { logRequests?: boolean; bootGate?: boolean } = {}): Hono {
   const app = new Hono();
+
+  // probes first: no logging, no CORS, no session (k8s + ./run use these two paths)
+  app.get("/live", live);
+  app.get("/ready", ready);
+  if (opts.bootGate) app.use("/api/*", bootGate);
 
   if (opts.logRequests) app.use(logger());
   app.use(
@@ -50,6 +56,7 @@ export function createApp(opts: { logRequests?: boolean } = {}): Hono {
     }),
   );
 
+  // legacy liveness path (older manifests); `/live` + `/ready` are the probes
   app.get("/health", (c) => c.json({ status: "ok" }));
 
   // core refused / revoked a role token mid-request → the session ends gracefully (services/coreErrors.ts)

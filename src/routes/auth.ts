@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { resolveLocale } from "../i18n";
-import { requireAuth, type AuthVariables } from "../middleware/auth";
+import { requireAuth, sessionUser, type AuthVariables } from "../middleware/auth";
+import { rekeySessionSockets } from "../services/realtime";
 import { findCamp } from "../models/camps";
 import { activeCampId, withCamp } from "../services/campContext";
 import { clientIp } from "../services/clientIp";
@@ -96,7 +97,8 @@ auth.get("/me", requireAuth, async (c) => {
   const session = c.get("session");
   const history = session.campId !== activeCampId();
   const camps = await switchableCamps(session);
-  return c.json({ user: await publicUser(session, history), camp: await sessionCamp(session.campId), ...(camps ? { camps } : {}) });
+  // the sliding expiry (requireAuth just slid it): the browser keeps only the opaque token + this instant
+  return c.json({ tokenExpiresAt: session.expiresAt.toISOString(), user: await publicUser(session, history), camp: await sessionCamp(session.campId), ...(camps ? { camps } : {}) });
 });
 
 /**
@@ -124,6 +126,9 @@ auth.post("/role", requireAuth, async (c) => {
   const windowErr = await accessWindowError(session.personId, role);
   if (windowErr) return c.json({ error: windowErr }, 403);
   const next = (await switchSessionRole(session._id, role))!;
+  // the open sockets follow the new acting role (fresh snapshot of ITS scope)
+  const nextUser = sessionUser(next, next.campId !== activeCampId());
+  await rekeySessionSockets({ id: next._id, role: nextUser.activeRole, coreRole: nextUser.coreRole, campId: next.campId });
   const camps = await switchableCamps(next);
   return c.json({ success: true, tokenExpiresAt: next.expiresAt.toISOString(), user: await publicUser(next), camp: await sessionCamp(next.campId), ...(camps ? { camps } : {}) });
 });
@@ -142,6 +147,8 @@ auth.post("/camp", requireAuth, async (c) => {
   if (!target) return c.json({ error: { code: "CAMP_NOT_FOUND", message: "Acampamento não encontrado." } }, 404);
   const next = (await switchSessionCamp(session._id, target._id))!;
   const history = !target.active;
+  const nextUser = sessionUser(next, history);
+  await rekeySessionSockets({ id: next._id, role: nextUser.activeRole, coreRole: nextUser.coreRole, campId: next.campId });
   return withCamp(target._id, async () =>
     c.json({ success: true, tokenExpiresAt: next.expiresAt.toISOString(), user: await publicUser(next, history), camp: await sessionCamp(next.campId), camps }),
   );

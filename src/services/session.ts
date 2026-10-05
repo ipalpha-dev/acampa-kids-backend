@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import { config } from "../config";
 import { getDb } from "../db";
 import { activeCampId } from "./campContext";
+import { closePersonSockets, closeSessionSockets } from "./realtime";
 import type { RoleGrant } from "./ipalpha/coreClient";
 import type { CoreRole, Session } from "../types";
 
@@ -126,7 +127,7 @@ export async function findSessionByToken(token: string): Promise<Session | null>
   if (!session) return null;
   const now = Date.now();
   if (session.expiresAt.getTime() <= now) {
-    await db.collection(COLLECTION).deleteOne({ _id: session._id as never });
+    await revokeSession(session._id);
     return null;
   }
   const slid = new Date(now + session.hours * 3600_000);
@@ -164,15 +165,19 @@ export async function dropSessionRole(session: Session, role: CoreRole): Promise
   await db.collection(COLLECTION).updateOne({ _id: session._id as never }, { $set: { roles: session.roles.filter((r) => r !== role), roleTokens: seal(JSON.stringify(tokens)) } });
 }
 
+/** Ends a session (logout, SESSION_ENDED, access window…): the record goes and its sockets close (4401). */
 export async function revokeSession(id: string): Promise<void> {
   const db = await getDb();
   await db.collection(COLLECTION).deleteOne({ _id: id as never });
+  closeSessionSockets(id);
 }
 
 /** Logs a person out everywhere (every session of that person id). */
 export async function revokePersonSessions(personId: string): Promise<number> {
   const db = await getDb();
-  return (await db.collection(COLLECTION).deleteMany({ personId })).deletedCount;
+  const deleted = (await db.collection(COLLECTION).deleteMany({ personId })).deletedCount;
+  closePersonSockets(personId);
+  return deleted;
 }
 
 export async function ensureSessionIndexes(): Promise<void> {

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import sampleJson from "../sample/camp.json";
 import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireAdmin } from "../middleware/roles";
+import { config, sampleDataAllowed } from "../config";
 import { insertBedroom } from "../models/bedrooms";
 import { EMPTY_CAMPER, findCamperById, insertCamper, listCampers } from "../models/campers";
 import { EMPTY_STAFF, insertStaff, listStaff } from "../models/staff";
@@ -30,15 +31,21 @@ const SAMPLE = sampleJson as {
 
 wizard.use("*", requireAuth);
 
+/** GET /api/wizard/sample — may this deployment load the synthetic sample? (previews / dev only — decision 71) */
+wizard.get("/sample", (c) => c.json({ enabled: sampleDataAllowed(config.ipalphaEnv) }));
+
 /**
  * POST /api/wizard/sample — coordenação. Fills an EMPTY camp with the
  * fictional sample (154 kids, 72 team members, teams, rooms and buses) so the
- * whole system can be tested end-to-end. The PEOPLE are registered in IPAlpha
+ * whole system can be tested end-to-end — ONLY when `IPALPHA_ENV` is
+ * `preview` or `dev` (else 403 SAMPLE_DISABLED). The PEOPLE are registered in IPAlpha
  * (persons registration + memberships of the camp's edition, with the
  * coordenação tokens — synthetic data, previews only); Acampa keeps the camp
  * ops. Refuses when the camp already has people — clean up first.
  */
 wizard.post("/sample", requireAdmin, async (c) => {
+  // synthetic people are never registered in a production IPAlpha (decision 71)
+  if (!sampleDataAllowed(config.ipalphaEnv)) return c.json({ error: { code: "SAMPLE_DISABLED", message: "Os dados de exemplo só existem nos ambientes de teste." } }, 403);
   const [campers, staff] = await Promise.all([listCampers(), listStaff({ includeDraft: true })]);
   if (campers.length > 0 || staff.length > 0) {
     return c.json({ error: { code: "SAMPLE_NOT_EMPTY", message: "O acampamento já tem pessoas cadastradas. Limpe (Configurações → Limpeza) antes de carregar os dados de exemplo." } }, 409);
@@ -95,7 +102,9 @@ wizard.post("/sample", requireAdmin, async (c) => {
       kid: { name: k.name, birthDate: k.birthDate, sex: k.sex, homeChurch: k.church, data: kidData },
       guardian: { name: k.guardianName, phone: k.guardianPhone, email: k.guardianEmail || undefined, data: guardianDocs.length ? { document: guardianDocs } : undefined },
       editionId: ctx.editionId,
-      health: { allergies: k.allergies, healthIssues: k.healthIssues, foodRestrictions: k.foodRestrictions, healthNotes: k.healthNotes, weightKg: k.weightKg, insurance: k.insurance, insuranceCard: k.insuranceCard },
+      // the sample's free observations are mostly health (asthma, medicines…): they go to core's health notes,
+      // never to Acampa's generalNotes (no health rests in Acampa)
+      health: { allergies: k.allergies, healthIssues: k.healthIssues, foodRestrictions: k.foodRestrictions, healthNotes: [k.healthNotes, k.generalNotes].map((t) => t.trim()).filter(Boolean).join("\n\n"), weightKg: k.weightKg, insurance: k.insurance, insuranceCard: k.insuranceCard },
     });
     if (await findCamperById(kidId)) continue;
     const bedroom = k.room && k.roomGroup ? roomId.get(`${k.roomGroup}:${k.room}`) ?? null : null;
@@ -107,7 +116,6 @@ wizard.post("/sample", requireAdmin, async (c) => {
       transportation: k.transportation ? transportId.get(k.transportation) ?? null : null,
       bed: k.bed || null,
       bedroom,
-      generalNotes: k.generalNotes,
       bedroomPreference: k.bedroomPreference,
     });
     campersCreated++;

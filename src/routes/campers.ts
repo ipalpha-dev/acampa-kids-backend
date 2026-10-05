@@ -17,8 +17,8 @@ import { actingToken, campEditionId, coordinationContext, coordinationToken } fr
 import { addResponsible, healthToCore, mergeHealthInto, registrationData, registrationExtras, registrationProfile } from "../services/coreRegistration";
 import { coreClient } from "../services/ipalpha";
 import { PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
-import { hasHealthInfo, healthCounts, matchesHealthTag, nameMatches, namesOf, pageOf, readHealth, readHealthMany, readHealthState, tagFilter, writeHealth } from "../services/people";
-import { responsiblesOf } from "../services/members";
+import { hasHealthInfo, healthCounts, healthFlagsOf, matchesHealthTag, nameMatches, namesOf, pageOf, readHealth, readHealthMany, readHealthState, tagFilter, writeHealth } from "../services/people";
+import { editionRolesOf, responsiblesOf } from "../services/members";
 import { normalizeBrazilPhone, titleCaseName } from "../utils";
 
 /**
@@ -156,7 +156,7 @@ function buildHealthPatch(body: Record<string, unknown>, allowed: readonly strin
     patch[field] = [...new Set(v as string[])];
   }
   if (has("neurodivergent")) {
-    if (typeof body.neurodivergent !== "boolean") return { code: "NEURODIVERGENT_INVALID", message: "Neurodivergente deve ser sim ou não." };
+    if (typeof body.neurodivergent !== "boolean") return { code: "NEURODIVERGENT_INVALID", message: "Neurodivergência: responda sim ou não." };
     patch.neurodivergent = body.neurodivergent;
   }
   if (has("medications")) {
@@ -227,17 +227,23 @@ campers.get("/", requireRole("admin", "staff", "parent"), async (c) => {
   const missing = page.items.filter((k) => !names.has(k._id)).map((k) => k._id);
   if (missing.length) for (const [id, n] of await namesOf(missing)) names.set(id, n);
   const detail = !!tag || (!!q && visible.length <= HEALTH_DETAIL_MAX);
-  const needHealth = page.items.filter((k) => mayHealth(k) && !health.has(k._id)).map((k) => k._id);
-  // the neutral ♥ needs to know whether there is anything (roles allowed health only; each read is logged by core)
-  if (needHealth.length) for (const [id, h] of await readHealthMany(actingToken(c, PERSONS_RESOURCE), needHealth)) health.set(id, h);
+  // details only when filtered (tag / a name narrowing to ≤ 6): the medical block is read for those few
+  if (detail) {
+    const need = page.items.filter((k) => mayHealth(k) && !health.has(k._id)).map((k) => k._id);
+    if (need.length) for (const [id, h] of await readHealthMany(actingToken(c, PERSONS_RESOURCE), need)) health.set(id, h);
+  }
+  // otherwise the neutral ♥ comes from core's light flag (decision 69) — never a full medical read
+  const flagIds = page.items.filter((k) => mayHealth(k) && !health.has(k._id)).map((k) => k._id);
+  const flags = flagIds.length ? await healthFlagsOf(actingToken(c, PERSONS_RESOURCE), flagIds) : new Map<string, boolean>();
   const items = page.items.map((k) => {
     const h = mayHealth(k) ? health.get(k._id) : undefined;
+    const hasHealth = h ? hasHealthInfo(h) : flags.get(k._id) === true;
     return {
       ...serializeCamperFor(k, scope)!,
       name: names.get(k._id)?.name ?? "",
       nickname: names.get(k._id)?.nickname ?? null,
       sex: names.get(k._id)?.sex ?? null,
-      ...(mayHealth(k) ? { hasHealth: h ? hasHealthInfo(h) : false } : {}),
+      ...(mayHealth(k) ? { hasHealth } : {}),
       ...(detail && h ? { health: h } : {}),
     };
   });
@@ -255,8 +261,10 @@ campers.get("/health-counts", requireRole("admin", "staff"), async (c) => {
   const filters = tags.map(tagFilter).filter((f): f is NonNullable<typeof f> => !!f);
   const merged: Record<string, unknown> = {};
   for (const f of filters) for (const [k, v] of Object.entries(f)) merged[k] = Array.isArray(v) ? [...new Set([...((merged[k] as string[]) ?? []), ...v])] : v;
-  const ids = (await listCampers()).filter((k) => camperVisibility(scope, k) !== "none").map((k) => k._id);
-  return c.json(await healthCounts(ids, merged, await campEditionId()));
+  // these roles see every kid of the camp: core counts the edition's `participante` members (no ids sent — decision 56)
+  const editionId = await campEditionId();
+  if (!editionId) return c.json({ total: 0, byTag: {} });
+  return c.json(await healthCounts(PARTICIPANT_ROLE, merged, editionId));
 });
 
 /**
@@ -563,6 +571,8 @@ campers.post("/", async (c) => {
   const personId = typeof body.personId === "string" ? body.personId.trim() : "";
   if (!personId) return fail(c, "PERSON_REQUIRED", "Escolha a pessoa no IPAlpha.");
   if (await participantKind(personId)) return fail(c, "ALREADY_IN_CAMP", "Esta pessoa já está neste acampamento.", 409);
+  // only a live `participante` of THIS camp's edition becomes a kid row (never an arbitrary person id)
+  if (!(await editionRolesOf(personId)).includes(PARTICIPANT_ROLE)) return fail(c, "NOT_IN_EDITION", "Esta pessoa ainda não está inscrita como participante nesta edição no IPAlpha.", 409);
   const ops = await buildOpsPatch(body);
   if (!("patch" in ops)) return fail(c, ops.code, ops.message);
   const data = ops.patch;

@@ -3,7 +3,7 @@ import { listEvents } from "../models/schedule";
 import { checkinWindowOpen, getSettings, scoreHidden, staffAccessOpen } from "../models/settings";
 import { findStaffById } from "../models/staff";
 import { findUserCampState } from "../models/userCampState";
-import { COORDINATION_ROLE, RESPONSIBLE_ROLE, TEAM_ROLE, type CampEvent, type Camper, type CoreRole, type DocAudience, type OccurrenceGroup, type PrepAudience, type Role, type RoomRole, type ScheduleRole, type Settings, type Staff } from "../types";
+import { COORDINATION_ROLE, type CampEvent, type Camper, type CoreRole, type DocAudience, type OccurrenceGroup, type PrepAudience, type Role, type RoomRole, type ScheduleRole, type Settings, type Staff } from "../types";
 import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen, vestWindowOpen } from "./camp";
 import { kidsOfResponsible } from "./members";
 import { autoRoleCovers } from "./schedule";
@@ -190,11 +190,16 @@ function asParent(scope: Scope): Extract<Scope, { all: false }> {
 }
 
 /**
- * A helper role (anything but plain `equipe`), or a person listed as a parent
- * contact: never gated by the staff access window.
+ * A KNOWN helper role (a ROLE_FLAGS key other than `equipe`) or the
+ * coordenação, or a person listed as a parent contact: never gated by the
+ * staff access window. An unknown role key (a future helper core already
+ * grants, without a flag here yet) behaves EXACTLY as `equipe` — window
+ * included; `responsavel` has its own window.
  */
 export function isPrivilegedStaff(personId: string, coreRole: CoreRole, s: Settings): boolean {
-  return (coreRole !== TEAM_ROLE && coreRole !== RESPONSIBLE_ROLE) || s.parentContacts.some((p) => p.personId === personId);
+  if (coreRole === COORDINATION_ROLE) return true;
+  const flag = Object.hasOwn(ROLE_FLAGS, coreRole) ? ROLE_FLAGS[coreRole] : undefined;
+  return (flag !== undefined && flag !== "team") || s.parentContacts.some((p) => p.personId === personId);
 }
 
 /** May this team member use the app (and be notified) right now? Ordinary members only inside `staffAccessWindow`. */
@@ -235,7 +240,7 @@ export async function resolveScope(viewer: Viewer): Promise<Scope> {
   if (viewer.activeRole === "admin") return ADMIN;
   if (viewer.activeRole === "parent") return resolveParentScope(viewer.personId);
   if (viewer.coreRole === COORDINATION_ROLE) return ADMIN;
-  const flag = ROLE_FLAGS[viewer.coreRole] ?? "team";
+  const flag = Object.hasOwn(ROLE_FLAGS, viewer.coreRole) ? ROLE_FLAGS[viewer.coreRole] : "team";
   const [me, settings] = await Promise.all([findStaffById(viewer.personId), getSettings()]);
   // a plain team member must be on this camp's (active) team; a helper role works without a room
   if (flag === "team" && (!me || !me.active)) return NO_ACCESS;

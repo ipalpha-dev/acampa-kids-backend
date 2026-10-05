@@ -77,8 +77,17 @@ export function readSuperAdminPersonIds(raw: string | undefined): string[] {
 const aiBaseUrl = (process.env.AI_BASE_URL ?? "https://ai-models.kevyn.com.br/v1").replace(/\/$/, "");
 const aiApiKey = process.env.AI_API_KEY ?? "";
 
+/** `IPALPHA_ENV` (prod | preview | dev …): synthetic-data tools (the wizard's sample camp) only in previews / dev. */
+export function sampleDataAllowed(env: string | undefined): boolean {
+  const v = (env ?? "").trim().toLowerCase();
+  return v === "preview" || v === "dev";
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
+
+  /** deployment kind (`IPALPHA_ENV`): `preview` / `dev` enable the synthetic sample camp (decision 71) */
+  ipalphaEnv: (process.env.IPALPHA_ENV ?? "").trim().toLowerCase(),
   corsOrigin: process.env.CORS_ORIGIN ?? "http://localhost:5173",
 
   mongoUri: process.env.MONGODB_URI ?? "mongodb://localhost:27017",

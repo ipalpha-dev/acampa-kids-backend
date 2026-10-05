@@ -1,5 +1,5 @@
 import { coreClient } from "./ipalpha";
-import { COUNT_IDS_MAX, IpalphaRejected, NAMES_BATCH_MAX, type HealthBlock, type HealthTagFilter, type PersonName } from "./ipalpha/coreClient";
+import { IpalphaRejected, NAMES_BATCH_MAX, type HealthBlock, type HealthTagFilter, type PersonName } from "./ipalpha/coreClient";
 import { EMPTY_HEALTH, type HealthInfo, type Medication } from "../types";
 
 /**
@@ -167,17 +167,25 @@ export function mergeHealth(current: HealthInfo, patch: Partial<HealthInfo>): Pa
   return out;
 }
 
-/** Health-tag counts for the list chips (anonymized, not logged — decision 22). */
-export async function healthCounts(personIds: string[], filters: HealthTagFilter, editionId?: string | null): Promise<{ total: number; byTag: Record<string, number> }> {
-  if (personIds.length === 0) return { total: 0, byTag: {} };
-  let total = 0;
-  const byTag: Record<string, number> = {};
-  for (const ids of chunks([...new Set(personIds)], COUNT_IDS_MAX)) {
-    const answer = await coreClient().count({ personIds: ids, ...(editionId ? { editionId } : {}), filters: { healthTags: filters } });
-    total += answer.total;
-    for (const [k, n] of Object.entries(answer.byTag)) byTag[k] = (byTag[k] ?? 0) + n;
+/**
+ * Health-tag counts for the list chips (anonymized, not logged — decisions 22/56):
+ * core counts the members of a project ROLE (+ edition); no person ids are sent.
+ */
+export async function healthCounts(role: string, filters: HealthTagFilter, editionId?: string | null): Promise<{ total: number; byTag: Record<string, number> }> {
+  return coreClient().count({ role, ...(editionId ? { editionId } : {}), filters: { healthTags: filters } });
+}
+
+/**
+ * The neutral ♥ of a list page (decision 69, §23): has each person ANY health
+ * info? A light flag read with the acting role token — never the medical block
+ * itself (core logs it as a basic-register view). ≤ 200 per call (paged here).
+ */
+export async function healthFlagsOf(token: string, personIds: string[]): Promise<Map<string, boolean>> {
+  const out = new Map<string, boolean>();
+  for (const ids of chunks([...new Set(personIds.filter(Boolean))], NAMES_BATCH_MAX)) {
+    for (const [id, flag] of await coreClient().healthFlags(token, ids)) out.set(id, flag);
   }
-  return { total, byTag };
+  return out;
 }
 
 /** Does `h` match a "field:value" health tag filter (`allergies:<optionId>`, `medications`, `neurodivergent`, `foodRestrictions`)? */
