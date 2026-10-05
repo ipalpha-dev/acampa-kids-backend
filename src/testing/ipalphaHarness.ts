@@ -114,7 +114,19 @@ export interface FakeWorld {
   phones: Map<string, string>;
   /** person id → birth date (registration finds a responsável's existing kid by name + birth date) */
   births: Map<string, string>;
+  /** projects-api pending kinds per CALLER person id (decision 87): what the project asks of them, not granted yet */
+  pendingKinds: Map<string, FakePendingItem[]>;
   nextId: number;
+}
+
+export interface FakePendingItem {
+  membershipId: string;
+  kind: "involved" | "own";
+  personId: string;
+  role: string;
+  editionId?: string;
+  granted: string[];
+  requested: string[];
 }
 
 export function createFakeCore() {
@@ -367,6 +379,27 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     if (decision === "accept") world.links.push({ subjectId: r.childId, agentId: r.proposedResponsibleId });
     return json({ request: { ...r, projectId: TEST_PROJECT, projectName: "Acampa Kids", expiresAt: new Date().toISOString() }, ...(decision === "accept" ? { linkId: `link-${world.links.length}` } : {}) });
   });
+  // decision 87: the caller's own pending kinds (person token of the project's app)
+  const pendingView = (sub: string, editionId?: string | null) => {
+    const items = world.pendingKinds.get(sub) ?? [];
+    return { ...(editionId ? { editionId } : {}), items, kinds: [...new Set(items.flatMap((i) => i.requested))].sort() };
+  };
+  core.on(`GET ${P}/me/pending-kinds`, (call) => {
+    if (refused(call)) return json({ reason: "invalidToken" }, 401);
+    const editionId = call.query.get("editionId");
+    if (editionId && !world.editions.some((e) => e.id === editionId)) return json({ reason: "unknownEdition" }, 400);
+    return json(pendingView(String(claimsOf(call).sub), editionId));
+  });
+  core.on(`POST ${P}/me/pending-kinds/confirm`, (call) => {
+    if (refused(call)) return json({ reason: "invalidToken" }, 401);
+    const sub = String(claimsOf(call).sub);
+    const body = call.json as { kinds: string[]; editionId?: string };
+    const current = pendingView(sub, body.editionId);
+    if (current.items.length === 0) return json({ ...current, confirmed: 0 });
+    if (JSON.stringify([...new Set(body.kinds)].sort()) !== JSON.stringify(current.kinds)) return json({ reason: "pendingChanged", kinds: current.kinds }, 409);
+    world.pendingKinds.delete(sub);
+    return json({ ...current, items: current.items.map((i) => ({ ...i, granted: i.kind === "own" ? [...new Set([...i.granted, ...i.requested])] : i.requested })), confirmed: current.items.length });
+  });
   core.on(`POST ${P}/people/names`, (call) => {
     const ids = (call.json as { personIds: string[] }).personIds;
     if (ids.length > 200) return json({ reason: "validationFailed" }, 400);
@@ -440,7 +473,7 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
 }
 
 export function emptyWorld(): FakeWorld {
-  return { links: [], linkRequests: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], templates: new Map(), messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), phones: new Map(), births: new Map(), nextId: 0 };
+  return { links: [], linkRequests: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], templates: new Map(), messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), phones: new Map(), births: new Map(), pendingKinds: new Map(), nextId: 0 };
 }
 
 /** Opens an Acampa session for `personId` holding `roles` (tokens signed like auth-api's) and returns the browser token. */

@@ -4,7 +4,7 @@ import { coreClient } from "./ipalpha";
 import { IpalphaTokenRevoked, PERSONS_RESOURCE, PROJECTS_RESOURCE } from "./ipalpha/coreClient";
 import { openRoleTokens } from "./session";
 import { currentCampId } from "./campContext";
-import { COORDINATION_ROLE, type CoreRole, type Session } from "../types";
+import { COORDINATION_ROLE, RESPONSIBLE_ROLE, type CoreRole, type Session } from "../types";
 
 /**
  * The per-role IPAlpha token a request ACTS with (CONTRACTS §15: "health /
@@ -35,6 +35,15 @@ export function actingToken(c: Context, audience: Audience): string {
 export function coordinationToken(session: Session, audience: Audience): string | null {
   if (!session.roles.includes(COORDINATION_ROLE)) return null;
   return roleToken(session, audience, COORDINATION_ROLE);
+}
+
+/**
+ * The family's OWN `responsavel` token of this session (decision 87: they confirm what is shared about
+ * themselves) — null when the person is not a responsável here.
+ */
+export function responsibleToken(session: Session, audience: Audience): string | null {
+  if (!session.roles.includes(RESPONSIBLE_ROLE)) return null;
+  return roleToken(session, audience, RESPONSIBLE_ROLE);
 }
 
 /**

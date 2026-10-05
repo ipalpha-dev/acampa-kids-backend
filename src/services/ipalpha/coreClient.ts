@@ -232,6 +232,32 @@ export interface LinkRequestPerson {
   sex: "female" | "male" | null;
 }
 
+/** The kinds of data about a person a project role may ask for (projects-api `SHARED_DATA_KINDS`). */
+export const SHARED_DATA_KINDS = ["email", "phone", "document", "address", "medical", "school", "emergencyContact"] as const;
+export type SharedDataKind = (typeof SHARED_DATA_KINDS)[number];
+const SHARED_KIND_SET = new Set<string>(SHARED_DATA_KINDS);
+export const isSharedDataKind = (v: unknown): v is SharedDataKind => typeof v === "string" && SHARED_KIND_SET.has(v);
+
+/** One membership asking the signed-in person for kinds about THEMSELVES not granted yet (decision 87). */
+export interface PendingKindsItem {
+  membershipId: string;
+  /** `involved` = they are a responsible listed on a kid's membership; `own` = their own role */
+  kind: "involved" | "own";
+  /** the kid (involved) or the person themselves (own) */
+  personId: string;
+  role: string;
+  editionId: string | null;
+  granted: SharedDataKind[];
+  requested: SharedDataKind[];
+}
+
+/** projects-api `GET /projects/:id/me/pending-kinds`; `kinds` = everything confirming shares about the person */
+export interface PendingKindsView {
+  editionId: string | null;
+  items: PendingKindsItem[];
+  kinds: SharedDataKind[];
+}
+
 export interface MembershipInput {
   personId: string;
   role: string;
@@ -387,6 +413,15 @@ export interface IpalphaCoreClient {
   /** `POST /me/link-requests/:id/accept|decline` — any ONE current responsible of the child (decision 83) */
   decideLinkRequest(token: string, id: string, decision: "accept" | "decline"): Promise<LinkRequest>;
 
+  // ── projects-api pending kinds (decision 87, the person's OWN token — Acampa: their `responsavel` role token) ──
+  /** `GET /projects/:id/me/pending-kinds?editionId` — 400 unknownEdition, 403 appMismatch, 404 notFound */
+  pendingKinds(token: string, editionId?: string): Promise<PendingKindsView>;
+  /**
+   * `POST /projects/:id/me/pending-kinds/confirm {kinds, editionId?}` — all-or-nothing; `kinds` exactly what was shown
+   * (a set). Nothing pending → `confirmed: 0`. 409 `pendingChanged` (body `kinds` = what is pending now) when it differs.
+   */
+  confirmPendingKinds(token: string, input: { kinds: SharedDataKind[]; editionId?: string }): Promise<PendingKindsView & { confirmed: number }>;
+
   // ── persons-api imports (§20, the importer's per-role token) ──
   /** `POST /projects/:projectId/imports` multipart: `file` + `data` JSON `{editionId?, targets, appFields}` → `{importId, status}` */
   createImport(token: string, input: { file: Blob; fileName: string; editionId?: string; targets: Record<string, ImportTarget>; appFields: ImportAppField[] }): Promise<{ importId: string; status: string }>;
@@ -442,6 +477,25 @@ function toLinkRequest(v: unknown): LinkRequest | null {
     child: toLinkRequestPerson(o.child),
     proposedResponsible: toLinkRequestPerson(o.proposedResponsible),
   };
+}
+
+/** the known kinds of a core list (unknown future kinds are dropped, never shown as a raw key) */
+export function toSharedKinds(v: unknown): SharedDataKind[] {
+  return Array.isArray(v) ? [...new Set(v.filter(isSharedDataKind))] : [];
+}
+
+function toPendingKindsView(v: unknown): PendingKindsView {
+  const o = obj(v);
+  const items: PendingKindsItem[] = [];
+  for (const x of Array.isArray(o.items) ? o.items : []) {
+    const i = obj(x);
+    const membershipId = str(i.membershipId);
+    const personId = str(i.personId);
+    const role = str(i.role);
+    if (!membershipId || !personId || !role || (i.kind !== "involved" && i.kind !== "own")) continue;
+    items.push({ membershipId, kind: i.kind, personId, role, editionId: str(i.editionId), granted: toSharedKinds(i.granted), requested: toSharedKinds(i.requested) });
+  }
+  return { editionId: str(o.editionId), items, kinds: toSharedKinds(o.kinds).sort() };
 }
 
 export interface CoreClientDeps {
@@ -926,6 +980,17 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       const request = toLinkRequest(body.request);
       if (!request) throw new IpalphaUnavailable(`link-requests/${decision}: no request`);
       return request;
+    },
+
+    async pendingKinds(token, editionId) {
+      const query = editionId ? `?editionId=${encodeURIComponent(editionId)}` : "";
+      return toPendingKindsView(await roleCall("pending-kinds", token, "GET", `${cfg.projectsApiUrl}/projects/${project()}/me/pending-kinds${query}`));
+    },
+
+    async confirmPendingKinds(token, { kinds, editionId }) {
+      const body = await roleCall("pending-kinds/confirm", token, "POST", `${cfg.projectsApiUrl}/projects/${project()}/me/pending-kinds/confirm`, { kinds, ...(editionId ? { editionId } : {}) });
+      const confirmed = obj(body).confirmed;
+      return { ...toPendingKindsView(body), confirmed: typeof confirmed === "number" ? confirmed : 0 };
     },
 
     async createImport(token, { file, fileName, editionId, targets, appFields }) {

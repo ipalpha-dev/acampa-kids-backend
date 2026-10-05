@@ -54,6 +54,14 @@ export async function kidsOfResponsible(personId: string, campId: string = curre
   return ids;
 }
 
+/**
+ * Drops the memo of one responsável (every camp), so the next scope resolution reads core again — used when
+ * projects-api shows they were just added to a kid's membership (a link request accepted, decision 86).
+ */
+export function forgetKidsOf(personId: string): void {
+  for (const key of memo.keys()) if (key.endsWith(`|${personId}`)) memo.delete(key);
+}
+
 /** The responsáveis (involved) of the given kids, by kid. */
 export async function responsiblesOf(kidIds: string[], campId: string = currentCampId()): Promise<Map<string, string[]>> {
   const out = new Map<string, string[]>();

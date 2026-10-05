@@ -33,6 +33,7 @@ import campRoutes from "./routes/camps";
 import importRoutes from "./routes/imports";
 import importConflictRoutes from "./routes/importConflicts";
 import linkRequestRoutes from "./routes/linkRequests";
+import pendingKindsRoutes from "./routes/pendingKinds";
 import dispatchWebhookRoutes from "./routes/dispatchWebhook";
 
 /**
@@ -79,6 +80,8 @@ export function createApp(opts: { logRequests?: boolean; bootGate?: boolean } = 
   app.route("/api/import-conflicts", importConflictRoutes);
   // another responsável: the coordenação proposes, the family accepts (decision 80, §25)
   app.route("/api/link-requests", linkRequestRoutes);
+  // decision 87: the family confirms what is shared about THEMSELVES (projects-api, their responsável token)
+  app.route("/api/pending-kinds", pendingKindsRoutes);
   // dispatch app-channel fallback: signed deliveries when the socket is down (§21/§22 — HMAC, no session)
   app.route("/api/dispatch", dispatchWebhookRoutes);
   app.route("/api/settings", settingsRoutes);

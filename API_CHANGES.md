@@ -154,6 +154,20 @@ to the family's screen).
 | `GET /mine` (responsável) | `{items:[{id, childId, proposedResponsibleId, projectName, status:"pending", createdAt, expiresAt, child:{name, nickname, sex}\|null, proposedResponsible:{…}\|null}]}` — persons `GET /me/link-requests` with the family's own `responsavel` token |
 | `POST /:id/accept` \| `POST /:id/decline` (responsável) | `{request:{id, childId, status}}`; core 403 `notResponsible` / `cannotLinkSelf`, 409 `requestNotPending` / `requestExpired` pass through |
 
+## NEW `/api/pending-kinds` — the family confirms what is shared about THEMSELVES (decision 87)
+
+A responsável added by an accepted link request (decision 86) joins the kid's membership with EMPTY kinds (and the
+`responsavel` role, also empty when created then): the kid opens to them at once, but nothing about THEM is shared
+until they confirm. Both routes forward to projects-api `/projects/:p/me/pending-kinds` with the session's own
+`responsavel` **projects** token and the camp's edition; Acampa stores nothing of it.
+
+| Route | Answer |
+|---|---|
+| `GET /` (responsável) | `{editionId, items:[{membershipId, kind:"involved"\|"own", personId (the kid / me), role, editionId, granted, requested}], kinds}` — `kinds` (sorted) = everything confirming shares; empty when nothing is pending (or the camp has no edition yet). A pending `involved` item drops the responsável → kids memo and sends the session's sockets a fresh snapshot (the new kid shows at once). Core 400 `unknownEdition` / 403 `appMismatch` / 404 pass through as `CORE_REJECTED` / `CORE_FORBIDDEN` + reason |
+| `POST /confirm` `{kinds}` (responsável) | exactly the shown `kinds` (a set; all-or-nothing) → `{editionId, items (granted updated), kinds, confirmed}`; nothing pending → `confirmed: 0`. 400 `KINDS_INVALID` (not an array of known kinds); 409 `PENDING_CHANGED` `{reason:"pendingChanged", kinds}` = what is pending changed — show the new `kinds` and ask again; 409 `EDITION_UNKNOWN` |
+
+Kinds: `email, phone, document, address, medical, school, emergencyContact`. Staff / coordenação sessions → 403 `FORBIDDEN`.
+
 ## Review fixes (2026-10-05)
 
 - `GET /live` (always 200) and `GET /ready` (`{ready, checks:{boot, mongo}, info:{dispatch}}`, 503
