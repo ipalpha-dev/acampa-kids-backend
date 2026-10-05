@@ -14,7 +14,7 @@ import { serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 import { campInProgress, campPeriod } from "../services/camp";
 import { actingToken, campEditionId, coordinationContext, coordinationToken } from "../services/acting";
-import { addResponsible } from "../services/coreRegistration";
+import { addResponsible, healthToCore } from "../services/coreRegistration";
 import { coreClient } from "../services/ipalpha";
 import { PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
 import { hasHealthInfo, healthCounts, matchesHealthTag, nameMatches, namesOf, pageOf, readHealth, readHealthMany, tagFilter, writeHealth } from "../services/people";
@@ -422,6 +422,8 @@ async function applyKidEdit(c: Context<{ Variables: AuthVariables }>, k: Camper,
   const health = buildHealthPatch(body, fields);
   if (!("patch" in health)) return fail(c, health.code, health.message);
   const token = actingToken(c, PERSONS_RESOURCE);
+  // option ids may be the church health lists' (preferred) or Acampa's import categories — mapped by label
+  if (["allergies", "drugAllergies", "healthIssues"].some((f) => f in health.patch)) health.patch = await healthToCore(token, health.patch);
   const current = Object.keys(health.patch).length ? await readHealth(token, k._id) : null;
   const changed: CamperChangeField[] = [];
   for (const f of Object.keys(health.patch) as (keyof HealthInfo)[]) if (!current || !same(current[f], health.patch[f])) changed.push(f as CamperChangeField);

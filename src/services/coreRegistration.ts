@@ -67,7 +67,7 @@ export async function healthToCore(token: string, health: Partial<HealthInfo>, l
     }
     out[field] = [...new Set(ids)];
   }
-  if (extra.length) out.healthNotes = [health.healthNotes ?? "", `Informado na importação: ${[...new Set(extra)].join(", ")}.`].filter(Boolean).join(" ").trim();
+  if (extra.length) out.healthNotes = [health.healthNotes ?? "", `Também informado: ${[...new Set(extra)].join(", ")}.`].filter(Boolean).join(" ").trim();
   return out;
 }
 

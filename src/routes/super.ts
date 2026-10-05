@@ -29,13 +29,13 @@ superRoutes.get("/import-cache", async (c: Context) => c.json(await countImportC
 
 superRoutes.post("/import-cache/staff", async (c: Context) => {
   const removed = await wipeStaffImportCache();
-  console.log(`🧹 cleanup (staff-import-cache) by ${c.get("user").name}: ${removed} mapping(s)`);
+  console.log(`🧹 cleanup (staff-import-cache): ${removed} mapping(s)`);
   return c.json({ removed });
 });
 
 superRoutes.post("/import-cache", async (c: Context) => {
   const removed = await wipeImportCache();
-  console.log(`🧹 cleanup (import-cache) by ${c.get("user").name}: ${removed} mapping(s)`);
+  console.log(`🧹 cleanup (import-cache): ${removed} mapping(s)`);
   return c.json({ removed });
 });
 
