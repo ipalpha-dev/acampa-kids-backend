@@ -102,6 +102,7 @@ import { autoRoleCovers } from "./schedule";
  * open for the church / bus helpers (testing before the real day).
  */
 export interface Viewer {
+  sessionId?: string;
   /** the audience of the acting role (admin on a history session) */
   activeRole: Role;
   /** the acting IPAlpha project role (§10) */

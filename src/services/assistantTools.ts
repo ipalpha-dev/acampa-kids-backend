@@ -79,12 +79,13 @@ export function assistantAllowlist(audience: AssistantAudience): Record<string, 
  * reference data needed to READ their health — never staff, accounts,
  * settings, occurrences, audit logs, scores, photos or imports.
  */
-export type AssistantAudience = "all" | "medical";
+export type AssistantAudience = "all" | "medical" | "organizer";
 
 const MEDICAL_COLLECTIONS: readonly string[] = ["participants", "bedrooms", "teams", "transports", "categories", "medicationDoses"];
 
 function collectionsFor(audience: AssistantAudience): Record<string, AssistantCollection> {
   if (audience === "all") return COLLECTIONS;
+  if (audience === "organizer") return Object.fromEntries(Object.entries(COLLECTIONS).filter(([name]) => name !== "medicationDoses"));
   return Object.fromEntries(MEDICAL_COLLECTIONS.map((name) => [name, COLLECTIONS[name]]));
 }
 
@@ -182,7 +183,7 @@ function compactResult(value: unknown): unknown {
 }
 
 /** The read-only tools this session may call — scoped to the audience's collections. */
-export function buildAssistantTools(audience: AssistantAudience): AssistantTool[] {
+export function buildAssistantTools(audience: AssistantAudience, session?: import("../types").Session): AssistantTool[] {
   const allowed = collectionsFor(audience);
   return [
   {
@@ -192,7 +193,9 @@ export function buildAssistantTools(audience: AssistantAudience): AssistantTool[
     run: async () => {
       const db = await getDb();
       return Promise.all(Object.entries(allowed).map(async ([name, config]) => {
-        const count = await db.collection(name).estimatedDocumentCount();
+        const count = name === "medicationDoses"
+          ? await db.collection(name).countDocuments({ personId: { $in: session ? await medicationIds(session) : [] } })
+          : await db.collection(name).estimatedDocumentCount();
         return { collection: name, description: config.description, count, fields: ["_id", ...config.fields] };
       }));
     },
@@ -228,6 +231,10 @@ export function buildAssistantTools(audience: AssistantAudience): AssistantTool[
         { $limit: limit },
         ...(projection ? [{ $project: projection }] : []),
       ];
+      if (name === "medicationDoses") {
+        const ids = session ? await medicationIds(session) : [];
+        pipeline.unshift({ $match: { personId: { $in: ids } } });
+      }
       const db = await getDb();
       const docs = await db.collection(name).aggregate(pipeline, { maxTimeMS: MAX_TIME_MS, allowDiskUse: false }).toArray();
       return compactResult({ collection: name, returned: docs.length, limit, rows: sanitize(docs) });
@@ -258,6 +265,10 @@ export function buildAssistantTools(audience: AssistantAudience): AssistantTool[
       const pipeline = [allowlistStage(config), ...(normalizeIds(args.pipeline) as Record<string, unknown>[])];
       // A final hard cap protects both Mongo and the model even when the caller omitted $limit.
       pipeline.push({ $limit: MAX_ROWS });
+      if (name === "medicationDoses") {
+        const ids = session ? await medicationIds(session) : [];
+        pipeline.unshift({ $match: { personId: { $in: ids } } });
+      }
       const db = await getDb();
       const rows = await db.collection(name).aggregate(pipeline, { maxTimeMS: MAX_TIME_MS, allowDiskUse: false }).toArray();
       return compactResult({ collection: name, rows: sanitize(rows) });
@@ -292,8 +303,8 @@ export function assistantResponsesToolSpecs(audience: AssistantAudience) {
   ];
 }
 
-export async function runAssistantTool(audience: AssistantAudience, name: string, rawArgs: string): Promise<string> {
-  const tool = buildAssistantTools(audience).find((item) => item.name === name);
+export async function runAssistantTool(audience: AssistantAudience, name: string, rawArgs: string, session?: import("../types").Session): Promise<string> {
+  const tool = buildAssistantTools(audience, session).find((item) => item.name === name);
   if (!tool) return JSON.stringify({ error: `Ferramenta desconhecida: ${name}` });
   let args: Record<string, unknown> = {};
   try {
@@ -307,4 +318,10 @@ export async function runAssistantTool(audience: AssistantAudience, name: string
     console.error("assistant tool failed", name, error);
     return JSON.stringify({ error: error instanceof Error ? error.message : "Consulta indisponível." });
   }
+}
+
+async function medicationIds(session: import("../types").Session): Promise<string[]> {
+  const { listMedicationDoses } = await import("../models/medications");
+  const { permittedMedicationIds } = await import("../routes/medications");
+  return [...await permittedMedicationIds(session, (await listMedicationDoses()).map((d) => d.personId))];
 }

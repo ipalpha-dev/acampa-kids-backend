@@ -45,7 +45,7 @@ beforeEach(async () => {
   await insertCamper(KID_B, { ...EMPTY_CAMPER, transportation: "bus-1" });
 });
 
-const healthReads = () => core.calls.filter((c) => c.path.includes("/data/medical") || c.path.includes("health"));
+const healthReads = () => core.calls.filter((c) => c.path.includes("/data/medical") || c.path.includes("health") && c.path !== "/health-lists");
 
 describe("GET /api/campers/:id/responsibles", () => {
   test("coordenação: kid name + responsáveis with live names, and no health read at all", async () => {
@@ -86,11 +86,12 @@ describe("GET /api/campers/:id/responsibles", () => {
 
   test("in scope with 'name' visibility (bus helper at the kid's vehicle): the kid's name, responsibles: []", async () => {
     await updateSettings({ checkinWindow: { from: new Date(Date.now() - 60_000), until: new Date(Date.now() + 60_000) }, busHelpers: { helpers: [{ personId: CARE, vehicleId: "bus-1" }] } });
+    world.memberships.push({ personId: CARE, role: "checkin-onibus", editionId: TEST_EDITION });
     const token = await sessionFor(keys, CARE, ["checkin-onibus"]);
     const res = await call("GET", `/api/campers/${KID_B}/responsibles`, undefined, token);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ camper: { id: KID_B, name: "Bruno Pequeno" }, responsibles: [] });
-    expect(core.calls.filter((c) => c.path.includes("/memberships"))).toHaveLength(0); // the responsáveis are never even looked up
+    expect(core.calls.filter((c) => c.path.includes("/memberships") && !c.query.get("personId"))).toHaveLength(0); // the responsáveis are never even looked up
   });
 
   test("unknown kid = 404; no session = 401", async () => {

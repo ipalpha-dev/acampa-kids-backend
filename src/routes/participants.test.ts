@@ -380,3 +380,40 @@ describe("message templates (settings → projects:templates)", () => {
     expect((await call("GET", "/api/settings/message-templates", undefined, care)).status).toBe(403);
   });
 });
+
+describe("medication and generic medical read boundaries", () => {
+  test("organização cannot read dose details through REST, snapshot or assistant", async () => {
+    world.memberships.push({ personId: ADMIN, role: "organizacao", editionId: TEST_EDITION });
+    const token = await sessionFor(keys, ADMIN, ["organizacao"]);
+    expect((await call("GET", "/api/medications", undefined, token)).status).toBe(403);
+    const snapshot = await loadCollections({ activeRole: "staff", coreRole: "organizacao", personId: ADMIN }, ["medications"]);
+    expect(snapshot.medications).toBeUndefined();
+    const { assistantAllowlist } = await import("../services/assistantTools");
+    expect(assistantAllowlist("organizer").medicationDoses).toBeUndefined();
+  });
+
+  test("generic medical reads redact sensitive fields for caretakers like the camper page", async () => {
+    world.health.set(KID_A, { ...world.health.get(KID_A), neurodivergent: true, insurance: "private", insuranceCard: "secret" });
+    const token = await sessionFor(keys, CARE, ["equipe"]);
+    const res = await call("GET", `/api/people/${KID_A}/data/medical`, undefined, token);
+    expect(res.status).toBe(200);
+    expect(res.body.data.health.allergies).toEqual(["amendoim"]);
+    expect(res.body.data.health.neurodivergent).toBeUndefined();
+    expect(res.body.data.health.insurance).toBeUndefined();
+    expect(res.body.data.health.insuranceCard).toBeUndefined();
+  });
+
+  test("health role dose reads omit people core no longer permits", async () => {
+    const { insertMedicationDose } = await import("../models/medications");
+    await insertMedicationDose({ personId: KID_A, medKey: "test", medName: "Synthetic medicine", dose: "1", day: "2026-10-05", slot: "08:00", byPersonId: MEDIC, note: "" }, true);
+    world.medicalForbidden.add(KID_A);
+    const token = await sessionFor(keys, MEDIC, ["saude"]);
+    expect((await call("GET", "/api/medications", undefined, token)).body.medications).toEqual([]);
+    const { findSessionByToken } = await import("../services/session");
+    const session = (await findSessionByToken(token))!;
+    expect((await loadCollections({ activeRole: "staff", coreRole: "saude", personId: MEDIC, sessionId: session._id }, ["medications"])).medications).toEqual([]);
+    const { runAssistantTool } = await import("../services/assistantTools");
+    const result = JSON.parse(await runAssistantTool("medical", "read_collection", JSON.stringify({ collection: "medicationDoses" }), session));
+    expect(result.rows).toEqual([]);
+  });
+});

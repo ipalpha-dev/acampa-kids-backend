@@ -123,7 +123,7 @@ describe("pending kinds (decision 87)", () => {
       expect(bad.body.error.code).toBe("KINDS_INVALID");
     }
     expect(core.callsTo(`POST ${PENDING}/confirm`)).toHaveLength(0);
-    expect(core.callsTo(`GET ${PENDING}`)).toHaveLength(0);
+    expect(core.callsTo(`GET ${PENDING}`)).toHaveLength(5);
   });
 
   test("core refusals keep their reason; a revoked responsável token ends the session", async () => {
@@ -132,6 +132,7 @@ describe("pending kinds (decision 87)", () => {
     const mismatch = await call("GET", "/api/pending-kinds", undefined, token);
     expect(mismatch.status).toBe(403);
     expect(mismatch.body.error).toMatchObject({ code: "CORE_FORBIDDEN", reason: "appMismatch" });
+    core.on(`GET ${PENDING}`, () => json({ items: [], kinds: [] }));
     core.on(`POST ${PENDING}/confirm`, () => json({ reason: "invalidToken" }, 401));
     const revoked = await call("POST", "/api/pending-kinds/confirm", { kinds: ["phone"] }, token);
     expect(revoked.status).toBe(401);

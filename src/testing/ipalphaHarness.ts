@@ -448,7 +448,7 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     world.health.set(personId, call.json as Record<string, unknown>);
     return json({ health: call.json });
   });
-  core.on("GET /health-lists", () => json([{ key: "alergias", options: [{ id: "amendoim", label: { "pt-BR": "Amendoim" }, order: 0, active: true }] }, { key: "alergia-medicamentos", options: [] }, { key: "condicao-cronica", options: [] }]));
+  core.on("GET /health-lists", (call) => refused(call) ? json({ reason: "invalidToken" }, 401) : json([{ key: "alergias", options: [{ id: "amendoim", label: { "pt-BR": "Amendoim" }, order: 0, active: true }] }, { key: "alergia-medicamentos", options: [] }, { key: "condicao-cronica", options: [] }]));
   core.on(`GET ${P}/message-templates`, () => json([...world.templates.values()]));
   core.on(`GET ${P}/message-templates/:slug`, (call) => {
     const t = world.templates.get(call.path.split("/").pop()!);

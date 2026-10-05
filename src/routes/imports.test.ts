@@ -364,11 +364,13 @@ describe("webhook (§21/§22): HMAC, idempotent, batches → participants", () =
   });
 
   test("an import nobody here started (Mordomia): kid or team comes from the live edition role", async () => {
-    await deliver(batchMessage(1, [row(1, KID_C, { transportation: carId }), row(2, LEADER, { roomRole: "caretaker" })]), "d-x");
+    await sessionFor(keys, ADMIN, ["coordenacao"]);
+    job = { ...job!, targets: { camper: { role: "participante" }, team: { role: "equipe" } } };
+    batches = [{ batch: 1, rows: [row(1, KID_C, { transportation: carId })] }];
+    await deliver(batchMessage(1, batches[0].rows), "d-x");
     await settle();
     expect(await findCamperById(KID_C)).toMatchObject({ transportation: carId });
-    expect(await findStaffById(LEADER)).toMatchObject({ roomRole: "caretaker" });
-    expect(await findImportJob(IMPORT_ID)).toBeNull();
+    expect(await findImportJob(IMPORT_ID)).toMatchObject({ campId: activeCampId(), lastBatch: 1 });
   });
 
   test("a batch too big for dispatch (no rows) is read from persons-api with the importer's live session token", async () => {
@@ -491,7 +493,8 @@ describe("decision 78: a field changed by hand is never overwritten by an import
     await call("PUT", `/api/campers/${KID_A}`, { generalNotes: "nota da coordenação" }, token);
     // a second import (another id) brings both fields again
     const SECOND = "6700000000000000000000b2";
-    await deliver({ ...batchMessage(1, [row(2, KID_A, { transportation: busId, generalNotes: "nota nova 2" }, { status: "updated" })]), importId: SECOND, id: "m-2" }, "d-c3");
+    batches = [{ batch: 1, rows: [row(2, KID_A, { transportation: busId, generalNotes: "nota nova 2" }, { status: "updated" })] }];
+    await deliver({ ...batchMessage(1, batches[0].rows), importId: SECOND, id: "m-2" }, "d-c3");
     await settle();
     const items = (await call("GET", "/api/import-conflicts?subject=camper", undefined, token)).body.items as { id: string; field: string }[];
     expect(items.map((i) => i.field).sort()).toEqual(["generalNotes", "transportation"]);
@@ -507,7 +510,8 @@ describe("decision 78: a field changed by hand is never overwritten by an import
     expect(kid!.importEdited).toEqual(["generalNotes"]);
     expect((await call("GET", "/api/import-conflicts?subject=camper", undefined, token)).body.items).toEqual([]);
     // the kept note is still a manual choice: a third import asks again
-    await deliver({ ...batchMessage(2, [row(2, KID_A, { generalNotes: "nota nova 3" }, { status: "updated" })]), importId: "6700000000000000000000c3", id: "m-3" }, "d-c4");
+    batches = [{ batch: 1, rows: [row(2, KID_A, { generalNotes: "nota nova 3" }, { status: "updated" })] }];
+    await deliver({ ...batchMessage(1, batches[0].rows), importId: "6700000000000000000000c3", id: "m-3" }, "d-c4");
     await settle();
     expect((await call("GET", "/api/import-conflicts?subject=camper", undefined, token)).body.items.map((i: { field: string }) => i.field)).toEqual(["generalNotes"]);
   });
@@ -518,7 +522,9 @@ describe("decision 78: a field changed by hand is never overwritten by an import
       await insertCamper(KID_B, { ...EMPTY_CAMPER, bedroom: roomId }, "import");
     });
     const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
-    await deliver(batchMessage(1, [row(3, LEADER, { roomRole: "helper", bedroom: roomId }, { status: "updated" })]), "d-t1");
+    job = { ...job!, targets: { team: { role: "equipe" } } };
+    batches = [{ batch: 1, rows: [row(3, LEADER, { roomRole: "helper", bedroom: roomId }, { status: "updated" })] }];
+    await deliver(batchMessage(1, batches[0].rows), "d-t1");
     await settle();
     // roomRole was set by hand (manual insert) → conflict; bedroom was never touched by hand → written, but the room is full → unfilled
     const staff = await findStaffById(LEADER);
@@ -542,5 +548,58 @@ describe("decision 78: a field changed by hand is never overwritten by an import
     expect((await call("GET", "/api/import-conflicts?subject=kids", undefined, token)).status).toBe(400);
     expect((await call("POST", "/api/import-conflicts/resolve", { ids: [], choice: "keep" }, token)).body.error.code).toBe("IDS_INVALID");
     expect((await call("POST", "/api/import-conflicts/resolve", { ids: ["x"], choice: "maybe" }, token)).body.error.code).toBe("CHOICE_INVALID");
+  });
+});
+
+describe("retained import reconciliation", () => {
+  test("discovering a done import reads retained batches before marking the local index done", async () => {
+    const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    job = { ...job!, status: "done", counts: { batches: 1 } };
+    batches = [{ batch: 1, rows: [row(1, KID_C, { transportation: carId })] }];
+    expect((await call("GET", `/api/imports/${IMPORT_ID}`, undefined, token)).status).toBe(200);
+    expect(await findCamperById(KID_C)).toMatchObject({ transportation: carId });
+    expect(await findImportJob(IMPORT_ID)).toMatchObject({ status: "done", lastBatch: 1 });
+  });
+
+  test("Mordomia dispatch resolves a past edition and catches up a missing first batch", async () => {
+    const { createCamp, setCampEditionId } = await import("../models/camps");
+    const past = await createCamp({ label: "Synthetic past camp", year: 2025, createdByPersonId: ADMIN });
+    await setCampEditionId(past._id, "edition-2025");
+    world.editions.push({ id: "edition-2025", year: 2025, current: false });
+    await sessionFor(keys, ADMIN, ["coordenacao"]);
+    job = { ...job!, editionId: "edition-2025", status: "done" };
+    batches = [{ batch: 1, rows: [row(1, KID_C, { generalNotes: "first" })] }, { batch: 2, rows: [] }];
+    await deliver(batchMessage(2, []), "past-gap");
+    await settle();
+    expect(await findCamperById(KID_C)).toBeNull();
+    expect(await withCamp(past._id, () => findCamperById(KID_C))).toMatchObject({ generalNotes: "first" });
+    expect(await findImportJob(IMPORT_ID)).toMatchObject({ campId: past._id, lastBatch: 2, status: "done" });
+  });
+
+  test("imported camper moves clear bed and caretaker; moved and demoted leaders orphan children", async () => {
+    const { applyBatch } = await import("../services/personImports");
+    await insertStaff(LEADER, { ...EMPTY_STAFF, bedroom: bigRoomId, roomRole: "caretaker" }, "import");
+    await insertCamper(KID_A, { ...EMPTY_CAMPER, bedroom: bigRoomId, bed: "bed-a", caretakerId: LEADER }, "import");
+    await applyBatch("move-kid", { batch: 1, rows: [row(1, KID_A, { bedroom: roomId })] } as never, { campId: activeCampId(), subject: "camper" });
+    expect(await findCamperById(KID_A)).toMatchObject({ bedroom: roomId, bed: null, caretakerId: null });
+    await insertCamper(KID_B, { ...EMPTY_CAMPER, bedroom: bigRoomId, caretakerId: LEADER }, "import");
+    await applyBatch("demote", { batch: 1, rows: [row(2, LEADER, { roomRole: "helper" })] } as never, { campId: activeCampId(), subject: "team" });
+    expect(await findCamperById(KID_B)).toMatchObject({ caretakerId: null });
+    const { updateStaff } = await import("../models/staff");
+    const { updateCamper } = await import("../models/campers");
+    await updateStaff(LEADER, { roomRole: "caretaker" }, "import");
+    await updateCamper(KID_B, { caretakerId: LEADER }, "import");
+    await applyBatch("move-leader", { batch: 1, rows: [row(3, LEADER, { bedroom: roomId })] } as never, { campId: activeCampId(), subject: "team" });
+    // The small room is occupied: move to a separate valid room instead.
+    const other = await insertBedroom({ name: "5", group: "girls", bunkBeds: 0, singleBeds: 4, notes: "" });
+    await applyBatch("move-leader-valid", { batch: 1, rows: [row(3, LEADER, { bedroom: other._id })] } as never, { campId: activeCampId(), subject: "team" });
+    expect(await findCamperById(KID_B)).toMatchObject({ caretakerId: null });
+  });
+
+  test("untracked dispatch without an authorized importer does not write to the active camp", async () => {
+    await deliver(batchMessage(1, [row(1, KID_C, { transportation: carId })]), "no-owner");
+    await settle();
+    expect(await findCamperById(KID_C)).toBeNull();
+    expect(await findImportJob(IMPORT_ID)).toBeNull();
   });
 });

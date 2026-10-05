@@ -107,7 +107,7 @@ export function careHealth(h: HealthInfo): CareHealth {
  * Everyone else gets `careHealth`.
  */
 export function wholeHealthAllowed(scope: Scope, k: Pick<Camper, "_id">): boolean {
-  return scope.all || scope.medical || canParentEdit(scope, k);
+  return scope.all ? scope.admin : scope.medical || canParentEdit(scope, k);
 }
 
 /** `h` cut down to what the acting role may see of `k`. */

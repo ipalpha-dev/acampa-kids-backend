@@ -103,8 +103,8 @@ async function readView(c: Context<Env>, token: string, id: string) {
     const session = c.get("session");
     tracked = await trackImport({ importId: id, campId: await campOfEdition(typeof job.editionId === "string" ? job.editionId : null), startedBy: session.personId, status: view.status, subject });
   }
-  if (tracked && !FINAL_IMPORT_STATUSES.has(tracked.status) && (view.counts.batches > tracked.lastBatch || FINAL_IMPORT_STATUSES.has(view.status))) {
-    await runInImportQueue(() => catchUpImport(id, token));
+  if (tracked && (view.counts.batches > tracked.lastBatch || !FINAL_IMPORT_STATUSES.has(tracked.status) && FINAL_IMPORT_STATUSES.has(view.status))) {
+    await runInImportQueue(() => catchUpImport(id, token, true));
     tracked = await findImportJob(id);
   }
   view = { ...view, applied: { batches: tracked?.lastBatch ?? 0 } };

@@ -3,7 +3,6 @@ import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { findCamperById, listCampers } from "../models/campers";
 import { deleteMedicationDose, findMedicationDoseById, insertMedicationDose, listMedicationDoses, medKeyOf } from "../models/medications";
 import { publish } from "../services/realtime";
-import { resolveScope } from "../services/scope";
 import { todayInSaoPaulo } from "../utils";
 import { MEDICATION_SOS_SLOT, PARTICIPANT_ROLE, type MedicationDose } from "../types";
 import { actingToken } from "../services/acting";
@@ -19,7 +18,7 @@ type Env = { Variables: AuthVariables };
  * kid's `medical` block, read with the acting role token — logged by core);
  * here the team only ticks what was actually given.
  *
- *   GET    /api/medications                every tick (coordenação / organização / saúde)
+ *   GET    /api/medications                every tick (coordenação / saúde)
  *   GET    /api/medications/prescriptions  the kids of this camp with medicines (name + medications + allergies), live from core
  *   POST   /api/medications                tick one dose { personId, medName, day?, slot, note? }
  *   DELETE /api/medications/:id      untick (a mistake)
@@ -53,20 +52,30 @@ export function serializeMedicationDose(d: MedicationDose) {
   };
 }
 
-/** Admin / organizer (`all`) or the MEDICAL team. Nobody else sees the checklist. */
+/** Only health roles may open the medication checklist. Core checks each person below. */
 async function medicationAccess(c: Context<Env, string>): Promise<boolean> {
-  const role = c.get("activeRole");
-  if (role === "admin") return true;
-  if (role !== "staff") return false;
-  const scope = await resolveScope(c.get("user"));
-  return scope.all || scope.medical;
+  return ["coordenacao", "saude"].includes(c.get("session").activeRole);
+}
+
+export async function permittedMedicationIds(session: import("../types").Session, ids: string[]): Promise<Set<string>> {
+  if (!["coordenacao", "saude"].includes(session.activeRole)) return new Set();
+  const { roleToken } = await import("../services/acting");
+  const permitted = new Set<string>();
+  const unique = [...new Set(ids)];
+  for (let i = 0; i < unique.length; i += 200) {
+    const flags = await coreClient().healthFlags(roleToken(session, PERSONS_RESOURCE), unique.slice(i, i + 200));
+    for (const id of flags.keys()) permitted.add(id);
+  }
+  return permitted;
 }
 
 medications.use("*", requireAuth);
 
 medications.get("/", async (c) => {
-  if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe médica e a organização veem as medicações.", 403);
-  return c.json({ medications: (await listMedicationDoses()).map(serializeMedicationDose) });
+  if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe de saúde e a coordenação veem as medicações.", 403);
+  const doses = await listMedicationDoses();
+  const ids = await permittedMedicationIds(c.get("session"), doses.map((d) => d.personId));
+  return c.json({ medications: doses.filter((d) => ids.has(d.personId)).map(serializeMedicationDose) });
 });
 
 /**
@@ -80,7 +89,7 @@ medications.get("/", async (c) => {
  * never stored here.
  */
 medications.get("/prescriptions", async (c) => {
-  if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe médica e a organização veem as medicações.", 403);
+  if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe de saúde e a coordenação veem as medicações.", 403);
   const kids = new Set((await listCampers()).map((k) => k._id));
   const page = await coreClient().listPeople(actingToken(c, PERSONS_RESOURCE), { role: PARTICIPANT_ROLE, kinds: [MEDICAL_KIND], cursor: c.req.query("cursor") || undefined, limit: 200 });
   const items = page.items
@@ -94,7 +103,7 @@ medications.get("/prescriptions", async (c) => {
 });
 
 medications.post("/", async (c) => {
-  if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe médica e a organização marcam medicações.", 403);
+  if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe de saúde e a coordenação marcam medicações.", 403);
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
 
@@ -127,9 +136,10 @@ medications.post("/", async (c) => {
 });
 
 medications.delete("/:id", async (c) => {
-  if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe médica e a organização marcam medicações.", 403);
+  if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe de saúde e a coordenação marcam medicações.", 403);
   const dose = await findMedicationDoseById(c.req.param("id"));
   if (!dose) return fail(c, "DOSE_NOT_FOUND", "Marcação não encontrada.", 404);
+  if (!(await permittedMedicationIds(c.get("session"), [dose.personId])).has(dose.personId)) return fail(c, "FORBIDDEN", "O IPAlpha não permitiu esta operação para o seu perfil.", 403);
   await deleteMedicationDose(dose._id);
   publish("medications");
   return c.json({ success: true });

@@ -14,7 +14,8 @@ interface Env {
     sessionId: string;
     activeRole: Role;
     user: SessionUser;
-    /** what data the assistant may query for this session: everything, or only the medical set */
+    session: import("../types").Session;
+    /** The collections available to the acting role. */
     audience: AssistantAudience;
   };
 }
@@ -84,10 +85,10 @@ assistant.use("*", async (c, next) => {
   const deny = () => c.json({ error: { code: "FORBIDDEN", message: "Só a administração, a organização e a equipe médica podem usar o assistente." } }, 403);
   if (role !== "staff") return deny();
   const scope = await resolveScope(c.get("user"));
-  // organizers (scope.all) and the medical team already read the data the assistant queries
+  // Organization has camp operations; health roles also have permitted dose details.
   if (!scope.all && !scope.medical) return deny();
-  // the medical team is limited to campers + the data needed to read their health; organizers reach everything
-  c.set("audience", scope.all ? "all" : "medical");
+  // Organization never gets the medication collection.
+  c.set("audience", scope.all ? "organizer" : "medical");
   await next();
 });
 
@@ -161,7 +162,7 @@ assistant.post("/tool", async (c) => {
   if (!name) return c.json({ error: { code: "AI_TOOL", message: "Ferramenta não informada." } }, 400);
   const args = typeof body?.arguments === "string" ? body.arguments : JSON.stringify(body?.arguments ?? {});
   if (name === "navigate_app") return c.json({ output: JSON.stringify({ error: "A navegação só pode ser executada pelo aplicativo aberto no navegador." }) }, 400);
-  const output = await runAssistantTool(c.get("audience"), name, args.slice(0, MAX_MESSAGE_CHARS));
+  const output = await runAssistantTool(c.get("audience"), name, args.slice(0, MAX_MESSAGE_CHARS), c.get("session"));
   console.log(`Assistant voice tool ${name} chars=${output.length}`);
   return c.json({ output });
 });

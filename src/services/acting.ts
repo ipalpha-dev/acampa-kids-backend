@@ -2,7 +2,8 @@ import type { Context } from "hono";
 import { findCamp, setCampEditionId } from "../models/camps";
 import { coreClient } from "./ipalpha";
 import { IpalphaTokenRevoked, PERSONS_RESOURCE, PROJECTS_RESOURCE } from "./ipalpha/coreClient";
-import { openRoleTokens } from "./session";
+import { openRoleTokens, revokeSession } from "./session";
+import { holdsRole } from "./members";
 import { currentCampId } from "./campContext";
 import { COORDINATION_ROLE, RESPONSIBLE_ROLE, type CoreRole, type Session } from "../types";
 
@@ -85,4 +86,17 @@ export function coordinationJobToken(session: Session): { token: string; expires
   const token = grant?.tokens[PERSONS_RESOURCE];
   if (!grant || !token || grant.expiresAt <= Date.now()) return null;
   return { token, expiresAt: grant.expiresAt };
+}
+
+/** Re-check the acting token and live membership before exposing camp operations. */
+export async function validateSessionRole(session: Session, role: CoreRole = session.activeRole): Promise<void> {
+  try {
+    await coreClient().healthLists(roleToken(session, PERSONS_RESOURCE, role));
+    const token = roleToken(session, PROJECTS_RESOURCE, role);
+    await coreClient().pendingKinds(token, openRoleTokens(session)[role]?.editionId ?? undefined);
+    if (!(await holdsRole(session.personId, role, session.campId))) throw new IpalphaTokenRevoked("membership removed");
+  } catch (err) {
+    if (err instanceof IpalphaTokenRevoked) await revokeSession(session._id);
+    throw err;
+  }
 }

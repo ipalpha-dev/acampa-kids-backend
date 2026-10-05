@@ -1,4 +1,5 @@
 import { createMiddleware } from "hono/factory";
+import { validateSessionRole } from "../services/acting";
 import { config, readSuperAdminPersonIds } from "../config";
 import { findSessionByToken, revokeSession } from "../services/session";
 import { getSettings, staffAccessOpen } from "../models/settings";
@@ -60,7 +61,9 @@ export const requireAuth = createMiddleware<{ Variables: AuthVariables }>(async 
   const session = await findSessionByToken(token);
   if (!session) return c.json({ error: { code: "UNAUTHORIZED", message: "Sessão inválida ou expirada." } }, 401);
 
+  c.set("sessionId", session._id);
   return withCamp(session.campId, async () => {
+    await validateSessionRole(session);
     const history = session.campId !== activeCampId();
     if (history) {
       if (!canSwitchCamps(session)) {

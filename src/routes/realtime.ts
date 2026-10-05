@@ -1,7 +1,8 @@
+import { validateSessionRole } from "../services/acting";
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
 import { findSessionByToken, revokeSession } from "../services/session";
-import { addClient, clientCount, removeClient, type RealtimeClient } from "../services/realtime";
+import { authorizedClientSession, addClient, clientCount, removeClient, type RealtimeClient } from "../services/realtime";
 import { loadCollections } from "../services/snapshot";
 import { accessWindowClosed, canSwitchCamps, sessionUser } from "../middleware/auth";
 import { activeCampId, withCamp } from "../services/campContext";
@@ -29,6 +30,7 @@ realtime.get(
     });
     if (!session) return unauthorized();
 
+    try { await validateSessionRole(session); } catch { return unauthorized(); }
     const campId = session.campId;
     const history = campId !== activeCampId();
     const evicted = await withCamp(campId, async () => {
@@ -43,7 +45,7 @@ realtime.get(
     if (evicted) return unauthorized();
 
     const user = sessionUser(session, history);
-    const viewer = { activeRole: user.activeRole, coreRole: user.coreRole, personId: user.personId };
+    const viewer = { sessionId: session._id, activeRole: user.activeRole, coreRole: user.coreRole, personId: user.personId };
     let client: RealtimeClient | null = null;
     return {
       async onOpen(_evt, ws) {
@@ -51,6 +53,7 @@ realtime.get(
           client = { ws, role: user.activeRole, coreRole: user.coreRole, personId: user.personId, sessionId: session._id, campId };
           addClient(client);
           try {
+            if (!(await authorizedClientSession(client))) return;
             const data = await loadCollections(viewer);
             ws.send(JSON.stringify({ type: "snapshot", at: new Date().toISOString(), data }));
           } catch (err) {
@@ -67,9 +70,9 @@ realtime.get(
           // the CURRENT key of this socket (a role / camp switch re-keys it — services/realtime.ts)
           const current = client;
           if (!current) return;
-          const now = { activeRole: current.role, coreRole: current.coreRole, personId: current.personId };
-          void withCamp(current.campId, () =>
-            loadCollections(now)
+          const now = { sessionId: current.sessionId, activeRole: current.role, coreRole: current.coreRole, personId: current.personId };
+          void withCamp(current.campId, async () =>
+            (await authorizedClientSession(current) ? loadCollections(now) : Promise.reject(new Error("unauthorized")))
               .then((data) => ws.send(JSON.stringify({ type: "snapshot", at: new Date().toISOString(), data })))
               .catch(() => {}),
           );

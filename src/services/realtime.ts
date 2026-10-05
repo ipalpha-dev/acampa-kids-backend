@@ -30,6 +30,31 @@ export interface RealtimeClient {
 
 const clients = new Set<RealtimeClient>();
 
+/** Validate each recipient before a camp payload; core outages suppress delivery. */
+export async function authorizedClientSession(client: RealtimeClient) {
+  const { findSession, revokeSession } = await import("./session");
+  const { validateSessionRole } = await import("./acting");
+  const { accessWindowClosed, canSwitchCamps } = await import("../middleware/auth");
+  const session = await findSession(client.sessionId);
+  if (!session || session.expiresAt.getTime() <= Date.now()) {
+    if (session) await revokeSession(session._id);
+    closeSessionSockets(client.sessionId);
+    return null;
+  }
+  try {
+    await validateSessionRole(session);
+    if (session.activeRole !== client.coreRole || session.campId !== client.campId) return null;
+    if ((session.campId !== activeCampId() && !canSwitchCamps(session)) || await accessWindowClosed(session)) {
+      await revokeSession(session._id);
+      return null;
+    }
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+
 export function addClient(client: RealtimeClient): void {
   clients.add(client);
 }
@@ -90,7 +115,9 @@ async function flush(): Promise<void> {
       // one payload per distinct view (role, or role+person for staff)
       const byKey = new Map<string, string | null>();
       for (const client of campClients) {
-        const viewer = { activeRole: client.role, coreRole: client.coreRole, personId: client.personId };
+        const session = await authorizedClientSession(client);
+        if (!session) continue;
+        const viewer = { sessionId: session._id, activeRole: client.role, coreRole: client.coreRole, personId: client.personId };
         const key = snapshotKey(viewer);
         if (!byKey.has(key)) {
           try {
@@ -156,7 +183,8 @@ export async function rekeySessionSockets(next: { id: string; role: Role; coreRo
   }
   await withCamp(next.campId, async () => {
     try {
-      const data = await loadCollections({ activeRole: next.role, coreRole: next.coreRole, personId: mine[0].personId });
+      if (!(await authorizedClientSession(mine[0]))) return;
+      const data = await loadCollections({ sessionId: next.id, activeRole: next.role, coreRole: next.coreRole, personId: mine[0].personId });
       const payload = JSON.stringify({ type: "snapshot", at: new Date().toISOString(), data });
       for (const client of mine) safeSend(client, payload);
     } catch (err) {
@@ -189,15 +217,13 @@ export function emitImportEvent(personId: string, campId: string, type: "import-
  * 4401, so the phone logs out and wipes its local copy at once.
  */
 export async function evictStaffOutsideWindow(): Promise<void> {
-  const [{ accessWindowClosed }, { findSession }] = await Promise.all([import("../middleware/auth"), import("./session")]);
   const byCamp = new Map<string, RealtimeClient[]>();
   for (const client of clients) byCamp.set(client.campId, [...(byCamp.get(client.campId) ?? []), client]);
 
   for (const [campId, campClients] of byCamp) {
     await withCamp(campId, async () => {
       for (const client of campClients) {
-        const session = await findSession(client.sessionId);
-        if (session && !(await accessWindowClosed(session))) continue;
+        if (await authorizedClientSession(client)) continue;
         try {
           client.ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "O período de acesso terminou." }));
           client.ws.close(4401, "access window closed");

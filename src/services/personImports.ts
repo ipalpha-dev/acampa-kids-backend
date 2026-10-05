@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { listBedrooms, countStaffPerBedroom } from "../models/bedrooms";
-import { EMPTY_CAMPER, countCampersPerBedroom, findCamperById, insertCamper, updateCamper, type CamperData } from "../models/campers";
+import { EMPTY_CAMPER, countCampersPerBedroom, findCamperById, reassignCampers, insertCamper, updateCamper, type CamperData } from "../models/campers";
 import { listCamps } from "../models/camps";
 import { deleteImportConflict, upsertImportConflict } from "../models/importConflicts";
 import {
@@ -20,7 +20,7 @@ import { listTeams } from "../models/teams";
 import { listTransports } from "../models/transports";
 import { transportLabel } from "../routes/transports";
 import { bedroomCapacity, COORDINATION_ROLE, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, ROOM_ROLES, TEAM_ROLE, type RoomRole } from "../types";
-import { activeCampId, withCamp } from "./campContext";
+import { withCamp } from "./campContext";
 import { coreClient } from "./ipalpha";
 import {
   IpalphaRejected,
@@ -443,9 +443,23 @@ export async function applyBatch(importId: string, batch: ImportBatch, ctx: { ca
         if (current) await deleteImportConflict(row.personId, key);
       }
       if (subject === "camper") {
+        if (current && patch.bedroom !== undefined && patch.bedroom !== current.bedroom) {
+          Object.assign(patch, { bed: null, caretakerId: null });
+          if (current.bedroom) campersPerRoom.set(current.bedroom, Math.max(0, (campersPerRoom.get(current.bedroom) ?? 0) - 1));
+        }
         if (current) await updateCamper(row.personId, patch as Partial<CamperData>, "import");
         else await insertCamper(row.personId, { ...EMPTY_CAMPER, qrToken: randomUUID(), ...(patch as Partial<CamperData>) }, "import");
       } else {
+        if (current) {
+          const staff = current as import("../types").Staff;
+          const bedroom = patch.bedroom === undefined ? staff.bedroom : patch.bedroom;
+          const roomRole = patch.roomRole === undefined ? staff.roomRole : patch.roomRole;
+          if (staff.roomRole === "caretaker" && (bedroom !== staff.bedroom || roomRole !== "caretaker")) {
+            await reassignCampers(row.personId, null);
+            touched.add("camper");
+          }
+          if (bedroom !== staff.bedroom && staff.bedroom) staffPerRoom.set(staff.bedroom, Math.max(0, (staffPerRoom.get(staff.bedroom) ?? 0) - 1));
+        }
         if (current) await updateStaff(row.personId, patch as Partial<StaffData>, "import");
         else await insertStaff(row.personId, { ...EMPTY_STAFF, ...(patch as Partial<StaffData>) }, "import");
       }
@@ -465,13 +479,14 @@ async function subjectOfPerson(personId: string, campId: string): Promise<Import
   return null;
 }
 
-/** The camp of an edition (imports run on the active camp; an unknown edition = the active camp). */
+/** Resolve the import edition without falling back to another camp's roster. */
 export async function campOfEdition(editionId: string | null): Promise<string> {
-  if (editionId) {
-    const camp = (await listCamps()).find((c) => c.editionId === editionId);
-    if (camp) return camp._id;
+  if (!editionId) throw new IpalphaRejected(409, "unknownEdition", {});
+  const { campEditionId } = await import("./acting");
+  for (const camp of await listCamps()) {
+    if ((camp.editionId ?? await campEditionId(camp._id)) === editionId) return camp._id;
   }
-  return activeCampId();
+  throw new IpalphaRejected(409, "unknownEdition", {});
 }
 
 // ── which list an import fills (memory only, this process) ───────────────────
@@ -500,7 +515,7 @@ export function clearImportMemory(): void {
 /** Records an import Acampa started (ids only). */
 export async function trackImport(input: { importId: string; campId: string; startedBy: string; status: string; subject: ImportSubject }): Promise<ImportJob> {
   rememberSubject(input.importId, input.subject);
-  return createImportJob({ importId: input.importId, campId: input.campId, startedBy: input.startedBy, status: input.status });
+  return createImportJob({ importId: input.importId, campId: input.campId, startedBy: input.startedBy, status: FINAL_IMPORT_STATUSES.has(input.status) ? "applying" : input.status });
 }
 
 /** The importer's coordenação persons token, from any of their live sessions (null = none: caught up on their next visit). */
@@ -538,9 +553,9 @@ export type CatchUp = "caughtUp" | "noToken" | "gone" | "unavailable";
  * was read. `token`: the importer's (a request's own), else one of their
  * live sessions'. Must run inside the import queue.
  */
-export async function catchUpImport(importId: string, token?: string | null): Promise<CatchUp> {
+export async function catchUpImport(importId: string, token?: string | null, reconcileFinal = false): Promise<CatchUp> {
   const job = await findImportJob(importId);
-  if (!job || FINAL_IMPORT_STATUSES.has(job.status)) return "caughtUp";
+  if (!job || !reconcileFinal && FINAL_IMPORT_STATUSES.has(job.status)) return "caughtUp";
   const bearer = token ?? (await importerToken(job.startedBy));
   if (!bearer) return "noToken";
   const client = coreClient();
@@ -550,16 +565,22 @@ export async function catchUpImport(importId: string, token?: string | null): Pr
     const subject = subjectOf(importId) ?? subjectOfTargets(view.targets);
     rememberSubject(importId, subject);
     let cursor = job.lastBatch + 1;
+    let exhausted = false;
     for (let guard = 0; guard < 1000; guard++) {
       const page = await client.importBatches(bearer, importId, { cursor, limit: 10 });
       for (const b of [...page.items].sort((x, y) => x.batch - y.batch)) {
         if (b.batch <= job.lastBatch) continue;
+        if (b.batch !== job.lastBatch + 1) return "unavailable";
         await applyTracked(job, b, subject);
       }
       const next = page.nextCursor ? Number(page.nextCursor) : NaN;
-      if (!Number.isInteger(next) || next <= job.lastBatch) break;
+      if (!Number.isInteger(next) || next <= job.lastBatch) {
+        exhausted = true;
+        break;
+      }
       cursor = next;
     }
+    if (!exhausted) return "unavailable";
     if (FINAL_IMPORT_STATUSES.has(status)) await finishImportJob(importId, status);
     else await setImportJobStatus(importId, status);
     return "caughtUp";
@@ -628,14 +649,27 @@ export function toAppMessage(v: unknown): AppMessage | null {
  */
 export async function handleAppMessage(msg: AppMessage, projectId: string): Promise<void> {
   if (msg.projectId && msg.projectId !== projectId) return;
-  const job = await findImportJob(msg.importId);
+  let job = await findImportJob(msg.importId);
   if (!job) {
-    // an import nobody here started (Mordomia): rows as they come, idempotent per row; nothing to catch up without a token
-    if (msg.type !== "person-import.batch" || msg.batch === undefined || !msg.rows) return;
-    const batch = toImportBatch({ batch: msg.batch, rows: msg.rows });
-    if (!batch) return;
-    const outcome = await applyBatch(msg.importId, batch, { campId: activeCampId(), subject: null });
-    console.log(`[imports] ${msg.importId} (not started here) batch ${msg.batch}: ${outcome.applied}/${outcome.rows} applied`);
+    const { getDb } = await import("../db");
+    const owners = await (await getDb()).collection("sessions").distinct("personId", { roles: COORDINATION_ROLE, expiresAt: { $gt: new Date() } });
+    for (const personId of owners) {
+      const token = await importerToken(String(personId));
+      if (!token) continue;
+      try {
+        const view = await coreClient().getImport(token, msg.importId);
+        const subject = subjectOfTargets(view.targets);
+        if (!subject || (view.projectId && view.projectId !== projectId)) return;
+        const campId = await campOfEdition(s(view.editionId));
+        job = await trackImport({ importId: msg.importId, campId, startedBy: s(view.createdBy) ?? String(personId), status: s(view.status) ?? "applying", subject });
+        await catchUpImport(msg.importId, token);
+        return;
+      } catch (err) {
+        if (err instanceof IpalphaRejected && (err.status === 403 || err.status === 404)) continue;
+        throw err;
+      }
+    }
+    // No authorized importer session: retained batches are read on their next visit.
     return;
   }
   emitImportEvent(job.startedBy, job.campId, "import-progress", { importId: msg.importId, step: msg.step, done: msg.done, total: msg.total, status: msg.status, ...(msg.batch !== undefined ? { batch: msg.batch } : {}) });

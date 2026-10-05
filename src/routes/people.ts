@@ -1,3 +1,6 @@
+import { findCamperById } from "../models/campers";
+import { healthFor, careHealth } from "./campers";
+import { toHealth } from "../services/people";
 import { Hono, type Context } from "hono";
 import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireManager } from "../middleware/roles";
@@ -72,7 +75,13 @@ people.get("/:personId/data/:kind", async (c) => {
   const known = await knownIds(c);
   if (!known.all && !known.ids.has(personId)) return fail(c, "PERSON_NOT_FOUND", "Pessoa não encontrada.", 404);
   c.header("Cache-Control", "no-store");
-  return c.json({ personId, kind, data: await coreClient().readData(actingToken(c, PERSONS_RESOURCE), personId, kind) });
+  const data = await coreClient().readData(actingToken(c, PERSONS_RESOURCE), personId, kind);
+  if (kind !== "medical") return c.json({ personId, kind, data });
+  const scope = await resolveScope(c.get("user"));
+  const kid = await findCamperById(personId);
+  const health = toHealth(data);
+  const full = ["coordenacao", "saude"].includes(c.get("session").activeRole);
+  return c.json({ personId, kind, data: { health: full ? health : kid ? healthFor(health, scope, kid) : careHealth(health) } });
 });
 
 people.patch("/:personId/data/:kind", requireManager, async (c) => {

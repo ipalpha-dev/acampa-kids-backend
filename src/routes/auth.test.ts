@@ -43,6 +43,7 @@ beforeEach(async () => {
   core = createFakeCore();
   world = emptyWorld();
   world.names.set(PERSON, "Ana Teste");
+  world.memberships.push({ personId: PERSON, role: "equipe", editionId: TEST_EDITION }, { personId: PERSON, role: "coordenacao" }, { personId: "person-helper", role: "checkin", editionId: TEST_EDITION });
   installFakeCore(core, world);
   enableIpalpha(core, keys);
 });
@@ -192,6 +193,7 @@ describe("session life", () => {
     expect(ok.body.user).toMatchObject({ activeRole: "saude", audience: "staff" });
     expect(String((await sessionDoc(token))!.offlineKey)).not.toBe(before);
 
+    world.memberships = world.memberships.filter((m) => m.role !== "equipe");
     const gone = await call("POST", "/api/auth/role", { role: "equipe" }, token);
     expect(gone.status).toBe(403);
     expect((await sessionDoc(token))!.roles).toEqual(["saude"]);
@@ -219,12 +221,8 @@ describe("session life", () => {
     const grants = openRoleTokens((await sessionDoc(token)) as never);
     world.revoked.add(grants.coordenacao.tokens["ipalpha:persons"]);
     const res = await call("GET", "/api/people/health-lists", undefined, token);
-    // health-lists is open to any token in core; make the fake refuse it like a revoked bearer
-    expect([200, 401]).toContain(res.status);
-    core.on("GET /health-lists", () => json({ reason: "invalidToken" }, 401));
-    const ended = await call("GET", "/api/people/health-lists", undefined, token);
-    expect(ended.status).toBe(401);
-    expect(ended.body.error.code).toBe("SESSION_ENDED");
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("SESSION_ENDED");
     expect(await sessionDoc(token)).toBeNull();
     expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(401);
   });
@@ -242,4 +240,66 @@ describe("session life", () => {
     expect((await call("GET", "/api/auth/me", undefined, team)).status).toBe(401);
     expect((await call("GET", "/api/auth/me", undefined, helper)).status).toBe(200);
   });
+});
+
+describe("camp-only authorization stays live", () => {
+  test("removed membership blocks camp reads and /me and ends the local session", async () => {
+    const token = await sessionFor(keys, PERSON, ["coordenacao"]);
+    world.memberships = [];
+    const res = await call("GET", "/api/bedrooms", undefined, token);
+    expect(res.status).toBe(401);
+    expect(await sessionDoc(token)).toBeNull();
+    expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(401);
+  });
+
+  test("revoked projects token blocks camp-only writes", async () => {
+    const token = await sessionFor(keys, PERSON, ["coordenacao"]);
+    const grants = openRoleTokens((await sessionDoc(token)) as never);
+    world.revoked.add(grants.coordenacao.tokens["ipalpha:projects"]);
+    expect((await call("POST", "/api/bedrooms", { name: "1", group: "girls" }, token)).status).toBe(401);
+    expect(await sessionDoc(token)).toBeNull();
+  });
+
+  test("switch cannot activate a revoked destination token", async () => {
+    world.memberships.push({ personId: PERSON, role: "saude", editionId: TEST_EDITION });
+    const token = await sessionFor(keys, PERSON, ["equipe", "saude"]);
+    const grants = openRoleTokens((await sessionDoc(token)) as never);
+    world.revoked.add(grants.saude.tokens["ipalpha:projects"]);
+    expect((await call("POST", "/api/auth/role", { role: "saude" }, token)).status).toBe(401);
+    expect(await sessionDoc(token)).toBeNull();
+  });
+
+  test("core outage fails closed without discarding a valid session", async () => {
+    const token = await sessionFor(keys, PERSON, ["coordenacao"]);
+    core.setDown(true);
+    expect((await call("GET", "/api/bedrooms", undefined, token)).status).toBe(503);
+    expect(await sessionDoc(token)).not.toBeNull();
+  });
+});
+
+test("expired active role grant blocks camp operations while the local session is live", async () => {
+  const { seal } = await import("../services/session");
+  const token = await sessionFor(keys, PERSON, ["coordenacao"]);
+  const doc = (await sessionDoc(token))!;
+  const grants = openRoleTokens(doc as never);
+  grants.coordenacao.expiresAt = Date.now() - 1;
+  await (await rawDb()).collection("sessions").updateOne({ _id: doc._id }, { $set: { roleTokens: seal(JSON.stringify(grants)) } });
+  expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(401);
+  expect(await sessionDoc(token)).toBeNull();
+});
+
+test("websocket lifecycle rechecks live membership before another payload", async () => {
+  const { authorizedClientSession, addClient, removeClient } = await import("../services/realtime");
+  const token = await sessionFor(keys, PERSON, ["coordenacao"]);
+  const doc = (await sessionDoc(token))!;
+  const closed: number[] = [];
+  const client = { sessionId: hashToken(token), personId: PERSON, campId: String(doc.campId), role: "admin" as const, coreRole: "coordenacao", ws: { readyState: 1, send() {}, close(code: number) { closed.push(code); } } as never };
+  addClient(client);
+  try {
+    expect(await authorizedClientSession(client)).not.toBeNull();
+    world.memberships = [];
+    expect(await authorizedClientSession(client)).toBeNull();
+    expect(closed).toEqual([4401]);
+    expect(await sessionDoc(token)).toBeNull();
+  } finally { removeClient(client); }
 });

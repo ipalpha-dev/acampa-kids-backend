@@ -1,3 +1,4 @@
+import { validateSessionRole } from "../services/acting";
 import { Hono } from "hono";
 import { resolveLocale } from "../i18n";
 import { requireAuth, sessionUser, type AuthVariables } from "../middleware/auth";
@@ -123,6 +124,7 @@ auth.post("/role", requireAuth, async (c) => {
     await dropSessionRole(session, role);
     return c.json({ error: { code: "ROLE_FORBIDDEN", message: "Este perfil não está mais disponível para você." } }, 403);
   }
+  await validateSessionRole(session, role);
   const windowErr = await accessWindowError(session.personId, role);
   if (windowErr) return c.json({ error: windowErr }, 403);
   const next = (await switchSessionRole(session._id, role))!;
