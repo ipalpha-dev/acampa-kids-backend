@@ -22,26 +22,14 @@ committed YAML or frontend `VITE_*` variables.
 | `MONGODB_DB` | `camping` |
 | `MONGO_USERNAME`, `MONGO_PASSWORD` | Deployment-only expansion variables from Secret `mongo-credentials`, keys `username`, `password`; credentials must be URI-safe |
 | `FILES_DIR` | `/app/data/files`, mounted from `acampa-2025-pictures-pvc` |
-| `JWT_SECRET` | Secret `acampa-2025-secrets`, key `jwt-secret`; required, strong, never the development default |
-| `SESSION_HOURS` | `96` |
+| `SESSION_TOKEN_KEY` | Secret `acampa-2025-secrets`, key `session-token-key` — 32 bytes (`openssl rand -hex 32`); seals the per-role IPAlpha tokens kept in each session (AES-256-GCM). Rotating it ends every session |
+| `SESSION_HOURS` | `96` (fallback only; auth-api's `sessionIdleHours` wins) |
+| `SUPER_ADMIN_PERSON_IDS` | comma list of IPAlpha person ids of the deployment owners |
 | `TRUST_PROXY_HOPS` | `1` (Traefik appends the real peer as the last `X-Forwarded-For` entry). Set to the number of appending proxies; `0` ignores the header |
-| `OTP_EXPIRE_MINUTES` | `5` |
-| `OTP_MAX_ATTEMPTS` | `3` |
-| `ACCOUNT_FREEZE_MINUTES` | `30` |
-| `RESEND_COOLDOWN_SECONDS` | `60` |
-| `COMTELE_API_KEY` | Secret `acampa-2025-secrets`, key `comtele-api-key`; required in production. Empty enables console-only mock OTP |
-| `COMTELE_PREFIX` | `AcampaKids` |
-| `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (SMS links) |
-| `PUBLIC_ORIGIN` | `https://ipalpha-kids-camping.kevyn.com.br` (image URLs in notification emails). Alias `BACKEND_PUBLIC_URL`. Empty = mail send is refused |
-| `SENDGRID_API_KEY` | Optional Secret `acampa-2025-secrets`, key `sendgrid-api-key`. Empty = notification emails are logged only |
-| `MAIL_FROM` | `alphakids@kevyn.com.br` (verified SendGrid sender) |
-| `MAIL_FROM_NAME` | `Acampa Kids` |
+| `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (the `{link}` of the message templates) |
 | `NOTIFY_COALESCE_SECONDS` | `20` |
-| `IMPORT_ADMIN_PHONE` | Admin E.164 phone notified when an AI import review takes over five minutes |
-| `IMPORT_SUPER_ADMIN_PHONE` | Super-admin E.164 phone for import error alerts; default `+5561985891092` |
 | `WORKER_SECRET` | Secret `acampa-2025-secrets`, key `worker-secret`; shared by the API and the import worker for `POST /api/worker/reviewed` (websocket event per reviewed record). **Required (not optional): pods fail to start without the key — patch the Secret before rolling out** |
 | `BACKEND_URL` | Worker only: `http://acampa-2025-backend:3000` (cluster-internal API address for the callback) |
-| `SUPER_ADMIN_PHONE` | E.164 phone guaranteed the top-level `admin` login role at API startup |
 | `AI_BASE_URL` | `https://ai-models.kevyn.com.br/v1` |
 | `AI_API_KEY` | Secret `acampa-2025-secrets`, key `ai-api-key`; optional, empty disables AI |
 | `OPENROUTER_API_KEY` | Secret `acampa-2025-secrets`, key `openrouter-api-key`; optional. Empty disables Jev (icon suggestions + every closed import decision: column mapping, health bucketing, option/transport/team/leader matching, neurodivergent yes/no, name sex) — the generative fallback then does all of it, slower. Worker also needs it for health structuring |
@@ -56,16 +44,17 @@ committed YAML or frontend `VITE_*` variables.
 | `FACE_SERVICE_URL` | `http://acampa-2025-face:8000` (cluster-internal only). Empty disables the parents' photo search |
 | `FACE_MATCH_THRESHOLD` | `0.22`; low so parents find their kid (a few other children in the results is ok) |
 | `FACE_MIN_DETECTION_SCORE` | `0.4` |
-| `IPALPHA_AUTH_API_URL` | auth-api base URL (server-to-server; JWKS at `/.well-known/jwks.json`). **IPAlpha login needs every required `IPALPHA_*` below — any missing = feature off** (boot logs the missing names) |
+| `IPALPHA_AUTH_API_URL` | auth-api base URL (server-to-server; JWKS at `/.well-known/jwks.json`). **Every `IPALPHA_*` below (+ `SESSION_TOKEN_KEY`) is required — any missing = nobody can sign in** (boot logs the missing names, never values) |
 | `IPALPHA_AUTH_ORIGIN` | auth-webapp origin that hosts the sign-in popup / One Tap frame |
-| `IPALPHA_PERSONS_API_URL` | persons-api base URL (first-login phone read) |
+| `IPALPHA_PERSONS_API_URL` | persons-api base URL (names, health, registrations, links, count) |
+| `IPALPHA_NOTIFICATIONS_API_URL` | notifications-api base URL (template messages by person id) |
 | `IPALPHA_TOKEN_ISSUER` | auth-api `iss` |
 | `IPALPHA_CLIENT_ID`, `IPALPHA_ENTRY_POINT`, `IPALPHA_REDIRECT_URI` | Acampa's confidential external entry point in auth-api |
 | `IPALPHA_CLIENT_SECRET` | Secret ref only — the entry point's client secret |
-| `IPALPHA_SYSTEM_CLIENT_ID` | Acampa's app-bound system client (`login:relay`, `projects:editions`) |
+| `IPALPHA_SYSTEM_CLIENT_ID` | Acampa's app-bound system client: `login:relay`, `projects:editions`, `projects:app-members`, `projects:templates`, `persons:app-names`, `notifications:send-template` (CONTRACTS §14) |
 | `IPALPHA_SYSTEM_CLIENT_SECRET` | Secret ref only |
-| `IPALPHA_PROJECT_ID` | optional: the Acampa project (project-scoped sign-in + yearly edition rollover) |
-| `IPALPHA_PROJECTS_API_URL` | optional: projects-api base URL; needed with `IPALPHA_PROJECT_ID` for the edition rollover on camp activation |
+| `IPALPHA_PROJECT_ID` | the yearly Acampa project (camps = its editions; roles = its memberships) |
+| `IPALPHA_PROJECTS_API_URL` | projects-api base URL (editions, memberships, message templates) |
 
 MongoDB uses `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`
 from `mongo-credentials`, and `MONGO_INITDB_DATABASE=camping`. These initialize
@@ -79,7 +68,7 @@ variable. `DEV_LAN` is development-only. Docker excludes local `.env` files.
 ### Rotating or adding a secret key
 
 `acampa-2025-secrets` already exists, so **patch** it — never re-create it from a
-single `--from-literal`, that would drop `jwt-secret` and the rest. Read the value
+single `--from-literal`, that would drop `session-token-key` and the rest. Read the value
 from the terminal so it never reaches shell history or the process table:
 
 ```bash
@@ -139,57 +128,19 @@ kubectl -n ipalpha-kids rollout restart deploy/acampa-2025-backend
   Do not upload local development `data/` to production: file metadata must match
   the target database. Runtime pictures, `.env`, and scratch files are excluded
   from Git/build contexts.
-- Check Settings → notification toggles and SMS redirect before real use. Do not
-  send OTPs or enable broadcasts just to smoke-test a deployment.
+- Check Settings → notification toggles before real use. Do not
+  send login codes or enable broadcasts just to smoke-test a deployment.
 
-## Multi-year camps boot migration
+## Boot and the IPAlpha cut-over
 
-`migrateToCamps()` (`services/campMigration.ts`) runs once on every boot,
-right after `ensureCampsCollection()` and before the rest of the index setup
-(`index.ts`). It is idempotent — safe against an already-migrated database,
-and safe against a fresh one:
-
-1. **First camp.** If the `camps` collection is empty, inserts one `{ label:
-   "Acampa Kids <year>", year, active: true }` — `year` comes from the
-   earliest `schedule_events.date`, else today's year. A pre-existing
-   single-camp deployment becomes this camp's **active** year.
-2. **Stamp.** Every document in a SCOPED collection with no `campId` gets the
-   active camp's id (`updateMany({ campId: { $exists: false } }, { $set: {
-   campId } })`, per collection).
-3. **Settings.** The single `settings._id: "global"` document is copied to
-   `_id: <activeCampId>` (the old `"global"` document is left in place,
-   unused).
-4. **Legacy indexes.** Every SCOPED collection's index whose key does **not**
-   start with `campId` is dropped (`bedrooms.name`, `categories.key`,
-   `schedule_roles.name`, `staff.phone`, the `medicationDoses` scheduled-key
-   unique index…) — the `ensure*Indexes()` calls right after this recreate
-   them through the scoped `Db` wrapper as `{ campId, ... }`, so a second
-   camp never collides with the first on the old unique keys.
-5. **User marks.** `users.prepDone` / `welcomeSentAt` / `photosSmsSentAt`
-   move to `userCampState` rows for the first camp, then are unset from
-   `users`.
-
-Expect log lines like:
-
-```
-🏕️  camps: created the first camp — "Acampa Kids 2025"
-🏕️  camps: stamped campId on 148 "campers" document(s)
-🏕️  camps: copied settings.global → settings for the active camp
-🏕️  camps: dropped legacy index "bedrooms.name_1"
-🏕️  camps: moved prep/welcome marks of 42 user(s) to userCampState
-🏕️  active camp: "Acampa Kids 2025" (<id>)
-```
-
-A database already on multi-year camps just prints the last line — steps 1–5
-find nothing to do.
-
-### Upgrading an existing deployment
-
-**Take a backup first** (`bun run backup`, from `backend/`) — the migration
-touches every collection in the database. Then roll out the new image as
-usual; the migration runs automatically at boot, before the API accepts
-traffic. No manual step, no downtime beyond the normal rollout window (one
-replica, `Recreate` — see "Persistent data and upgrades" above).
+At boot `ensureFirstCamp()` (`services/campMigration.ts`) only guarantees one
+active camp; there is **no data migration** (decision 33). People, roles and
+contacts live in IPAlpha: before the first camp on this version, provision the
+Acampa app / project / editions / clients through the core seams (deployment
+§8) and seed the message templates (`bun scripts/templates-json.ts` prints the
+catalog; or Settings → Mensagens → "Criar modelos"). Old `campers` / `staff` /
+`users` collections of a previous version are not read any more — drop them
+once a v2 backup is archived. Backups are format v3; older files are refused.
 
 ## Verification
 
