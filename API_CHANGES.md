@@ -46,6 +46,7 @@ Check-in stamps: `{at, byPersonId, byRole: CoreRole, note?}`.
 | `GET /?cursor&limit≤200&bedroom&q&tag` | **paged** → `{items, nextCursor, total}`; item = record + `name, nickname, sex ("F"\|"M"\|null, from core — decision 39)` (+ `hasHealth` for roles allowed health; + `health` only with `tag=allergies:<optionId>\|drugAllergies:<id>\|healthIssues:<id>\|medications\|neurodivergent\|foodRestrictions` or a `q` with ≤ 6 matches). |
 | **NEW** `GET /health-counts?tags=a,b` | `{total, byTag}` (anonymized chips). |
 | `GET /:id` | `{camper: record + name, nickname, sex, health? , healthForbidden?, responsibles:[{personId, name}]}`. Health is read with the ACTING role token — for a family, their `responsavel` token (core's own-kids rule, §19). `healthForbidden: true` (+ `health: null`) = core refused this role: show "não disponível para o seu perfil", never "nada informado". |
+| **NEW** `GET /:id/responsibles` | admin, staff, parent — the 📞 button: `{camper: {id, name}, responsibles: [{personId, name}]}`. Same guard / scope as `GET /:id` (out of scope = 404 `CAMPER_NOT_FOUND`); responsáveis only for visibility `full` / `care`, otherwise `responsibles: []`. Names live from core, never stored; **no health read**. |
 | `GET /lookup/:id` | camper adds `name`, `health`; `caretaker {id, name}`. |
 | `GET /:id/detail` | records only (names via `/api/people/names`). |
 | `GET /checkin/log`, `/:id/checkin/log` | `{log:[{id, who, personId, kind, action, at, byPersonId, byRole, note}]}`. |

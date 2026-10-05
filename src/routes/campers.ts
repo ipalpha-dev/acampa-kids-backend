@@ -347,6 +347,26 @@ campers.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
   });
 });
 
+/**
+ * GET /api/campers/:id/responsibles — the kid's name + the responsáveis (ids + live names),
+ * for the 📞 button: the same role guard, scope and responsáveis rule as GET /:id, and
+ * NO health read (never a medical block — the button only needs who to call).
+ * Out of scope = 404; in scope but the visibility does not reach the responsáveis
+ * (anything but "full" / "care") = `responsibles: []`. Names are read live, never stored.
+ */
+campers.get("/:id/responsibles", requireRole("admin", "staff", "parent"), async (c) => {
+  const k = await findCamperById(c.req.param("id"));
+  const scope = await resolveScope(c.get("user"));
+  if (!k || !serializeCamperFor(k, scope)) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
+  const vis = camperVisibility(scope, k);
+  const responsibles = vis === "full" || vis === "care" ? ((await responsiblesOf([k._id])).get(k._id) ?? []) : [];
+  const names = await namesOf([k._id, ...responsibles]);
+  return c.json({
+    camper: { id: k._id, name: names.get(k._id)?.name ?? "" },
+    responsibles: responsibles.map((id) => ({ personId: id, name: names.get(id)?.name ?? "" })),
+  });
+});
+
 /** GET /api/campers/:id/detail — the kid + their room + the team of the room + roommates (camp ops; names via /api/people/names). */
 campers.get("/:id/detail", requireRole("admin", "staff"), async (c) => {
   const k = await findCamperById(c.req.param("id"));
