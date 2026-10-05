@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import sampleJson from "../sample/camp.json";
 import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireAdmin } from "../middleware/roles";
 import { config, sampleDataAllowed } from "../config";
@@ -11,23 +10,10 @@ import { insertTransport } from "../models/transports";
 import { publish } from "../services/realtime";
 import { coordinationContext } from "../services/acting";
 import { documentsOf, emergencyContactOf, registerAdult, registerKid } from "../services/coreRegistration";
-import { TEAM_ROLE, type BedroomGroup, type CamperSex } from "../types";
+import { TEAM_ROLE } from "../types";
+import { generateCamp } from "../sample/generateCamp";
 
 const wizard = new Hono<{ Variables: AuthVariables }>();
-
-/** The fictional camp shipped with the app (see data/make_sample.py at the repo root). */
-const SAMPLE = sampleJson as {
-  teams: { name: string; color: string }[];
-  rooms: { name: string; group: BedroomGroup; bunkBeds: number; singleBeds: number }[];
-  transports: { kind: "bus" | "car"; number?: string; color?: string; name?: string }[];
-  staff: { name: string; phone: string; team: string | null; room: string | null; roomGroup: BedroomGroup | null; transportation: string | null; roomRole: "caretaker" | "helper"; active: boolean; healthNotes: string }[];
-  campers: {
-    name: string; birthDate: string | null; sex: CamperSex; cpf: string; rg: string; school: string; schoolGrade: string; church: string; invitedBy: string;
-    team: string | null; room: string | null; roomGroup: BedroomGroup | null; transportation: string | null; bed: string | null; weightKg: number | null;
-    allergies: string[]; healthIssues: string[]; foodRestrictions: string; healthNotes: string; generalNotes: string; bedroomPreference: string;
-    insurance: string; insuranceCard: string; emergencyContact: string; guardianName: string; guardianPhone: string; guardianCpf: string; guardianEmail: string;
-  }[];
-};
 
 wizard.use("*", requireAuth);
 
@@ -36,7 +22,8 @@ wizard.get("/sample", (c) => c.json({ enabled: sampleDataAllowed(config.ipalphaE
 
 /**
  * POST /api/wizard/sample — coordenação. Fills an EMPTY camp with the
- * fictional sample (154 kids, 72 team members, teams, rooms and buses) so the
+ * fully synthetic sample (`sample/generateCamp.ts`, decision 92: ≈150 kids, ≈70
+ * team members, teams, rooms and buses — no real person in it) so the
  * whole system can be tested end-to-end — ONLY when `IPALPHA_ENV` is
  * `preview` or `dev` (else 403 SAMPLE_DISABLED). The PEOPLE are registered in IPAlpha
  * (persons registration + memberships of the camp's edition, with the
@@ -52,6 +39,7 @@ wizard.post("/sample", requireAdmin, async (c) => {
   }
   const ctx = await coordinationContext(c.get("session"));
   if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status);
+  const SAMPLE = generateCamp();
 
   // teams → rooms → vehicles, so people can reference them right away
   const teamId = new Map<string, string>();
