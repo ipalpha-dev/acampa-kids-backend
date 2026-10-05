@@ -1015,7 +1015,7 @@ export async function createLeaderFromReview(name: string, phone: string, import
 }
 
 /** One preview row → what goes where: camp ops (Acampa), the kid + guardian (persons-api), health (persons-api `medical`). */
-export function camperDataFromPreview(row: Record<string, unknown>, importId: string): { ops: CamperData; kid: { name: string; birthDate: string; data: Record<string, unknown> }; guardian: { name: string; phone: string | null; email: string; data: Record<string, unknown> }; health: Partial<HealthInfo> } | null {
+export function camperDataFromPreview(row: Record<string, unknown>, importId: string): { ops: CamperData; kid: { name: string; birthDate: string; sex: CamperSex | null; homeChurch: string; data: Record<string, unknown> }; guardian: { name: string; phone: string | null; email: string; data: Record<string, unknown> }; health: Partial<HealthInfo> } | null {
   if (row.blocked === true || !row.name || !row.birthDate) return null;
   const kidData: Record<string, unknown> = {};
   const docs = documentsOf({ cpf: String(row.cpf ?? ""), rg: String(row.rg ?? "") });
@@ -1044,7 +1044,8 @@ export function camperDataFromPreview(row: Record<string, unknown>, importId: st
       aiReviewAttempts: 0,
       aiReviewNextRetryAt: null,
     },
-    kid: { name: String(row.name), birthDate: String(row.birthDate), data: kidData },
+    // sex only when the sheet said it explicitly (never guessed); the church column → core `homeChurch`
+    kid: { name: String(row.name), birthDate: String(row.birthDate), sex: row.probableGender === "F" || row.probableGender === "M" ? row.probableGender : null, homeChurch: String(row.church ?? "").trim(), data: kidData },
     guardian: { name: String(row.guardianName ?? ""), phone: (row.guardianPhone as string | null) ?? null, email: String(row.guardianEmail ?? ""), data: guardianDocs.length ? { document: guardianDocs } : {} },
     health: {
       allergies: (row.allergies as string[]) ?? [],
@@ -1094,7 +1095,8 @@ export async function publishImportDrafts(importId: string): Promise<void> {
  * camp's edition, health in persons-api) with the coordenação tokens, then
  * the camp-ops row is written (or updated, for a duplicate the reviewer
  * chose to update / merge). The AI triage of the observations runs later in
- * the worker (health results wait in `healthQueue` for a coordenação flush).
+ * the worker, which writes health straight to persons-api with the importer's
+ * token sealed on the import job (decision 50).
  */
 export async function insertImportCampers(rows: Record<string, unknown>[], importId: string, ctx: ImportCoreContext): Promise<{ inserted: number; updated: number; skipped: Record<string, unknown>[] }> {
   let inserted = 0;

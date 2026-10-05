@@ -22,13 +22,13 @@ committed YAML or frontend `VITE_*` variables.
 | `MONGODB_DB` | `camping` |
 | `MONGO_USERNAME`, `MONGO_PASSWORD` | Deployment-only expansion variables from Secret `mongo-credentials`, keys `username`, `password`; credentials must be URI-safe |
 | `FILES_DIR` | `/app/data/files`, mounted from `acampa-2025-pictures-pvc` |
-| `SESSION_TOKEN_KEY` | Secret `acampa-2025-secrets`, key `session-token-key` — 32 bytes (`openssl rand -hex 32`); seals the per-role IPAlpha tokens kept in each session (AES-256-GCM). Rotating it ends every session |
+| `SESSION_TOKEN_KEY` | Secret `acampa-2025-secrets`, key `session-token-key` — 32 bytes (`openssl rand -hex 32`); seals the per-role IPAlpha tokens kept in each session and the importer's token kept on a running import job (AES-256-GCM). **API and worker** (the worker opens the job token to write AI health to persons-api — decision 50). Rotating it ends every session and pauses every running import (`needsSignIn`) |
 | `SESSION_HOURS` | `96` (fallback only; auth-api's `sessionIdleHours` wins) |
 | `SUPER_ADMIN_PERSON_IDS` | comma list of IPAlpha person ids of the deployment owners |
 | `TRUST_PROXY_HOPS` | `1` (Traefik appends the real peer as the last `X-Forwarded-For` entry). Set to the number of appending proxies; `0` ignores the header |
 | `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (the `{link}` of the message templates) |
 | `NOTIFY_COALESCE_SECONDS` | `20` |
-| `WORKER_SECRET` | Secret `acampa-2025-secrets`, key `worker-secret`; shared by the API and the import worker for `POST /api/worker/reviewed` (websocket event per reviewed record). **Required (not optional): pods fail to start without the key — patch the Secret before rolling out** |
+| `WORKER_SECRET` | Secret `acampa-2025-secrets`, key `worker-secret`; shared by the API and the import worker for `POST /api/worker/reviewed` (websocket event per reviewed record) and `POST /api/worker/import-paused` (the importer's event when a job waits for a new sign-in). **Required (not optional): pods fail to start without the key — patch the Secret before rolling out** |
 | `BACKEND_URL` | Worker only: `http://acampa-2025-backend:3000` (cluster-internal API address for the callback) |
 | `AI_BASE_URL` | `https://ai-models.kevyn.com.br/v1` |
 | `AI_API_KEY` | Secret `acampa-2025-secrets`, key `ai-api-key`; optional, empty disables AI |
@@ -46,7 +46,7 @@ committed YAML or frontend `VITE_*` variables.
 | `FACE_MIN_DETECTION_SCORE` | `0.4` |
 | `IPALPHA_AUTH_API_URL` | auth-api base URL (server-to-server; JWKS at `/.well-known/jwks.json`). **Every `IPALPHA_*` below (+ `SESSION_TOKEN_KEY`) is required — any missing = nobody can sign in** (boot logs the missing names, never values) |
 | `IPALPHA_AUTH_ORIGIN` | auth-webapp origin that hosts the sign-in popup / One Tap frame |
-| `IPALPHA_PERSONS_API_URL` | persons-api base URL (names, health, registrations, links, count) |
+| `IPALPHA_PERSONS_API_URL` | persons-api base URL (names, health, registrations, links, count, birthdays today) |
 | `IPALPHA_NOTIFICATIONS_API_URL` | notifications-api base URL (template messages by person id) |
 | `IPALPHA_TOKEN_ISSUER` | auth-api `iss` |
 | `IPALPHA_CLIENT_ID`, `IPALPHA_ENTRY_POINT`, `IPALPHA_REDIRECT_URI` | Acampa's confidential external entry point in auth-api |
@@ -120,7 +120,12 @@ kubectl -n ipalpha-kids rollout restart deploy/acampa-2025-backend
 - Run a separate worker Deployment from the same backend image with command
   `bun run src/worker.ts`. Keep one replica: it claims 15 imported campers at a
   time, reviews them in parallel, requeues stale claims on startup and sleeps
-  for 10 seconds only when the queue is empty.
+  for 10 seconds only when the queue is empty. **Since decision 50 the worker
+  needs the same `SESSION_TOKEN_KEY` and `IPALPHA_*` env as the API** (it opens
+  the importer's sealed token and writes health to persons-api); without them
+  every import pauses as `needsSignIn` and its health is never written.
+- The old `healthQueue` collection is no longer used (decision 50). Nothing
+  migrates it: its TTL index empties it within 7 days; backups never dump it.
 - Startup creates indexes and performs one-off migrations (including transports,
   teams, parent-edit stamps, and admin roster entries). Back up MongoDB before
   publishing. A code rollback does **not** undo these data migrations.

@@ -110,6 +110,22 @@ decide; logged for the person), health-tag chips through the anonymized count
 endpoint. Lists never show health details (neutral ♥ only) unless filtered by a
 health tag or narrowed by name to ≤ 6 people (decision 31).
 
+**Imports** (spreadsheets, wizard, manual registration — `services/coreRegistration.ts`):
+people go to core through persons `POST /registrations` with everything its DTO
+takes — `sex` (only when the sheet / form said it, never guessed), `homeChurch`
+(the sheet's church column) and `data` blocks `document`, `school`,
+`emergencyContact`, `medical` (core writes the kinds the role collects) — then
+the memberships of the camp's edition. **AI health of imports** (decision 50,
+`services/importHealth.ts` + `src/worker.ts`): at Apply the importer's
+coordenação persons token is sealed on the job (`camperImports.jobToken`,
+AES-256-GCM with `SESSION_TOKEN_KEY`, never answered or backed up) and deleted
+when the job ends; the worker reads each person's block, merges the AI result
+over it (lists unioned, texts appended, nothing erased; a role that may not read
+the block never writes blind) and writes it back. A 401 / expired token pauses
+the job (`needsSignIn`, rows put back without counting an attempt, the importer
+told over the websocket); the importer signs in again and calls `POST
+/api/{camper,staff}-imports/:id/resume`. No health rests in Acampa.
+
 **Messages** (`services/messages.ts`, `src/messages/templates.ts`): every SMS /
 e-mail is a project template sent by notifications-api to a person id
 (language, contact and access log are core's). The catalog holds the default
@@ -512,9 +528,16 @@ room / team / vehicle, check-in confirmation and reminder, occurrences
 welcomes (team / families, once per camp), photos published, content changes.
 Plain `equipe` members are messaged only inside the team access window; helper
 roles and parent contacts always. Messages to the same person with the same
-template inside `NOTIFY_COALESCE_SECONDS` collapse into the last one. Birthday
-notices are off: the kids' birth dates are not readable by the app client (no
-core seam yet).
+template inside `NOTIFY_COALESCE_SECONDS` collapse into the last one.
+
+**Birthdays** (decision 51): on camp days at 07:45 São Paulo (a timer + the
+hourly safety net) the app client asks persons-api `POST
+/projects/:projectId/people/birthdays-today {editionId}` — only the ids of
+today's birthdays come back, never a date — and the team of each such kid's
+room gets the `acampa-birthday` template (inside the team access window, like
+every team message). Once per kid per day: `participants.birthdayNoticeDay`
+holds today's date and is lifted on any other day, so Acampa keeps no trace of
+when a birthday is. A failed send lifts the marker so the next run retries.
 
 ## Multi-year camps
 
@@ -533,7 +556,7 @@ carries a `campId`; the `camps` collection is the registry, with exactly one
 | `userCampState` | per-year marks of people who are not participant rows (families) — `prepDone`, `welcomeSentAt`, `photosSmsSentAt` — one row per `{ personId, campId }` |
 
 Everything else is **SCOPED** (`services/campScope.ts#SCOPED`): `participants,
-healthQueue, bedrooms, categories, transports, teams, scores, schedule_roles,
+bedrooms, categories, transports, teams, scores, schedule_roles,
 schedule_events, prep_sections, instructions, occurrences, medicationDoses,
 gallery, settings, checkinLog, camperChangeLog, camperLookups,
 camperImports, ai_usage, sms_usage`.
@@ -662,6 +685,7 @@ CAMP_ACTIVE`).
 
 `BACKUP_VERSION` is `3` (people in IPAlpha: `participants`, no `users`).
 `bun run backup [--camp <id>]` dumps the database except `sessions`,
-`healthQueue` and `ipalphaLoginStates`; `--camp` filters SCOPED collections
+`ipalphaLoginStates` (and a leftover `healthQueue` of older versions), and
+strips `camperImports.jobToken`; `--camp` filters SCOPED collections
 to that camp. Files older than v3 hold person data Acampa no longer keeps and
 are refused on restore.

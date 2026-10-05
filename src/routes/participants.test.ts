@@ -5,7 +5,6 @@ import { EMPTY_CAMPER, insertCamper } from "../models/campers";
 import { EMPTY_STAFF, insertStaff } from "../models/staff";
 import { insertBedroom } from "../models/bedrooms";
 import { updateSettings } from "../models/settings";
-import { enqueueHealth } from "../models/healthQueue";
 import { loadCollections } from "../services/snapshot";
 import { resolveScope } from "../services/scope";
 import { flushNotifications } from "../services/notify";
@@ -149,9 +148,49 @@ describe("campers: camp ops + names live, health only with the acting role token
     expect(world.memberships).toContainEqual(expect.objectContaining({ personId: kidId, role: "participante", editionId: TEST_EDITION, involved: [expect.objectContaining({ personId: res.body.responsible.personId })] }));
     expect(world.memberships).toContainEqual(expect.objectContaining({ personId: res.body.responsible.personId, role: "responsavel", editionId: TEST_EDITION }));
     expect(world.health.get(kidId)).toMatchObject({ healthNotes: "nenhuma" });
+    // health travels IN the registration (core RegistrationPersonDto `data.medical`), no separate write
+    expect(reg.children[0].data.medical).toMatchObject({ healthNotes: "nenhuma", allergies: [] });
+    expect(core.callsTo(`PATCH /persons/${kidId}/data/medical`)).toHaveLength(0);
     const row = await (await rawDb()).collection("participants").findOne({ personId: kidId });
     expect(JSON.stringify(row)).not.toContain("Carla");
     expect(JSON.stringify(row)).not.toContain("98888");
+  });
+
+  test("register sends core what it takes: sex, homeChurch and data {school, emergencyContact, medical}", async () => {
+    const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    const res = await call(
+      "POST",
+      "/api/campers/register",
+      {
+        name: "lia nova", birthDate: "2017-05-06", responsible: { name: "rui novo", phone: "11977771111" }, sex: "F", homeChurch: " IP Alphaville ",
+        school: { name: "Escola Sol", grade: "3º ano" }, emergencyContact: { name: "Vó Lu", phone: "(11) 96666-5555", relation: "avó" }, health: { allergies: ["amendoim"] },
+      },
+      token,
+    );
+    expect(res.status).toBe(201);
+    const child = (core.callsTo("POST /registrations")[0].json as Record<string, any>).children[0];
+    expect(child).toMatchObject({ name: "Lia Nova", sex: "female", homeChurch: "IP Alphaville", data: { school: { name: "Escola Sol", grade: "3º ano" }, emergencyContact: { name: "Vó Lu", phone: "+5511966665555", relation: "avó" }, medical: { allergies: ["amendoim"] } } });
+    expect(world.sex.get(res.body.camper.id)).toBe("female");
+    // nothing that was not said is sent (sex is never guessed)
+    await call("POST", "/api/campers/register", { name: "teo novo", birthDate: "2017-05-07", responsible: { name: "rui novo", phone: "11977771111" } }, token);
+    const plain = (core.callsTo("POST /registrations")[1].json as Record<string, any>).children[0];
+    expect(plain).toEqual({ name: "Teo Novo", birthDate: "2017-05-07" });
+  });
+
+  test("register refuses an unknown sex or an unreadable emergency contact before calling core", async () => {
+    const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    const base = { name: "lia nova", birthDate: "2017-05-06", responsible: { name: "rui novo", phone: "11977771111" } };
+    expect((await call("POST", "/api/campers/register", { ...base, sex: "X" }, token)).body.error.code).toBe("SEX_INVALID");
+    expect((await call("POST", "/api/campers/register", { ...base, emergencyContact: { name: "Vó", phone: "123" } }, token)).body.error.code).toBe("EMERGENCY_CONTACT_INVALID");
+    expect((await call("POST", "/api/campers/register", { ...base, homeChurch: "x".repeat(121) }, token)).body.error.code).toBe("HOME_CHURCH_INVALID");
+    expect(core.callsTo("POST /registrations")).toHaveLength(0);
+  });
+
+  test("staff register sends sex and homeChurch with the person", async () => {
+    const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    const res = await call("POST", "/api/staff/register", { name: "caio servo", phone: "11955554444", sex: "M", homeChurch: "IPAlpha" }, token);
+    expect(res.status).toBe(201);
+    expect((core.callsTo("POST /registrations")[0].json as Record<string, any>).people[0]).toMatchObject({ name: "Caio Servo", phone: "+5511955554444", sex: "male", homeChurch: "IPAlpha" });
   });
 
   test("a second responsável joins the SAME kid through persons /links (decision 38)", async () => {
@@ -222,15 +261,13 @@ describe("/api/people", () => {
     expect((await call("POST", "/api/people/names", { personIds: Array.from({ length: 201 }, (_, i) => `p${i}`) }, admin)).status).toBe(400);
   });
 
-  test("health queue: AI results are written with the coordenação token, merged into core lists, then dropped", async () => {
-    world.health.set(KID_B, { allergies: [], drugAllergies: [], healthIssues: [], neurodivergent: false, medications: [], foodRestrictions: "", healthNotes: "usa óculos", weightKg: null, insurance: "", insuranceCard: "" });
-    await enqueueHealth({ personId: KID_B, kind: "camper", importId: null, patch: { healthNotes: "bronquite", allergies: ["amendoim"] } });
+  test("there is no health queue in Acampa any more (decision 50)", async () => {
     const admin = await sessionFor(keys, ADMIN, ["coordenacao"]);
-    expect((await call("GET", "/api/people/health-queue", undefined, admin)).body.pending).toBe(1);
-    const res = await call("POST", "/api/people/health-queue/flush", {}, admin);
-    expect(res.body).toMatchObject({ written: 1, pending: 0 });
-    expect(world.health.get(KID_B)).toMatchObject({ healthNotes: "usa óculos bronquite", allergies: ["amendoim"] });
-    expect(await (await rawDb()).collection("healthQueue").countDocuments({})).toBe(0);
+    const app = (await import("../app")).createApp();
+    const headers = { authorization: `Bearer ${admin}`, "content-type": "application/json" };
+    expect((await app.request("/api/people/health-queue", { headers })).status).toBe(404);
+    expect((await app.request("/api/people/health-queue/flush", { method: "POST", headers, body: "{}" })).status).toBe(404);
+    expect((await (await rawDb()).listCollections({ name: "healthQueue" }).toArray()).length).toBe(0);
   });
 });
 

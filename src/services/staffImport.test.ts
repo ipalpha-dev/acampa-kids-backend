@@ -5,6 +5,13 @@ import type { StaffImportReviewItem } from "../types";
 
 const item = (patch: Partial<StaffImportReviewItem>): StaffImportReviewItem => ({ id:"r1",row:2,kind:"phone",field:"phone",memberName:"Ana",original:"",value:"",skip:false,resolved:false,...patch });
 
+describe("staff import → core person",()=>{
+  test("only the sheet's explicit sex column goes to core — never the room group",()=>{
+    expect(staffDataFromPreview({row:2,name:"Ana",phone:"+5511999999999",probableGender:"F",sex:"M"},"import-1").person.sex).toBe("F");
+    expect(staffDataFromPreview({row:2,name:"Ana",phone:"+5511999999999",probableGender:null,sex:"M"},"import-1").person.sex).toBeNull();
+  });
+});
+
 describe("staff import review delta",()=>{
   test("skipping an invalid phone still imports a staff member without login",()=>{
     const [row]=applyStaffDelta([{row:2,name:"Ana",phone:null}], [item({})], {r1:{skip:true}});

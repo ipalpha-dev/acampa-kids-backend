@@ -7,6 +7,7 @@ import { claimCamperImport, findCamperImport, insertCamperImport, markImportDict
 import { analyzeCamperImport, applyCategoryChoices, applyImportDelta, createLeaderFromReview, discardImportCategoryOptions, IMPORT_FILE_MAX_BYTES, IMPORT_FIELDS, insertImportCampers, publishImportDrafts } from "../services/camperImport";
 import { getImportProgress, setImportProgress } from "../services/importProgress";
 import { publish } from "../services/realtime";
+import { appliedStatus, endFailedImportJob, jobFields, pausedImportsOf, resumeImportJob, startImportJob } from "../services/importJob";
 import type { CamperImportReviewItem } from "../types";
 
 type Env = { Variables: AuthVariables };
@@ -37,6 +38,7 @@ function serialize(record: NonNullable<Awaited<ReturnType<typeof findCamperImpor
     reviewStartedAt: record.reviewStartedAt,
     finishedAt: record.finishedAt,
     error: record.error,
+    ...jobFields(record),
   };
 }
 
@@ -103,6 +105,16 @@ imports.post("/analyze", async (c) => {
 
 imports.get("/progress/:token", (c) => c.json({ progress: getImportProgress(c.req.param("token")) }));
 
+/** The camper imports I started whose background health pass waits for my new sign-in (decision 50). */
+imports.get("/needs-sign-in", async (c) => c.json({ imports: await pausedImportsOf(c, "camper") }));
+
+/** Resumes a paused job with my fresh coordenação token (only the importer). */
+imports.post("/:id/resume", async (c) => {
+  const result = await resumeImportJob(c, "camper");
+  if (!result.ok) return c.json({ error: result.error }, result.status);
+  return c.json({ import: serialize(result.record) });
+});
+
 imports.get("/:id", async (c) => {
   const record = await findCamperImport(c.req.param("id"));
   return record ? c.json({ import: serialize(record) }) : fail(c, "IMPORT_NOT_FOUND", "Importação não encontrada.", 404);
@@ -164,6 +176,8 @@ imports.post("/:id/apply", async (c) => {
   const ctx = await coordinationContext(c.get("session"));
   if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status);
   if (!(await claimCamperImport(record._id))) return fail(c, "IMPORT_ALREADY_APPLIED", "Esta importação já está em andamento ou foi aplicada.", 409);
+  // the background AI health pass writes to persons-api with my token, sealed on the job (decision 50)
+  await startImportJob(record._id, c.get("session"));
   try {
     const result = await insertImportCampers(rows, record._id, ctx);
     const finishedAt = new Date();
@@ -174,7 +188,7 @@ imports.post("/:id/apply", async (c) => {
     const skipped = [...skippedByRow.values()];
     const reviews: CamperImportReviewItem[] = camperReviews.map((r) => ({ ...r, value: delta[r.id]?.value ?? r.value, skip: delta[r.id]?.skip ?? r.skip, resolved: true }));
     // the spreadsheet's person data is not kept once applied (it lives in core now): rows / preview are dropped
-    const updated = (await updateCamperImport(record._id, { status: "completed", dryRun: false, reviews: reviews.map((r) => ({ ...r, existingData: undefined, incomingData: undefined, mergedData: undefined })), skipped, finishedAt, error: "", rows: [], preview: [] }))!;
+    const updated = (await updateCamperImport(record._id, { status: await appliedStatus(record._id), dryRun: false, reviews: reviews.map((r) => ({ ...r, existingData: undefined, incomingData: undefined, mergedData: undefined })), skipped, finishedAt, error: "", rows: [], preview: [] }))!;
     await discardImportCategoryOptions(record._id, declinedCategoryIds);
     await Promise.all([markImportDictionaryPublished(record._id), publishImportDrafts(record._id)]);
     publish("campers", "bedrooms", "staff", "teams", "transports", "categories");
@@ -182,6 +196,7 @@ imports.post("/:id/apply", async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : "A importação parou durante a gravação.";
     await updateCamperImport(record._id, { status: "error", error: message });
+    await endFailedImportJob(record._id);
     return fail(c, "IMPORT_FAILED", `${message} Nenhuma nova tentativa foi feita para evitar duplicidades.`, 409);
   }
 });

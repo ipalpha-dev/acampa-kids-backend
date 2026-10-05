@@ -92,7 +92,7 @@ wizard.post("/sample", requireAdmin, async (c) => {
     if (emergency) kidData.emergencyContact = emergency;
     const guardianDocs = documentsOf({ cpf: k.guardianCpf });
     const { kidId } = await registerKid(ctx.tokens, {
-      kid: { name: k.name, birthDate: k.birthDate, data: kidData },
+      kid: { name: k.name, birthDate: k.birthDate, sex: k.sex, homeChurch: k.church, data: kidData },
       guardian: { name: k.guardianName, phone: k.guardianPhone, email: k.guardianEmail || undefined, data: guardianDocs.length ? { document: guardianDocs } : undefined },
       editionId: ctx.editionId,
       health: { allergies: k.allergies, healthIssues: k.healthIssues, foodRestrictions: k.foodRestrictions, healthNotes: k.healthNotes, weightKg: k.weightKg, insurance: k.insurance, insuranceCard: k.insuranceCard },

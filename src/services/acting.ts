@@ -64,3 +64,16 @@ export async function coordinationContext(session: Session): Promise<{ ok: true;
   if (!editionId) return { ok: false, status: 409, error: { code: "EDITION_UNKNOWN", message: "A edição deste acampamento ainda não existe no IPAlpha." } };
   return { ok: true, tokens: { persons, projects }, editionId };
 }
+
+/**
+ * The coordenação persons token of this session + its expiry, for an import
+ * job's background health pass (decision 50) — null when the person is not
+ * coordenação or the token is gone / expired. The caller seals it on the job.
+ */
+export function coordinationJobToken(session: Session): { token: string; expiresAt: number } | null {
+  if (!session.roles.includes(COORDINATION_ROLE)) return null;
+  const grant = openRoleTokens(session)[COORDINATION_ROLE];
+  const token = grant?.tokens[PERSONS_RESOURCE];
+  if (!grant || !token || grant.expiresAt <= Date.now()) return null;
+  return { token, expiresAt: grant.expiresAt };
+}

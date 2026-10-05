@@ -13,7 +13,6 @@ import { ensureCampsCollection } from "../models/camps";
 import { ensureFirstCamp } from "../services/campMigration";
 import { ensureLoginStateIndexes } from "../models/ipalphaLoginStates";
 import { ensureParticipantIndexes } from "../models/participants";
-import { ensureHealthQueueIndexes } from "../models/healthQueue";
 import { ensureSessionIndexes, createSession } from "../services/session";
 import { ipalpha } from "../services/ipalpha";
 import { createIpalphaCoreClient, type RoleGrant } from "../services/ipalpha/coreClient";
@@ -35,7 +34,6 @@ export async function startTestDb(): Promise<void> {
   await ensureFirstCamp();
   await ensureSessionIndexes();
   await ensureParticipantIndexes();
-  await ensureHealthQueueIndexes();
   await ensureLoginStateIndexes();
 }
 
@@ -50,7 +48,7 @@ export async function stopTestDb(): Promise<void> {
 /** Empties everything a test touches (the camp registry stays; its edition id is forgotten). */
 export async function resetData(): Promise<void> {
   const db = await rawDb();
-  for (const name of ["sessions", "participants", "settings", "userCampState", "ipalphaLoginStates", "healthQueue", "checkinLog", "camperChangeLog", "camperLookups", "occurrences", "medicationDoses", "scores", "sms_usage", "bedrooms"]) {
+  for (const name of ["sessions", "participants", "settings", "userCampState", "ipalphaLoginStates", "camperImports", "schedule_events", "checkinLog", "camperChangeLog", "camperLookups", "occurrences", "medicationDoses", "scores", "sms_usage", "bedrooms"]) {
     await db.collection(name).deleteMany({});
   }
   await db.collection("camps").updateMany({}, { $set: { editionId: null } });
@@ -95,6 +93,10 @@ export interface FakeWorld {
   links: { subjectId: string; agentId: string }[];
   /** bearer tokens core refuses with 401 (revoked mid-session) */
   revoked: Set<string>;
+  /** person ids persons-api answers as "birthday today" (decision 51) */
+  birthdays: Set<string>;
+  /** persons whose `medical` the role token may not read (403) */
+  medicalForbidden: Set<string>;
   nextId: number;
 }
 
@@ -260,16 +262,20 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   });
   core.on("POST /registrations", (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
-    const body = call.json as { responsible?: { name: string; phone: string; data?: { medical?: unknown } }; children?: { name: string; data?: unknown }[]; people?: { name: string; phone: string }[] };
+    type Entry = { name: string; sex?: string; data?: { medical?: Record<string, unknown> } };
+    const body = call.json as { responsible?: Entry & { phone: string }; children?: Entry[]; people?: (Entry & { phone: string })[] };
     const id = () => `person-${++world.nextId}`;
-    const make = (name: string) => {
+    // like core: profile fields + the `medical` block are written with the person (the role collects medical)
+    const make = (entry: Entry) => {
       const personId = id();
-      world.names.set(personId, name);
+      world.names.set(personId, entry.name);
+      if (entry.sex) world.sex.set(personId, entry.sex);
+      if (entry.data?.medical) world.health.set(personId, entry.data.medical);
       return personId;
     };
-    if (body.people) return json({ people: body.people.map((p) => ({ personId: make(p.name), created: true })) }, 201);
-    const responsible = make(body.responsible!.name);
-    return json({ responsible: { personId: responsible, created: true }, children: (body.children ?? []).map((c) => ({ personId: make(c.name), created: true, linkId: `link-${world.nextId}` })) }, 201);
+    if (body.people) return json({ people: body.people.map((p) => ({ personId: make(p), created: true })) }, 201);
+    const responsible = make(body.responsible!);
+    return json({ responsible: { personId: responsible, created: true }, children: (body.children ?? []).map((c) => ({ personId: make(c), created: true, linkId: `link-${world.nextId}` })) }, 201);
   });
   core.on("POST /links", (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
@@ -282,6 +288,12 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     const ids = (call.json as { personIds: string[] }).personIds;
     if (ids.length > 200) return json({ reason: "validationFailed" }, 400);
     return json({ items: ids.filter((id) => world.names.has(id)).map((id) => ({ personId: id, name: world.names.get(id), ...(world.sex.has(id) ? { sex: world.sex.get(id) } : {}) })) });
+  });
+  core.on(`POST ${P}/people/birthdays-today`, (call) => {
+    if (!bearer(call).includes("persons:app-names")) return json({ reason: "insufficientScope" }, 403);
+    const editionId = (call.json as { editionId?: string } | null)?.editionId;
+    const live = new Set(world.memberships.filter((m) => !editionId || !m.editionId || m.editionId === editionId).map((m) => m.personId));
+    return json({ personIds: [...world.birthdays].filter((id) => live.has(id)).sort() });
   });
   core.on(`POST ${P}/people/count`, (call) => {
     const body = call.json as { personIds?: string[]; filters: { healthTags?: { allergies?: string[] } } };
@@ -300,12 +312,14 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
     const [, , personId, , kind] = call.path.split("/");
     if (kind !== "medical") return json({ [kind]: null });
+    if (world.medicalForbidden.has(personId)) return json({ reason: "noGrant" }, 403);
     const h = world.health.get(personId);
     return h ? json({ health: h }) : json({ reason: "notFound" }, 404);
   });
   core.on("PATCH /persons/:id/data/:kind", (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
     const [, , personId] = call.path.split("/");
+    if (world.medicalForbidden.has(personId)) return json({ reason: "noGrant" }, 403);
     world.health.set(personId, call.json as Record<string, unknown>);
     return json({ health: call.json });
   });
@@ -334,7 +348,7 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
 }
 
 export function emptyWorld(): FakeWorld {
-  return { links: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], templates: new Map(), messages: [], revoked: new Set(), nextId: 0 };
+  return { links: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], templates: new Map(), messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), nextId: 0 };
 }
 
 /** Opens an Acampa session for `personId` holding `roles` (tokens signed like auth-api's) and returns the browser token. */

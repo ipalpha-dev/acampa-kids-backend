@@ -146,6 +146,14 @@ describe("camper import review delta", () => {
     expect(JSON.stringify(data?.ops)).not.toContain("asma");
   });
 
+  test("the sheet's explicit sex and church go to core with the kid (sex never guessed)", () => {
+    const told = camperDataFromPreview({ row: 2, name: "Ana", birthDate: "2017-01-02", probableGender: "F", church: " IP Alphaville ", blocked: false }, "import-id");
+    expect(told?.kid).toMatchObject({ sex: "F", homeChurch: "IP Alphaville" });
+    const silent = camperDataFromPreview({ row: 2, name: "Ana", birthDate: "2017-01-02", probableGender: null, sex: "F", blocked: false }, "import-id");
+    expect(silent?.kid).toMatchObject({ sex: null, homeChurch: "" });
+    expect(JSON.stringify(told?.ops)).not.toContain("Alphaville");
+  });
+
   test("uses full name or single name plus birthdate as the deterministic duplicate key",()=>{
     expect(camperIdentityKey("Ana Maria Silva","2017-01-02")).toBe("name:ana maria silva");
     expect(camperIdentityKey("Ana","2017-01-02")).toBe("name-birth:ana:2017-01-02");

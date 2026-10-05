@@ -1,13 +1,15 @@
 import { config } from "./config";
 import { getDb } from "./db";
 import { activeCampId, refreshActiveCamp, withCamp } from "./services/campContext";
-import { claimCampersForAiReview, claimCampersForCleanup, finishCamperAiReview, finishCamperStructure, requeueStaleAiReviews, updateCamper } from "./models/campers";
-import { claimStaffForAiReview, claimStaffForCleanup, finishStaffAiReview, finishStaffStructure, requeueStaleStaffAiReviews, updateStaff } from "./models/staff";
+import { claimCampersForAiReview, claimCampersForCleanup, finishCamperAiReview, finishCamperStructure, releaseCamperReview, requeueStaleAiReviews, updateCamper } from "./models/campers";
+import { claimStaffForAiReview, claimStaffForCleanup, finishStaffAiReview, finishStaffStructure, releaseStaffReview, requeueStaleStaffAiReviews, updateStaff } from "./models/staff";
 import { AI_REVIEW_MAX_ATTEMPTS, aiReviewExhaustedFilter, aiReviewRetryDelayMs, aiReviewRetryPendingFilter, formatRetryDelay } from "./models/aiReviewRetry";
-import { findCamperImport, listImportsPendingNotification, updateCamperImport } from "./models/camperImports";
+import { dropImportJobToken, findCamperImport, listImportsPendingNotification, listPausedImportIds, updateCamperImport } from "./models/camperImports";
 import { recordAiUsage } from "./models/aiUsage";
 import { appendCategoryOption, listCategories, newOptionId } from "./models/categories";
-import { enqueueHealth, listHealthQueue } from "./models/healthQueue";
+import { currentHealth, ImportNeedsSignIn, importToken, pauseForSignIn, toImportOptionIds, writeImportHealth, type HealthWrite } from "./services/importHealth";
+import { coreClient } from "./services/ipalpha";
+import { IpalphaTokenRevoked } from "./services/ipalpha/coreClient";
 import { structureImportHealthWithJev } from "./services/importHealthStructureAi";
 import { CAMPER_CATEGORY_KEYS, type HealthInfo } from "./types";
 import { cleanupImportObservations, type HealthOption, type HealthOptions, type ImportHealthSelection } from "./services/importObservationCleanupAi";
@@ -17,11 +19,14 @@ import type { RawNotesCall } from "./services/camperNotesAi";
 import type { Camper, Staff } from "./types";
 
 /**
- * Background AI triage of imported observations. The worker holds NO person
- * token: it reads only Acampa's own free-text observations (`generalNotes`),
- * writes the cleaned text back there, and leaves the structured HEALTH result
- * in the transient `healthQueue`, which a coordenação session writes to
- * persons-api (POST /api/people/health-queue/flush). Logs carry ids only.
+ * Background AI triage of imported observations (decision 50). It reads
+ * Acampa's own free-text observations (`generalNotes`), writes the cleaned
+ * text back there, and writes the structured HEALTH result straight to
+ * persons-api with the importing coordenação's role token, sealed on the
+ * import job (deleted when the job ends) — merged over the person's current
+ * block, never erasing it. No health rests in Acampa. A refused / expired
+ * token pauses the job (`needsSignIn`): its rows are put back untouched and
+ * the importer resumes it after signing in again. Logs carry ids only.
  */
 const POLL_MS = 10_000;
 const BATCH = 15;
@@ -114,30 +119,86 @@ function attemptLogger(who: string): (model: string, r: RawNotesCall) => void {
   };
 }
 
-/** the queued (not yet written) health patch of a person, as the base the next pass builds on */
-async function queuedPatch(personId: string): Promise<Partial<HealthInfo>> {
-  return (await listHealthQueue(1000)).find((q) => q.personId === personId)?.patch ?? {};
-}
-
 type Subject = { kind: "camper"; row: Camper } | { kind: "staff"; row: Staff };
 
-/** phase 1 — Jev pre-fill (near-instant): obvious closed health fields from the observations → health queue */
+/** Tells the main backend an import paused for a new sign-in (it pushes the event to the importer). Best effort. */
+async function notifyImportPaused(importId: string): Promise<void> {
+  if (!config.worker.secret) return;
+  try {
+    const res = await fetch(`${backendUrl}/api/worker/import-paused`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${config.worker.secret}` },
+      body: JSON.stringify({ importId }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    log("notify", `import ${importId} — paused callback ${res.ok ? "ok" : `FAILED (http ${res.status})`}`);
+  } catch (err) {
+    log("notify", `import ${importId} — paused callback FAILED (${err instanceof Error ? err.message : "unreachable"})`);
+  }
+}
+
+const NO_ACTIVE_IMPORT = "A importação não está mais ativa: a saúde não pode ser gravada no IPAlpha.";
+
+/**
+ * The importer's token for this row, or null after pausing its import (no
+ * token / expired) and putting the row back. A row whose import cannot pause
+ * (none, or it ended in error) cannot have its health written: an error of
+ * the row (retried, then left for manual review).
+ */
+async function tokenFor(item: Subject, phase: "structure" | "cleanup"): Promise<string | null> {
+  const importId = item.row.importId;
+  if (!importId) throw new Error(NO_ACTIVE_IMPORT);
+  try {
+    return await importToken(importId);
+  } catch (err) {
+    if (!(err instanceof ImportNeedsSignIn)) throw err;
+    if (await pauseRow(item, phase)) return null;
+    throw new Error(NO_ACTIVE_IMPORT);
+  }
+}
+
+/**
+ * The import's token was refused / expired: pause the job (once) and put the
+ * row back without counting an attempt. False when the import is not paused
+ * (missing or not running) — the caller treats the row as failed.
+ */
+async function pauseRow(item: Subject, phase: "structure" | "cleanup"): Promise<boolean> {
+  const importId = item.row.importId ?? "";
+  if (!importId) return false;
+  if (await pauseForSignIn(importId)) {
+    log("import", `import ${importId} — the importer's IPAlpha sign-in is no longer valid → paused (needsSignIn)`);
+    await notifyImportPaused(importId);
+  }
+  if ((await findCamperImport(importId))?.status !== "needsSignIn") return false;
+  if (item.kind === "camper") await releaseCamperReview(item.row._id, phase === "cleanup");
+  else await releaseStaffReview(item.row._id, phase === "cleanup");
+  return true;
+}
+
+function healthLog(who: string, result: HealthWrite): void {
+  if (result === "refused") log("health", `${who} — IPAlpha refused the health write for this person (role rules); nothing written`);
+}
+
+/** phase 1 — Jev pre-fill (near-instant): obvious closed health fields from the observations → persons-api (merged) */
 async function structureOne(item: Subject): Promise<void> {
   const { kind, row } = item;
   const who = `${kind} ${row._id}`;
   try {
+    const token = await tokenFor(item, "structure");
+    if (!token) return;
     const notes = row.generalNotes.trim();
     log(kind, `${who} — start, observations=${notes.length} chars`);
     const jev = await structureImportHealthWithJev(notes, { allergies: [], drugAllergies: [], healthIssues: [], neurodivergent: false }, kind);
     void recordAiUsage({ at: new Date(), vendor: jev.vendor, model: jev.model, kind: "structure_health", userId: "worker", ...jev.usage, ok: jev.ok });
     if (!jev.ok) throw new Error(`Jev: ${jev.error ?? "falhou"}`);
     log(kind, `${who} — Jev structured: allergies=${jev.allergies.length} drugAllergies=${jev.drugAllergies.length} healthIssues=${jev.healthIssues.length}`);
-    await enqueueHealth({ personId: row._id, kind: kind === "camper" ? "camper" : "team", importId: row.importId, patch: { allergies: jev.allergies, drugAllergies: jev.drugAllergies, healthIssues: jev.healthIssues, ...(kind === "camper" ? { neurodivergent: jev.neurodivergent } : {}) } });
+    healthLog(who, await writeImportHealth(token, row._id, { allergies: jev.allergies, drugAllergies: jev.drugAllergies, healthIssues: jev.healthIssues, ...(kind === "camper" ? { neurodivergent: jev.neurodivergent } : {}) }));
     if (kind === "camper") await finishCamperStructure(row._id);
     else await finishStaffStructure(row._id);
     await notifyBackend(kind, row._id, "structured", 0);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Falha na revisão por IA.";
+    if (err instanceof IpalphaTokenRevoked && (await pauseRow(item, "structure"))) return;
+    const message = err instanceof IpalphaTokenRevoked ? NO_ACTIVE_IMPORT : err instanceof Error ? err.message : "Falha na revisão por IA.";
     const attempts = kind === "camper" ? ((await finishCamperStructure(row._id, message))?.aiReviewAttempts ?? 1) : await finishStaffStructure(row._id, message);
     log(kind, `${who} — ERROR: ${message} — ${retryNote(attempts)}`);
     if (attempts >= AI_REVIEW_MAX_ATTEMPTS) await notifyBackend(kind, row._id, "error", attempts);
@@ -149,12 +210,17 @@ async function cleanupOne(item: Subject): Promise<void> {
   const { kind, row } = item;
   const who = `${kind} ${row._id}`;
   try {
-    const base = await queuedPatch(row._id);
+    const token = await tokenFor(item, "cleanup");
+    if (!token) return;
+    const lists = await coreClient().healthLists(token);
+    // the person's current block (church ids → import option ids) is the structured base the model builds on
+    const current = await currentHealth(token, row._id);
+    const base = current ? await toImportOptionIds(current, lists) : null;
     const cleanup = await cleanupImportObservations({
       notes: row.generalNotes.trim(),
       subject: kind,
       options: await healthOptions(),
-      structured: { allergies: base.allergies ?? [], drugAllergies: base.drugAllergies ?? [], healthIssues: base.healthIssues ?? [], neurodivergent: base.neurodivergent ?? false, medications: [] },
+      structured: { allergies: base?.allergies ?? [], drugAllergies: base?.drugAllergies ?? [], healthIssues: base?.healthIssues ?? [], neurodivergent: base?.neurodivergent ?? false, medications: [] },
       // the camp-ops fields Acampa owns are the only "current" values the worker can see
       current: { email: "", ...(kind === "camper" ? { bedroomPreference: (row as Camper).bedroomPreference } : {}) },
     });
@@ -174,7 +240,7 @@ async function cleanupOne(item: Subject): Promise<void> {
       ...(r.insuranceCard ? { insuranceCard: r.insuranceCard } : {}),
       ...(r.weightKg != null ? { weightKg: r.weightKg } : {}),
     };
-    await enqueueHealth({ personId: row._id, kind: kind === "camper" ? "camper" : "team", importId: row.importId, patch });
+    healthLog(who, await writeImportHealth(token, row._id, patch, lists));
     if (kind === "camper") {
       await updateCamper(row._id, { generalNotes: cleanup.generalNotes, ...(r.bedroomPreference && !(row as Camper).bedroomPreference ? { bedroomPreference: r.bedroomPreference } : {}) });
       await finishCamperAiReview(row._id);
@@ -182,10 +248,11 @@ async function cleanupOne(item: Subject): Promise<void> {
       await updateStaff(row._id, { generalNotes: cleanup.generalNotes });
       await finishStaffAiReview(row._id);
     }
-    log(kind, `${who} — done (health queued for the coordenação to write)`);
+    log(kind, `${who} — done (health merged into IPAlpha)`);
     await notifyBackend(kind, row._id, "reviewed", 0, health.created > 0);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Falha na revisão por IA.";
+    if (err instanceof IpalphaTokenRevoked && (await pauseRow(item, "cleanup"))) return;
+    const message = err instanceof IpalphaTokenRevoked ? NO_ACTIVE_IMPORT : err instanceof Error ? err.message : "Falha na revisão por IA.";
     const attempts = kind === "camper" ? ((await finishCamperAiReview(row._id, message))?.aiReviewAttempts ?? 1) : await finishStaffAiReview(row._id, message);
     log(kind, `${who} — ERROR: ${message} — ${retryNote(attempts)}`);
     if (attempts >= AI_REVIEW_MAX_ATTEMPTS) await notifyBackend(kind, row._id, "error", attempts);
@@ -213,6 +280,8 @@ async function notifyFinishedImports(importIds: string[]): Promise<void> {
     }
     notifyRemaining.delete(importId);
     const record = await findCamperImport(importId);
+    // every review of the import is terminal: the job ended — its token goes (decision 50)
+    if (record && record.status !== "importing" && record.status !== "needsSignIn") await dropImportJobToken(importId);
     if (!record || record.status !== "completed") continue;
     const [total, errors] = await Promise.all([
       db.collection("participants").countDocuments({ importId }),
@@ -247,15 +316,17 @@ async function notifyFinishedImports(importIds: string[]): Promise<void> {
 async function pollOnce(): Promise<boolean> {
   await refreshActiveCamp(); // cheap — picks up a camp created by the API process within one poll
   return withCamp(activeCampId(), async () => {
+    // rows of imports waiting for the importer's new sign-in stay where they are
+    const paused = await listPausedImportIds();
     // phase 1 — Jev only, near-instant: its own batch so the slow cleanup never holds it back
-    const structure = await Promise.all([claimCampersForAiReview(BATCH), claimStaffForAiReview(BATCH)]);
+    const structure = await Promise.all([claimCampersForAiReview(BATCH, paused), claimStaffForAiReview(BATCH, paused)]);
     if (structure[0].length || structure[1].length) {
       log("jev", `structuring ${structure[0].length} camper(s) + ${structure[1].length} staff review(s)`);
       await Promise.all([...structure[0].map((row) => structureOne({ kind: "camper", row })), ...structure[1].map((row) => structureOne({ kind: "staff", row }))]);
       log("jev", `structured ${structure[0].length} camper(s) + ${structure[1].length} staff review(s)`);
     }
     // phase 2 — slow generative cleanup: separate batch over the already-structured records
-    const cleanupBatch = await Promise.all([claimCampersForCleanup(BATCH), claimStaffForCleanup(BATCH)]);
+    const cleanupBatch = await Promise.all([claimCampersForCleanup(BATCH, paused), claimStaffForCleanup(BATCH, paused)]);
     if (cleanupBatch[0].length || cleanupBatch[1].length) {
       log("cleanup", `cleaning ${cleanupBatch[0].length} camper(s) + ${cleanupBatch[1].length} staff review(s)`);
       await Promise.all([...cleanupBatch[0].map((row) => cleanupOne({ kind: "camper", row })), ...cleanupBatch[1].map((row) => cleanupOne({ kind: "staff", row }))]);

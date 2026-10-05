@@ -23,6 +23,7 @@ import { actingToken, campEditionId, coordinationToken } from "../services/actin
 import { coreClient } from "../services/ipalpha";
 import { PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
 import { hasHealthInfo, nameMatches, namesOf, pageOf, readHealth, readHealthMany } from "../services/people";
+import { registrationData, registrationExtras, registrationProfile } from "../services/coreRegistration";
 
 type Env = { Variables: AuthVariables };
 
@@ -436,8 +437,8 @@ staff.delete("/:id/vest/return", requireRole("admin", "staff"), requireVestHandl
 staff.use("/*", requireManager);
 
 /**
- * POST /api/staff/register { name, phone, ...camp ops } — a NEW team member
- * through core with the coordenação token: persons registration (adult) +
+ * POST /api/staff/register { name, phone, sex?, homeChurch?, school?, emergencyContact?, ...camp ops } — a NEW team member
+ * through core with the coordenação token: persons registration (adult, the optional person fields in it) +
  * `equipe` membership in the camp's edition, then the participant row.
  */
 staff.post("/register", async (c) => {
@@ -449,6 +450,8 @@ staff.post("/register", async (c) => {
   if (!phone) return fail(c, "PHONE_INVALID", "Informe um celular brasileiro válido com DDD: é por ele que a pessoa entra no app.");
   const result = await buildPatch(body);
   if (!("patch" in result)) return fail(c, result.code, result.message, result.status);
+  const extras = registrationExtras(body);
+  if (!extras.ok) return fail(c, extras.code, extras.message);
   const session = c.get("session");
   const personsToken = coordinationToken(session, PERSONS_RESOURCE);
   const projectsToken = coordinationToken(session, PROJECTS_RESOURCE);
@@ -457,7 +460,8 @@ staff.post("/register", async (c) => {
   if (!editionId) return fail(c, "EDITION_UNKNOWN", "A edição deste acampamento ainda não existe no IPAlpha.", 409);
   const full = await bedroomFullMessage(result.patch.bedroom ?? null, null);
   if (full) return fail(c, "BEDROOM_FULL", full, 409);
-  const reg = await coreClient().register(personsToken, { role: TEAM_ROLE, people: [{ name, phone }] });
+  const data = await registrationData(personsToken, extras.data, undefined);
+  const reg = await coreClient().register(personsToken, { role: TEAM_ROLE, people: [{ name, phone, ...registrationProfile(extras), ...(data ? { data } : {}) }] });
   const person = reg.people[0];
   if (!person) return fail(c, "REGISTRATION_FAILED", "O IPAlpha não confirmou o cadastro.", 502);
   if (await participantKind(person.personId)) return fail(c, "ALREADY_IN_CAMP", "Esta pessoa já está neste acampamento.", 409);

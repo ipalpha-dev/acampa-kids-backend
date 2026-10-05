@@ -9,7 +9,7 @@ import type { IpalphaConfig } from "../../config";
  *   auth-api           PAR / authorization_code / SMS relay v2 → per-role tokens
  *   projects-api       app client (projects:editions, projects:app-members,
  *                      projects:templates) + per-role tokens (memberships)
- *   persons-api        app client (persons:app-names: names, count) + per-role
+ *   persons-api        app client (persons:app-names: names, count, birthdays today) + per-role
  *                      tokens (people list, data/health, registrations)
  *   notifications-api  app client (notifications:send-template)
  *
@@ -178,12 +178,31 @@ export interface HealthList {
   options: { id: string; label: Record<string, string> | string; order: number; active: boolean }[];
 }
 
+/** Acampa's "F" | "M" → persons `sex` ('female' | 'male'); anything else is not sent (never guessed). */
+export function toCoreSex(v: unknown): "female" | "male" | undefined {
+  return v === "F" || v === "female" ? "female" : v === "M" || v === "male" ? "male" : undefined;
+}
+
+/**
+ * One person of persons `POST /registrations` (core `RegistrationPersonDto`): `sex` and `homeChurch` are profile
+ * fields written when sent; `data` carries blocks per kind (`document`, `school`, `emergencyContact`, `medical`,
+ * `phone`, `email`, `address`) — core writes only the kinds the target role collects.
+ */
+export interface RegistrationPerson {
+  name: string;
+  nickname?: string;
+  birthDate?: string;
+  sex?: "female" | "male";
+  homeChurch?: string;
+  data?: Record<string, unknown>;
+}
+
 /** persons `POST /registrations` (the client adds the project id) */
 export interface RegistrationInput {
   role: string;
-  responsible?: { name: string; nickname?: string; birthDate?: string; phone: string; data?: Record<string, unknown> };
-  children?: { name: string; nickname?: string; birthDate: string; data?: Record<string, unknown> }[];
-  people?: { name: string; nickname?: string; birthDate?: string; phone: string; data?: Record<string, unknown> }[];
+  responsible?: RegistrationPerson & { phone: string };
+  children?: (RegistrationPerson & { birthDate: string })[];
+  people?: (RegistrationPerson & { phone: string })[];
 }
 
 export interface RegistrationAnswer {
@@ -250,6 +269,11 @@ export interface IpalphaCoreClient {
   // ── persons-api (app client) ──
   /** names of project members, ≤ 200 ids per call (the caller pages) */
   names(personIds: string[]): Promise<PersonName[]>;
+  /**
+   * decision 51: ids of the project's live members whose birthday is today (America/Sao_Paulo; 02-29 on 02-28 of
+   * non-leap years) — with `editionId` that edition + project-wide. No dates, no names; one anonymized query log in core.
+   */
+  birthdaysToday(editionId?: string): Promise<string[]>;
   /** anonymized counts (app client — §12); never logged by core */
   count(input: { personIds?: string[]; editionId?: string; filters: { healthTags?: HealthTagFilter } }): Promise<CountAnswer>;
 
@@ -636,6 +660,11 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
         .map((x) => obj(x))
         .filter((x) => typeof x.personId === "string" && typeof x.name === "string")
         .map((x) => ({ personId: x.personId as string, name: x.name as string, nickname: str(x.nickname), sex: toSexCode(x.sex) }));
+    },
+
+    async birthdaysToday(editionId) {
+      const body = obj(await systemCall("people/birthdays-today", PERSONS_RESOURCE, SCOPES.appNames, "POST", `${cfg.personsApiUrl}/projects/${project()}/people/birthdays-today`, editionId ? { editionId } : {}));
+      return Array.isArray(body.personIds) ? body.personIds.filter((x): x is string => typeof x === "string" && x !== "") : [];
     },
 
     async count(input) {

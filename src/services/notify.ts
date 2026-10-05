@@ -1,5 +1,5 @@
 import { findBedroomById, listBedrooms } from "../models/bedrooms";
-import { listCampers } from "../models/campers";
+import { claimBirthdayNotice, clearStaleBirthdayNotices, listCampers, releaseBirthdayNotice } from "../models/campers";
 import { findTransportById } from "../models/transports";
 import { listRoles } from "../models/schedule";
 import { claimCheckinReminder, getSettings, staffAccessOpen } from "../models/settings";
@@ -8,7 +8,10 @@ import { findTeamById, listTeams } from "../models/teams";
 import { claimUserPhotosNotice, claimUserWelcome } from "../models/userCampState";
 import { transportLabel as transportLabelOf } from "../routes/transports";
 import { PREP_AUDIENCES, RESPONSIBLE_ROLE, TEAM_ROLE, type Bedroom, type CampEvent, type Camper, type CamperChangeLog, type DocAudience, type InstructionDoc, type Occurrence, type PrepAudience, type PrepSection, type RoomRole, type ScheduleRole, type Settings, type Staff, type Team } from "../types";
-import { saoPauloWallClock, saoPauloWallClockToIso } from "../utils";
+import { saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
+import { campPeriod } from "./camp";
+import { campEditionId } from "./acting";
+import { coreClient, ipalphaEnabled } from "./ipalpha";
 import { kidsOfResponsible, membersOf, responsiblesOf } from "./members";
 import { previewMessage, sendMessage, type SendInput } from "./messages";
 import { firstName, namesOf } from "./people";
@@ -36,8 +39,14 @@ import type { TemplateKey } from "../messages/templates";
  * helper roles and parent contacts always. Messages to the same person with
  * the same template inside NOTIFY_COALESCE_SECONDS collapse into the last one
  * (bulk edits never flood a phone). Delivery is best effort and never blocks
- * the write. Birthday notices need the kids' birth dates, which the app
- * client cannot read (no core seam) — they are off until core offers one.
+ * the write.
+ *
+ * Birthdays (decision 51): on a camp day at 07:45 São Paulo the whole team of
+ * the room of each kid whose birthday is today gets the birthday template.
+ * Core answers only the ids of today's birthdays (persons
+ * `POST /projects/:projectId/people/birthdays-today`) — Acampa never sees or
+ * stores a birth date. Once per kid per day: a marker on the kid's camp-ops
+ * row (`birthdayNoticeDay`) that only lives on its own day.
  */
 
 const COALESCE_MS = Number(process.env.NOTIFY_COALESCE_SECONDS ?? 20) * 1000;
@@ -154,7 +163,7 @@ export async function sendCheckinReminder(now = new Date()): Promise<void> {
   }
 }
 
-// ── birthdays (needs a core seam — see header) ──────────────────────────────
+// ── a kid's birthday on a camp day → the whole team of the room (decision 51) ─
 
 const BIRTHDAY_SMS_TIME = "07:45";
 
@@ -163,8 +172,48 @@ export function birthdaySmsDue(day: string): Date {
   return new Date(saoPauloWallClockToIso(saoPauloWallClock(day, BIRTHDAY_SMS_TIME)));
 }
 
-/** Off: the kids' birth dates live in persons-api and the app client cannot read them (no seam yet). */
-export async function sendBirthdayNotices(): Promise<void> {}
+/**
+ * Sends today's birthday messages (idempotent: hourly safety net + the 07:45
+ * timer both call it). Only on camp days, after 07:45, with the setting on and
+ * the kids' rooms published. Ids from core, names fetched at send time.
+ */
+export async function sendBirthdayNotices(now = new Date()): Promise<void> {
+  try {
+    const today = todayInSaoPaulo(now);
+    await clearStaleBirthdayNotices(today);
+    if (!ipalphaEnabled()) return;
+    const settings = await getSettings();
+    if (!settings.notifications.birthdays || settings.kidsRoomsDraft) return;
+    const period = await campPeriod();
+    if (!period.from || !period.until || today < period.from || today > period.until) return;
+    if (now < birthdaySmsDue(today)) return;
+    const editionId = await campEditionId();
+    const born = new Set(await coreClient().birthdaysToday(editionId ?? undefined));
+    if (born.size === 0) return;
+    const kids = (await listCampers()).filter((k) => k.bedroom && born.has(k._id));
+    if (kids.length === 0) return;
+    const staff = (await listStaff({ active: true })).filter((s) => s.bedroom);
+    const kidNames = await firstNames(kids.map((k) => k._id));
+    let helperSet: Promise<Set<string>> | null = null;
+    const helpers = () => (helperSet ??= helperIds());
+    for (const kid of kids) {
+      if (!(await claimBirthdayNotice(kid._id, today))) continue;
+      const room = await bedroomName(kid.bedroom);
+      const recipients: SendInput[] = [];
+      for (const s of staff.filter((x) => x.bedroom === kid.bedroom)) {
+        const input = { personId: s._id, variables: { kid: kidNames.get(kid._id) ?? "", room } };
+        if (await gateOpen({ key: "birthday", input, gate: "staff" }, settings, helpers)) recipients.push(input);
+      }
+      if (recipients.length === 0) continue;
+      const sent = await sendMessage("birthday", recipients, "birthday");
+      // nothing went out (core down / refused): lift the marker so the hourly run tries again today
+      if (!sent || sent.sent === 0) await releaseBirthdayNotice(kid._id, today);
+      console.log(`🎂 birthday of ${kid._id} today → ${sent?.sent ?? 0}/${recipients.length} team member(s) of room ${kid.bedroom}`);
+    }
+  } catch (err) {
+    console.error("notify: birthday notices failed", err instanceof Error ? err.message : err);
+  }
+}
 
 // ── a family edited a kid's health / notes ───────────────────────────────────
 

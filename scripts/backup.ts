@@ -12,7 +12,8 @@
  *   acampa-backup-YYYYMMDD-HHmmss.zip
  *   ├── backup.xlsx   every MongoDB collection, one tab per collection
  *   │                 (settings, categories, participants… all with their ids;
- *   │                 never `sessions` / `healthQueue` — see EXCLUDED below)
+ *   │                 never `sessions` nor an import job's sealed token —
+ *   │                 see EXCLUDED / `jobToken` below)
  *   └── imagens.zip   every file on the FILES_DIR volume (editor images,
  *                     album photos, thumbnails)
  *
@@ -59,7 +60,11 @@ export const BACKUP_VERSION = 3;
  */
 const FIRST_RESTORABLE_VERSION = 3;
 
-/** never dumped: session tokens (sealed IPAlpha tokens) and health in transit */
+/**
+ * never dumped: session tokens (sealed IPAlpha tokens), sign-ins in flight and
+ * `healthQueue` (removed by decision 50 — a leftover of older versions, its
+ * TTL index empties it within 7 days; never dumped meanwhile)
+ */
 const EXCLUDED = new Set(["sessions", "healthQueue", "ipalphaLoginStates"]);
 
 const LEGACY_SETTINGS_ID = "global";
@@ -544,7 +549,7 @@ function backupFromSheets(sheets: Map<string, string[][]>): Backup {
 // ----------------------------------------------------------------- commands --
 async function runBackup(camp?: string): Promise<void> {
   const db = await rawDb();
-  // sessions (sealed person tokens) and the transient health queue never leave the database
+  // sessions (sealed person tokens) never leave the database
   const names = (await db.listCollections().toArray()).map((c) => c.name).filter((n) => !EXCLUDED.has(n)).sort();
   const now = new Date();
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
@@ -561,6 +566,8 @@ async function runBackup(camp?: string): Promise<void> {
   for (const name of names) {
     const filter = camp && SCOPED.has(name) ? { campId: camp } : {};
     const docs = (await db.collection(name).find(filter).sort({ _id: 1 }).toArray()) as unknown as Doc[];
+    // an import job's sealed IPAlpha token (decision 50) never leaves the database
+    if (name === "camperImports") for (const doc of docs) delete doc.jobToken;
     if (name === "files") {
       // legacy deployments keep the bytes INSIDE Mongo — they travel in imagens.zip instead
       for (const doc of docs) {

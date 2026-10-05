@@ -14,7 +14,7 @@ import { serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 import { campInProgress, campPeriod } from "../services/camp";
 import { actingToken, campEditionId, coordinationContext, coordinationToken } from "../services/acting";
-import { addResponsible, healthToCore } from "../services/coreRegistration";
+import { addResponsible, healthToCore, registrationData, registrationExtras, registrationProfile } from "../services/coreRegistration";
 import { coreClient } from "../services/ipalpha";
 import { PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
 import { hasHealthInfo, healthCounts, matchesHealthTag, nameMatches, namesOf, pageOf, readHealth, readHealthMany, tagFilter, writeHealth } from "../services/people";
@@ -470,8 +470,10 @@ campers.use("/*", requireManager);
  * POST /api/campers/register — a NEW kid (and responsável) through core with
  * the coordenação token (§12): persons registration (responsible + child +
  * link), memberships `participante` (involved responsável) + `responsavel`
- * in the camp's edition, health (optional), then the participant row.
- * Body: `{ name, birthDate, responsible: { name, phone }, health?, ...camp ops }`.
+ * in the camp's edition, then the participant row. The kid's optional `sex`
+ * ("F" | "M"), `homeChurch`, `school {name, grade}`, `emergencyContact` and
+ * `health` travel IN the registration (core `RegistrationPersonDto`).
+ * Body: `{ name, birthDate, responsible: { name, phone }, sex?, homeChurch?, school?, emergencyContact?, health?, ...camp ops }`.
  */
 campers.post("/register", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
@@ -488,6 +490,8 @@ campers.post("/register", async (c) => {
   if (!("patch" in ops)) return fail(c, ops.code, ops.message);
   const health = buildHealthPatch((body.health as Record<string, unknown>) ?? {}, MEDICAL_EDITABLE_FIELDS);
   if (!("patch" in health)) return fail(c, health.code, health.message);
+  const extras = registrationExtras(body);
+  if (!extras.ok) return fail(c, extras.code, extras.message);
   const session = c.get("session");
   const personsToken = coordinationToken(session, PERSONS_RESOURCE);
   const projectsToken = coordinationToken(session, PROJECTS_RESOURCE);
@@ -501,7 +505,8 @@ campers.post("/register", async (c) => {
   if (bad) return fail(c, "CARETAKER_INVALID", bad, 409);
 
   const client = coreClient();
-  const reg = await client.register(personsToken, { role: PARTICIPANT_ROLE, responsible: { name: respName, phone: respPhone }, children: [{ name, birthDate }] });
+  const kidData = await registrationData(personsToken, extras.data, health.patch);
+  const reg = await client.register(personsToken, { role: PARTICIPANT_ROLE, responsible: { name: respName, phone: respPhone }, children: [{ name, birthDate, ...registrationProfile(extras), ...(kidData ? { data: kidData } : {}) }] });
   const child = reg.children[0];
   if (!reg.responsible || !child) return fail(c, "REGISTRATION_FAILED", "O IPAlpha não confirmou o cadastro.", 502);
   if (await participantKind(child.personId)) return fail(c, "ALREADY_IN_CAMP", "Esta pessoa já está neste acampamento.", 409);
@@ -513,7 +518,6 @@ campers.post("/register", async (c) => {
     involved: [{ personId: reg.responsible.personId, purpose: "responsible", kinds: [] }],
   });
   await client.addMembership(projectsToken, { personId: reg.responsible.personId, role: RESPONSIBLE_ROLE, editionId });
-  if (Object.keys(health.patch).length) await writeHealth(personsToken, child.personId, health.patch);
   const created = await insertCamper(child.personId, { ...EMPTY_CAMPER, ...data });
   publish("campers", "bedrooms");
   void notifyCamperChange(null, created);

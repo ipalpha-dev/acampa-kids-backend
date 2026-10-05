@@ -355,7 +355,11 @@ export interface CamperImportDictionaryEntry {
   kind: "column" | "text" | "boolean" | "date" | "bedroom" | "transportation" | "team" | "staff" | "category";
 }
 
-export type CamperImportStatus = "needs_mapping" | "analyzing" | "panic" | "review" | "ready" | "importing" | "completed" | "error";
+/**
+ * `needsSignIn` (decision 50): the background AI health pass paused because the importer's IPAlpha token was
+ * revoked / expired — the importer signs in again and calls `POST …/:id/resume`; then it is `completed` again.
+ */
+export type CamperImportStatus = "needs_mapping" | "analyzing" | "panic" | "review" | "ready" | "importing" | "completed" | "needsSignIn" | "error";
 export type CamperImportReviewKind = "leader" | "date" | "guardianName" | "phone" | "cpf" | "email" | "duplicate";
 
 export interface CamperImportReviewItem {

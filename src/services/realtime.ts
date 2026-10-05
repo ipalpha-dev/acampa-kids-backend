@@ -126,6 +126,18 @@ export function emitAiReviewed(kind: AiReviewedKind, id: string, status: AiRevie
   for (const client of clients) if (client.campId === campId) safeSend(client, payload);
 }
 
+/**
+ * An import's background health pass paused for a new sign-in (decision 50):
+ * only the importer's sockets of that camp hear it — the import screen offers
+ * "sign in again and resume". Ids only.
+ */
+export function emitImportNeedsSignIn(importId: string, personId: string, subject: "camper" | "staff"): void {
+  if (clients.size === 0) return;
+  const campId = currentCampId();
+  const payload = JSON.stringify({ type: "import-needs-sign-in", at: new Date().toISOString(), data: { importId, subject } });
+  for (const client of clients) if (client.campId === campId && client.personId === personId) safeSend(client, payload);
+}
+
 // ── staff access window: evict the ordinary team when it closes ─────────────
 
 /**

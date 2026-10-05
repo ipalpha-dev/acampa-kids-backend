@@ -5,8 +5,8 @@ import { getDb } from "../db";
  * Read-only MongoDB tools for the camp assistant.
  *
  * Security rules:
- * - only explicit application collections are visible (never `sessions` or
- *   the transient `healthQueue`)
+ * - only explicit application collections are visible (never `sessions`);
+ *   the import jobs' sealed IPAlpha token (`jobToken`) is stripped
  * - Acampa's Mongo holds camp operations only (CONTRACTS §15): no names,
  *   contacts or health — those live in IPAlpha and are not reachable here
  * - credentials, QR secrets, binary files and face embeddings are stripped
@@ -38,7 +38,7 @@ const COLLECTIONS: Record<string, AssistantCollection> = {
   files: { description: "Metadados dos arquivos enviados; o conteúdo binário não é disponibilizado.", hiddenFields: ["data"] },
   camperChangeLog: { description: "Histórico de alterações nas fichas dos acampantes." },
   camperLookups: { description: "Auditoria de leituras emergenciais de crachás." },
-  camperImports: { description: "Processos de importação de planilhas de acampantes e equipe." },
+  camperImports: { description: "Processos de importação de planilhas de acampantes e equipe.", hiddenFields: ["jobToken"] },
   camperImportDictionary: { description: "Dicionário aprendido durante importações de planilhas." },
   ai_usage: { description: "Métricas de uso das funções de IA." },
   sms_usage: { description: "Métricas de envio de mensagens (modelo e quantidade)." },

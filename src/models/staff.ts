@@ -89,14 +89,23 @@ async function claim(filter: Record<string, unknown>, limit: number): Promise<St
   return out;
 }
 
+/** rows of imports paused for a new sign-in (decision 50) are left alone */
+const notPaused = (paused: readonly string[]) => (paused.length ? { importId: { $nin: [...paused] } } : {});
+
 /** Phase 1 claim — the fast structuring pass; skips rows already structured. */
-export async function claimStaffForAiReview(limit: number): Promise<Staff[]> {
-  return claim({ $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(new Date())], aiReviewStructured: { $ne: true } }, limit);
+export async function claimStaffForAiReview(limit: number, paused: readonly string[] = []): Promise<Staff[]> {
+  return claim({ $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(new Date())], aiReviewStructured: { $ne: true }, ...notPaused(paused) }, limit);
 }
 
 /** Phase 2 claim — the slow generative cleanup. */
-export async function claimStaffForCleanup(limit: number): Promise<Staff[]> {
-  return claim({ aiReviewStructured: true, $or: [{ aiReviewStatus: { $in: ["pending", "structured"] } }, aiReviewDueFilter(new Date())] }, limit);
+export async function claimStaffForCleanup(limit: number, paused: readonly string[] = []): Promise<Staff[]> {
+  return claim({ aiReviewStructured: true, $or: [{ aiReviewStatus: { $in: ["pending", "structured"] } }, aiReviewDueFilter(new Date())], ...notPaused(paused) }, limit);
+}
+
+/** Puts a claimed row back (its import paused for a new sign-in): no attempt counted, picked up again on resume. */
+export async function releaseStaffReview(personId: string, structured: boolean): Promise<void> {
+  const db = await getDb();
+  await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId, aiReviewStatus: "processing" }, { $set: { aiReviewStatus: structured ? "structured" : "pending", aiReviewStartedAt: null, updatedAt: new Date() } });
 }
 
 async function failStaffReview(personId: string, error: string): Promise<number> {

@@ -11,7 +11,6 @@ import { ensureCamperIndexes } from "./models/campers";
 import { ensureParticipantIndexes } from "./models/participants";
 import { ensureUserCampStateIndexes } from "./models/userCampState";
 import { ensureSessionIndexes } from "./services/session";
-import { ensureHealthQueueIndexes } from "./models/healthQueue";
 import { ensurePrepIndexes } from "./models/preparation";
 import { ensureInstructionIndexes } from "./models/instructions";
 import { ensureOccurrenceIndexes } from "./models/occurrences";
@@ -44,7 +43,6 @@ console.log(`🏕️  active camp: "${activeCamp().label}" (${activeCampId()})`)
 await ensureSessionIndexes();
 await ensureUserCampStateIndexes();
 await ensureParticipantIndexes();
-await ensureHealthQueueIndexes();
 await ensureLoginStateIndexes(); // IPAlpha sign-ins in flight (TTL 10 min)
 await ensureCamperLookupIndexes();
 await ensureCamperImportIndexes();

@@ -191,7 +191,7 @@ export function applyStaffDelta(preview: Record<string,unknown>[], reviews: Staf
 }
 
 /** One preview row → camp ops (Acampa), the person (persons-api), health (persons-api `medical`) and the helper roles (projects-api). */
-export function staffDataFromPreview(row: Record<string, unknown>, importId: string, draft = false): { ops: StaffData; person: { name: string; phone: string | null; email: string | null; birthDate: string | null; data: Record<string, unknown> }; health: Partial<HealthInfo>; roles: string[] } {
+export function staffDataFromPreview(row: Record<string, unknown>, importId: string, draft = false): { ops: StaffData; person: { name: string; phone: string | null; email: string | null; birthDate: string | null; sex: CamperSex | null; data: Record<string, unknown> }; health: Partial<HealthInfo>; roles: string[] } {
   const docs = documentsOf({ text: String(row.document ?? "") });
   return {
     ops: {
@@ -215,6 +215,8 @@ export function staffDataFromPreview(row: Record<string, unknown>, importId: str
       phone: (row.phone as string | null) ?? null,
       email: typeof row.email === "string" && row.email ? row.email : null,
       birthDate: typeof row.birthDate === "string" && row.birthDate ? row.birthDate : null,
+      // only the sheet's explicit sex column — the room group is a camp-ops guess and never goes to core
+      sex: row.probableGender === "F" || row.probableGender === "M" ? row.probableGender : null,
       data: docs.length ? { document: docs } : {},
     },
     health: {
@@ -255,7 +257,7 @@ export async function insertImportStaff(rows: Record<string, unknown>[], importI
       continue;
     }
     try {
-      const { personId, created } = await registerAdult(ctx.tokens, { name: data.person.name, phone: data.person.phone, email: data.person.email, birthDate: data.person.birthDate, roles: data.roles, editionId: ctx.editionId, data: data.person.data, health: data.health });
+      const { personId, created } = await registerAdult(ctx.tokens, { name: data.person.name, phone: data.person.phone, email: data.person.email, birthDate: data.person.birthDate, sex: data.person.sex, roles: data.roles, editionId: ctx.editionId, data: data.person.data, health: data.health });
       eligiblePhones++;
       if (created) loginsCreated++;
       const existing = (await listStaff({ includeDraft: true, personIds: [personId] }))[0];

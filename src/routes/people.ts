@@ -1,19 +1,14 @@
 import { Hono, type Context } from "hono";
 import { requireAuth, type AuthVariables } from "../middleware/auth";
-import { requireAdmin, requireManager } from "../middleware/roles";
+import { requireManager } from "../middleware/roles";
 import { listCampers } from "../models/campers";
 import { listStaff } from "../models/staff";
 import { getSettings } from "../models/settings";
-import { countHealthQueue, dropHealthQueueItem, listHealthQueue } from "../models/healthQueue";
-import { actingToken, coordinationToken } from "../services/acting";
+import { actingToken } from "../services/acting";
 import { coreClient } from "../services/ipalpha";
 import { NAMES_BATCH_MAX, PERSONS_RESOURCE } from "../services/ipalpha/coreClient";
-import { mergeHealth, namesOf, readHealth, writeHealth } from "../services/people";
-import { healthToCore } from "../services/coreRegistration";
-import { IpalphaRejected } from "../services/ipalpha/coreClient";
-import { EMPTY_HEALTH } from "../types";
+import { namesOf } from "../services/people";
 import { camperVisibility, resolveScope, staffVisibility } from "../services/scope";
-import { publish } from "../services/realtime";
 import { PARTICIPANT_ROLE, RESPONSIBLE_ROLE, TEAM_ROLE } from "../types";
 
 /**
@@ -24,8 +19,9 @@ import { PARTICIPANT_ROLE, RESPONSIBLE_ROLE, TEAM_ROLE } from "../types";
  *   GET  /health-lists                   the church health option lists (labels for allergies / conditions)
  *   GET  /:personId/data/:kind           one data kind with the ACTING role token (persons-api role rules decide; logged)
  *   PATCH /:personId/data/:kind          write one data kind with the acting token (managers)
- *   GET  /health-queue                   how many AI health results wait to be written (coordenação)
- *   POST /health-queue/flush             write them to persons-api with the coordenação token
+ *
+ * (The AI health of imports is written by the worker with the importer's token —
+ * decision 50; there is no health queue in Acampa.)
  */
 const people = new Hono<{ Variables: AuthVariables }>();
 
@@ -69,37 +65,6 @@ people.get("/search", requireManager, async (c) => {
 });
 
 people.get("/health-lists", async (c) => c.json({ lists: await coreClient().healthLists(actingToken(c, PERSONS_RESOURCE)) }));
-
-people.get("/health-queue", requireAdmin, async (c) => c.json({ pending: await countHealthQueue() }));
-
-/**
- * Writes the pending AI health results with the coordenação token: Acampa's
- * import option ids are mapped onto the church health lists, then merged over
- * the person's current block (never erasing what is there).
- */
-people.post("/health-queue/flush", requireAdmin, async (c) => {
-  const token = coordinationToken(c.get("session"), PERSONS_RESOURCE);
-  if (!token) return fail(c, "COORDINATION_REQUIRED", "Só a coordenação grava estas informações.", 403);
-  let written = 0;
-  let refused = 0;
-  const lists = await coreClient().healthLists(token);
-  for (const item of await listHealthQueue()) {
-    try {
-      const current = (await readHealth(token, item.personId)) ?? { ...EMPTY_HEALTH };
-      const patch = mergeHealth(current, await healthToCore(token, item.patch, lists));
-      if (Object.keys(patch).length) await writeHealth(token, item.personId, patch, current);
-      written++;
-      await dropHealthQueueItem(item.personId);
-    } catch (err) {
-      if (!(err instanceof IpalphaRejected) || err.status === 401) throw err;
-      // core refused this person's write (role rules / validation): dropped, counted
-      refused++;
-      await dropHealthQueueItem(item.personId);
-    }
-  }
-  if (written) publish("campers", "staff");
-  return c.json({ written, refused, pending: await countHealthQueue() });
-});
 
 people.get("/:personId/data/:kind", async (c) => {
   const { personId, kind } = c.req.param();

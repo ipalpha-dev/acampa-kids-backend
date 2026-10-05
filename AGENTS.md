@@ -26,13 +26,17 @@ programme, documents, scores, photos. Details: README → "Identity, people and 
 Do NOT:
 
 - store, cache or log tokens, codes, phones, e-mails, names, birth dates, documents or health
-  (the only transit exception is `healthQueue`, written by the worker and flushed by the
-  coordenação; logs carry ids and counts only);
+  (logs carry ids and counts only). The only stored tokens are SEALED (`SESSION_TOKEN_KEY`):
+  the session's role tokens and a running import job's importer token (decision 50, deleted
+  when the job ends). AI health goes straight to persons-api — never a health queue;
 - send a role token, a phone or health to the browser outside the role's own reads;
 - put person data in the realtime snapshot (camp-ops records only);
 - add a local SMS / e-mail / OTP path — answer `503 IPALPHA_UNAVAILABLE` when core is down;
 - make camp activation wait on projects-api (edition rollover is best effort);
-- guess sex or any person attribute with AI — sex comes from core with the name (decision 39).
+- guess sex or any person attribute with AI — sex comes from core with the name (decision 39);
+  registrations send `sex` only when the sheet / form said it;
+- compute or keep birthdays — core answers today's ids (`birthdays-today`, decision 51); the
+  `birthdayNoticeDay` marker only lives on its own day.
 
 ## Copy
 

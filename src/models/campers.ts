@@ -153,14 +153,23 @@ export async function listCamperChanges(personId: string): Promise<CamperChangeL
   return docs.map((d) => ({ ...(d as unknown as CamperChangeLog), _id: String(d._id) }));
 }
 
+/** rows of imports paused for a new sign-in (decision 50) are left alone */
+const notPaused = (paused: readonly string[]) => (paused.length ? { importId: { $nin: [...paused] } } : {});
+
 /** Phase 1 claim — the fast structuring pass: fresh pendings plus due error retries (not yet structured). */
-export async function claimCampersForAiReview(limit = 15): Promise<Camper[]> {
-  return claim({ $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(new Date())], aiReviewStructured: { $ne: true } }, limit);
+export async function claimCampersForAiReview(limit = 15, paused: readonly string[] = []): Promise<Camper[]> {
+  return claim({ $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(new Date())], aiReviewStructured: { $ne: true }, ...notPaused(paused) }, limit);
 }
 
 /** Phase 2 claim — the slow generative cleanup: rows the structuring pass already handled. */
-export async function claimCampersForCleanup(limit = 15): Promise<Camper[]> {
-  return claim({ aiReviewStructured: true, $or: [{ aiReviewStatus: { $in: ["pending", "structured"] } }, aiReviewDueFilter(new Date())] }, limit);
+export async function claimCampersForCleanup(limit = 15, paused: readonly string[] = []): Promise<Camper[]> {
+  return claim({ aiReviewStructured: true, $or: [{ aiReviewStatus: { $in: ["pending", "structured"] } }, aiReviewDueFilter(new Date())], ...notPaused(paused) }, limit);
+}
+
+/** Puts a claimed row back (its import paused for a new sign-in): no attempt counted, picked up again on resume. */
+export async function releaseCamperReview(personId: string, structured: boolean): Promise<void> {
+  const db = await getDb();
+  await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId, aiReviewStatus: "processing" }, { $set: { aiReviewStatus: structured ? "structured" : "pending", aiReviewStartedAt: null, updatedAt: new Date() } });
 }
 
 async function claim(filter: Record<string, unknown>, limit: number): Promise<Camper[]> {
@@ -190,7 +199,7 @@ export async function requeueStaleAiReviews(staleMs = 10 * 60_000): Promise<numb
   return res.modifiedCount;
 }
 
-/** Finishes phase 1: marks the row "structured" (the health result went to the health queue). */
+/** Finishes phase 1: marks the row "structured" (the health result was written to persons-api). */
 export async function finishCamperStructure(personId: string, error = ""): Promise<Camper | null> {
   if (!error) return updateCamper(personId, { aiReviewStatus: "structured", aiReviewStructured: true, aiReviewError: "", aiReviewNextRetryAt: null });
   return failCamperReview(personId, error);
@@ -240,6 +249,22 @@ export async function claimBirthdayNotice(personId: string, day: string): Promis
   const db = await getDb();
   const res = await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId, birthdayNoticeDay: { $ne: day } }, { $set: { birthdayNoticeDay: day } });
   return res.modifiedCount === 1;
+}
+
+/** A birthday message that could not go out: the marker is lifted so the next run tries again. */
+export async function releaseBirthdayNotice(personId: string, day: string): Promise<void> {
+  const db = await getDb();
+  await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId, birthdayNoticeDay: day }, { $unset: { birthdayNoticeDay: "" } });
+}
+
+/**
+ * Lifts every marker of another day: a marker only lives on its own day, so
+ * Acampa never keeps a trace of when a kid's birthday is (no birth date at rest).
+ */
+export async function clearStaleBirthdayNotices(today: string): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection(PARTICIPANTS).updateMany({ ...KIND, birthdayNoticeDay: { $exists: true, $nin: [today, null] } }, { $unset: { birthdayNoticeDay: "" } });
+  return res.modifiedCount;
 }
 
 export async function ensureCamperIndexes(): Promise<void> {

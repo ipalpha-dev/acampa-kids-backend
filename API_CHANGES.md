@@ -51,7 +51,7 @@ Check-in stamps: `{at, byPersonId, byRole: CoreRole, note?}`.
 | `GET /checkin/log`, `/:id/checkin/log` | `{log:[{id, who, personId, kind, action, at, byPersonId, byRole, note}]}`. |
 | `GET /:id/changes` | `{changes:[{id, personId, at, byPersonId, byRole, medical, fields}]}` (no before/after values). |
 | `PUT /:id/parent`, `PUT /:id/health` | same field names; health written to persons-api; answer `{camper: record + health, changed}`. Option ids = `GET /api/people/health-lists`. |
-| **NEW** `POST /register` | coordenação: `{name, birthDate, responsible:{name, phone}, health?, …ops}` → 201 `{camper, responsible:{personId, created}}`. |
+| **NEW** `POST /register` | coordenação: `{name, birthDate, responsible:{name, phone}, sex? ("F"\|"M", only when the family said it), homeChurch? (≤ 120), school? {name, grade}, emergencyContact? ({name, phone, relation?} or the free text "Maria (mãe) 11 9…"), health?, …ops}` → 201 `{camper, responsible:{personId, created}}`. All person fields travel in core's registration (`sex`, `homeChurch`, `data.school/emergencyContact/medical`). 400 `SEX_INVALID` \| `HOME_CHURCH_INVALID` \| `EMERGENCY_CONTACT_INVALID`. |
 | **NEW** `POST /:id/responsibles` | coordenação: `{name, phone, email?}` → 201 `{responsible:{personId, name}, linked}` — a second responsável for the SAME kid (persons `/links`, decision 38). |
 | `POST /` | `{personId, …ops}` (an existing IPAlpha person). |
 | `PUT /:id` | ops only: `team, transportation, bed, bedroom, caretakerId, invitedBy, qrToken, generalNotes, bedroomPreference`. |
@@ -69,7 +69,7 @@ read it with `GET /api/people/:personId/data/phone` (core's role rules decide).
 |---|---|
 | `GET /?active&cursor&limit&q` | **paged** `{items, nextCursor, total}`; item + `name, nickname, sex` (+ `hasHealth` for managers). |
 | `GET /:id` | `{staff: record + name, nickname, health? (self / managers)}`. |
-| **NEW** `POST /register` | coordenação: `{name, phone, …ops}` → registration + `equipe` membership. |
+| **NEW** `POST /register` | coordenação: `{name, phone, sex?, homeChurch?, school?, emergencyContact?, …ops}` → registration (person fields in it) + `equipe` membership. Same 400 codes as campers. |
 | `POST /` | `{personId, …ops}`. `PUT /:id`: `active, team, transportation, bedroom, roomRole, generalNotes`. `DELETE` → `{success, membershipRemoved}`. |
 
 ## NEW `/api/people`
@@ -77,9 +77,9 @@ read it with `GET /api/people/:personId/data/phone` (core's role rules decide).
 `POST /names {personIds≤200}` → `{items:[{personId, name, nickname, sex}]}` (only people the viewer
 may know) · `GET /search?role=participante|equipe|responsavel&q&cursor` (managers) ·
 `GET /health-lists` · `GET|PATCH /:personId/data/:kind` (phone, email, document, address,
-medical, school, emergencyContact, churchRelationship — acting role token) ·
-`GET /health-queue` `{pending}` + `POST /health-queue/flush` `{written, refused, pending}`
-(coordenação; call after `ai-review-done` events).
+medical, school, emergencyContact, churchRelationship — acting role token).
+**REMOVED (decision 50):** `GET /health-queue` and `POST /health-queue/flush` (now 404) — the
+import worker writes AI health to persons-api itself; drop the flush call after `ai-review-done`.
 
 ## Other routes
 
@@ -92,6 +92,36 @@ medical, school, emergencyContact, churchRelationship — acting role token) ·
 - Admins: `GET /api/admins` → `{admins:[{personId, name, superAdmin}], appUrl}`; `POST /api/admins` and `/handover` removed (roles are granted in Mordomia).
 - Camps: `POST /:id/delete/request` → `{success, expiresAt, delivery:"sms"}` (no phone); `/:id/campers` rows `{id, name, sex (core), bedroom, team, matched}`; `/:id/staff` rows `{id, name, roomRole, bedroom, team, matched}`; import results may carry `membershipsFailed`.
 - Imports: `/camper-imports/:id/leaders` and `/staff-imports/:id/members` → `{staff:{id, name}}`; `apply` needs the coordenação role; after apply `rows`/`preview` are emptied.
+
+## Imports — AI health with the importer's token (decision 50)
+
+At Apply the backend seals the importer's coordenação token on the job; the background
+worker writes the AI-structured health straight to persons-api with it (merged, never
+erasing) and the token is deleted when the job ends. Nothing about health is kept in Acampa.
+
+- Import record (`GET /api/camper-imports/:id`, every import answer of both routers) gains
+  `needsSignIn: boolean` and `pausedAt: string | null`.
+- Job statuses: `needs_mapping | analyzing | panic | review | ready | importing | completed |
+  error` + **NEW `needsSignIn`** — the importer's IPAlpha sign-in was revoked / expired while
+  the AI health pass was running; it is paused (nothing lost, rows wait). After Apply, a job
+  may be `needsSignIn` instead of `completed`.
+- **NEW** `GET /api/camper-imports/needs-sign-in` · `GET /api/staff-imports/needs-sign-in` →
+  `{imports:[{id, fileName, pausedAt}]}` — the paused jobs **I** started (show "Entre de novo
+  para continuar a importação" after login).
+- **NEW** `POST /api/camper-imports/:id/resume` · `POST /api/staff-imports/:id/resume` (empty
+  body; only the person who started the import, signed in as coordenação) → 200 `{import}`
+  (status `completed` again; the worker continues). Errors: 404 `IMPORT_NOT_FOUND` (also the
+  other router's id), 409 `IMPORT_NOT_PAUSED`, 403 `IMPORT_NOT_YOURS` \| `COORDINATION_REQUIRED`.
+- **NEW realtime event** (only to the importer's sockets): `{type:"import-needs-sign-in",
+  at, data:{importId, subject:"camper"|"staff"}}`. Typical flow: event / list → the importer
+  signs in again (new session) → `POST …/:id/resume`.
+
+## Birthday messages (decision 51)
+
+`settings.notifications.birthdays` works again: on camp days at 07:45 (São Paulo) the team
+of the room of each kid whose birthday is today gets the `acampa-birthday` template
+(`{name}`, `{kid}` first name, `{room}`), once per kid per day. No new route; core answers
+only the ids of today's birthdays — no birth date ever reaches Acampa.
 - Bedrooms `apply/preview`: `messages:[{staffId, messages:[{key, variables}], text}]`.
 - Cleanup: staff keep groups are only `busHelpers`, `parentContacts`.
 - Removed: `POST /api/ai/guess-sex` (sex comes from core). Bedrooms `apply` checks the wing against the sex read from core.
