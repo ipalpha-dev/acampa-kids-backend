@@ -212,6 +212,26 @@ export interface RegistrationAnswer {
   people: { personId: string; created: boolean }[];
 }
 
+/** persons-api link request (CONTRACTS §25, decision 80) — names come only on the family's own read, never stored */
+export interface LinkRequest {
+  id: string;
+  childId: string;
+  proposedResponsibleId: string;
+  /** text snapshot of the project name when it was proposed (decision 79) */
+  projectName: string;
+  status: "pending" | "accepted" | "declined" | "expired" | "cancelled";
+  createdAt: string | null;
+  expiresAt: string | null;
+  child: LinkRequestPerson | null;
+  proposedResponsible: LinkRequestPerson | null;
+}
+
+export interface LinkRequestPerson {
+  name: string;
+  nickname: string | null;
+  sex: "female" | "male" | null;
+}
+
 export interface MembershipInput {
   personId: string;
   role: string;
@@ -355,6 +375,18 @@ export interface IpalphaCoreClient {
    */
   healthFlags(token: string, personIds: string[]): Promise<Map<string, boolean>>;
 
+  // ── persons-api link requests (§25, decision 80) ──
+  /**
+   * `POST /projects/:projectId/link-requests` with a token whose role has canRegister for the child's role (Acampa: the
+   * coordenação). Nothing is linked or shared: a current responsible of the child accepts or declines (30 days).
+   * 409 alreadyLinked | requestPending | noCurrentResponsible; 400 notAMinor | missingBirthDate; 403 noGrant | outsideWindow | cannotLinkSelf.
+   */
+  proposeLinkRequest(token: string, input: { childId: string; responsibleId: string }): Promise<LinkRequest>;
+  /** `GET /me/link-requests` with the responsável's token: pending requests for the children they are responsible for */
+  myLinkRequests(token: string): Promise<LinkRequest[]>;
+  /** `POST /me/link-requests/:id/accept|decline` — any ONE current responsible of the child (decision 83) */
+  decideLinkRequest(token: string, id: string, decision: "accept" | "decline"): Promise<LinkRequest>;
+
   // ── persons-api imports (§20, the importer's per-role token) ──
   /** `POST /projects/:projectId/imports` multipart: `file` + `data` JSON `{editionId?, targets, appFields}` → `{importId, status}` */
   createImport(token: string, input: { file: Blob; fileName: string; editionId?: string; targets: Record<string, ImportTarget>; appFields: ImportAppField[] }): Promise<{ importId: string; status: string }>;
@@ -381,6 +413,35 @@ export interface IpalphaCoreClient {
 
   // ── notifications-api (app client) ──
   sendTemplate(input: { templateSlug: string; recipients: MessageRecipient[]; editionId?: string }): Promise<{ personId: string; status: MessageStatus }[]>;
+}
+
+const LINK_REQUEST_STATUSES = new Set<LinkRequest["status"]>(["pending", "accepted", "declined", "expired", "cancelled"]);
+
+function toLinkRequestPerson(v: unknown): LinkRequestPerson | null {
+  const o = obj(v);
+  const name = str(o.name);
+  if (!name) return null;
+  return { name, nickname: str(o.nickname), sex: o.sex === "female" || o.sex === "male" ? o.sex : null };
+}
+
+function toLinkRequest(v: unknown): LinkRequest | null {
+  const o = obj(v);
+  const id = str(o.id);
+  const childId = str(o.childId);
+  const proposedResponsibleId = str(o.proposedResponsibleId);
+  if (!id || !childId || !proposedResponsibleId) return null;
+  const status = LINK_REQUEST_STATUSES.has(o.status as LinkRequest["status"]) ? (o.status as LinkRequest["status"]) : "pending";
+  return {
+    id,
+    childId,
+    proposedResponsibleId,
+    projectName: str(o.projectName) ?? "",
+    status,
+    createdAt: str(o.createdAt),
+    expiresAt: str(o.expiresAt),
+    child: toLinkRequestPerson(o.child),
+    proposedResponsible: toLinkRequestPerson(o.proposedResponsible),
+  };
 }
 
 export interface CoreClientDeps {
@@ -846,6 +907,25 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
         if (typeof o.personId === "string") out.set(o.personId, o.hasHealthInfo === true);
       }
       return out;
+    },
+
+    async proposeLinkRequest(token, input) {
+      const body = await roleCall("link-requests/create", token, "POST", `${cfg.personsApiUrl}/projects/${project()}/link-requests`, input);
+      const request = toLinkRequest(body);
+      if (!request) throw new IpalphaUnavailable("link-requests/create: no id");
+      return request;
+    },
+
+    async myLinkRequests(token) {
+      const body = await roleCall("link-requests/mine", token, "GET", `${cfg.personsApiUrl}/me/link-requests`);
+      return (Array.isArray(body) ? body : []).map(toLinkRequest).filter((r): r is LinkRequest => r !== null);
+    },
+
+    async decideLinkRequest(token, id, decision) {
+      const body = obj(await roleCall(`link-requests/${decision}`, token, "POST", `${cfg.personsApiUrl}/me/link-requests/${encodeURIComponent(id)}/${decision}`, {}));
+      const request = toLinkRequest(body.request);
+      if (!request) throw new IpalphaUnavailable(`link-requests/${decision}: no request`);
+      return request;
     },
 
     async createImport(token, { file, fileName, editionId, targets, appFields }) {

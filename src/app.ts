@@ -32,6 +32,7 @@ import wizardRoutes from "./routes/wizard";
 import campRoutes from "./routes/camps";
 import importRoutes from "./routes/imports";
 import importConflictRoutes from "./routes/importConflicts";
+import linkRequestRoutes from "./routes/linkRequests";
 import dispatchWebhookRoutes from "./routes/dispatchWebhook";
 
 /**
@@ -76,6 +77,8 @@ export function createApp(opts: { logRequests?: boolean; bootGate?: boolean } = 
   app.route("/api/imports", importRoutes);
   // decision 78: import values a manual edit kept aside, decided on the campers / team page
   app.route("/api/import-conflicts", importConflictRoutes);
+  // another responsável: the coordenação proposes, the family accepts (decision 80, §25)
+  app.route("/api/link-requests", linkRequestRoutes);
   // dispatch app-channel fallback: signed deliveries when the socket is down (§21/§22 — HMAC, no session)
   app.route("/api/dispatch", dispatchWebhookRoutes);
   app.route("/api/settings", settingsRoutes);

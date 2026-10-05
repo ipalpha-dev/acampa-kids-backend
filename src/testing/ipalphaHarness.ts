@@ -102,6 +102,8 @@ export interface FakeWorld {
   templates: Map<string, Record<string, unknown>>;
   messages: { slug: string; recipients: { personId: string; variables: Record<string, string> }[] }[];
   links: { subjectId: string; agentId: string }[];
+  /** persons-api link requests (§25) */
+  linkRequests: { id: string; childId: string; proposedResponsibleId: string; requestedBy: string; status: string; decidedBy?: string }[];
   /** bearer tokens core refuses with 401 (revoked mid-session) */
   revoked: Set<string>;
   /** person ids persons-api answers as "birthday today" (decision 51) */
@@ -233,6 +235,15 @@ function bearer(call: FakeCall): string {
   return (call.headers.get("authorization") ?? "").replace(/^Bearer /, "");
 }
 
+/** the claims of the caller's (test-signed) token — the fake trusts them, like core after verifying */
+function claimsOf(call: FakeCall): Record<string, unknown> {
+  try {
+    return JSON.parse(Buffer.from(bearer(call).split(".")[1] ?? "", "base64url").toString("utf8")) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Wires the default handlers of every core route Acampa calls, answering from
  * `world`. Individual tests override a route with `core.on(...)`.
@@ -316,6 +327,46 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     world.links.push(body);
     return json({ id: `link-${world.links.length}`, basis: "minor", status: "active" }, 201);
   });
+  // §25 link requests: canRegister (coordenação here) proposes; one current responsible decides
+  core.on(`POST ${P}/link-requests`, (call) => {
+    if (refused(call)) return json({ reason: "invalidToken" }, 401);
+    const claims = claimsOf(call);
+    const { childId, responsibleId } = call.json as { childId: string; responsibleId: string };
+    if (claims.projectRole !== "coordenacao") return json({ reason: "noGrant" }, 403);
+    if (responsibleId === claims.sub || childId === claims.sub) return json({ reason: "cannotLinkSelf" }, 403);
+    if (!world.memberships.some((m) => m.personId === childId)) return json({ reason: "notMember" }, 403);
+    if (world.links.some((l) => l.subjectId === childId && l.agentId === responsibleId)) return json({ reason: "alreadyLinked" }, 409);
+    if (world.linkRequests.some((r) => r.childId === childId && r.proposedResponsibleId === responsibleId && r.status === "pending")) return json({ reason: "requestPending" }, 409);
+    if (!world.links.some((l) => l.subjectId === childId)) return json({ reason: "noCurrentResponsible" }, 409);
+    const request = { id: `lr-${world.linkRequests.length + 1}`, childId, proposedResponsibleId: responsibleId, requestedBy: String(claims.sub), status: "pending" };
+    world.linkRequests.push(request);
+    return json({ ...request, projectId: TEST_PROJECT, projectName: "Acampa Kids", expiresAt: new Date(Date.now() + 30 * 86400_000).toISOString() }, 201);
+  });
+  core.on("GET /me/link-requests", (call) => {
+    if (refused(call)) return json({ reason: "invalidToken" }, 401);
+    const sub = String(claimsOf(call).sub);
+    const kids = new Set(world.links.filter((l) => l.agentId === sub).map((l) => l.subjectId));
+    const person = (id: string) => (world.names.has(id) ? { id, name: world.names.get(id), ...(world.sex.has(id) ? { sex: world.sex.get(id) } : {}) } : undefined);
+    return json(
+      world.linkRequests
+        .filter((r) => r.status === "pending" && kids.has(r.childId))
+        .map((r) => ({ ...r, projectId: TEST_PROJECT, projectName: "Acampa Kids", expiresAt: new Date(Date.now() + 86400_000).toISOString(), child: person(r.childId), proposedResponsible: person(r.proposedResponsibleId) })),
+    );
+  });
+  core.on("POST /me/link-requests/:id/:decision", (call) => {
+    if (refused(call)) return json({ reason: "invalidToken" }, 401);
+    const [, , , id, decision] = call.path.split("/");
+    const sub = String(claimsOf(call).sub);
+    const r = world.linkRequests.find((x) => x.id === id);
+    if (!r) return json({ reason: "linkRequestNotFound" }, 404);
+    if (r.proposedResponsibleId === sub) return json({ reason: "cannotLinkSelf" }, 403);
+    if (!world.links.some((l) => l.subjectId === r.childId && l.agentId === sub)) return json({ reason: "notResponsible" }, 403);
+    if (r.status !== "pending") return json({ reason: "requestNotPending", status: r.status }, 409);
+    r.status = decision === "accept" ? "accepted" : "declined";
+    r.decidedBy = sub;
+    if (decision === "accept") world.links.push({ subjectId: r.childId, agentId: r.proposedResponsibleId });
+    return json({ request: { ...r, projectId: TEST_PROJECT, projectName: "Acampa Kids", expiresAt: new Date().toISOString() }, ...(decision === "accept" ? { linkId: `link-${world.links.length}` } : {}) });
+  });
   core.on(`POST ${P}/people/names`, (call) => {
     const ids = (call.json as { personIds: string[] }).personIds;
     if (ids.length > 200) return json({ reason: "validationFailed" }, 400);
@@ -389,7 +440,7 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
 }
 
 export function emptyWorld(): FakeWorld {
-  return { links: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], templates: new Map(), messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), phones: new Map(), births: new Map(), nextId: 0 };
+  return { links: [], linkRequests: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], templates: new Map(), messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), phones: new Map(), births: new Map(), nextId: 0 };
 }
 
 /** Opens an Acampa session for `personId` holding `roles` (tokens signed like auth-api's) and returns the browser token. */

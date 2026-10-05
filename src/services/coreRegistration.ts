@@ -198,6 +198,23 @@ export async function registerAdult(tokens: CoordinationTokens, input: { name: s
   return { personId: person.personId, created: person.created, medical };
 }
 
+/**
+ * The person proposed as another responsável (decision 80, §25): registered — or found by phone — in persons-api with
+ * the coordenação token for the `responsavel` target role, as an adult on their own: NO child in the body (so no link),
+ * NO membership (nothing in the camp until the family accepts; the request itself goes to persons-api next).
+ */
+export async function registerProposedResponsible(personsToken: string, input: { name: string; phone: string; email?: string | null }): Promise<{ personId: string; created: boolean }> {
+  const phone = normalizeBrazilPhone(input.phone);
+  if (!phone) throw new IpalphaRejected(400, "missingPhone", {});
+  const reg = await coreClient().register(personsToken, {
+    role: RESPONSIBLE_ROLE,
+    people: [{ name: input.name, phone, ...(input.email ? { data: { email: [{ address: input.email }] } } : {}) }],
+  });
+  const person = reg.people[0];
+  if (!person) throw new IpalphaRejected(502, "registrationIncomplete", {});
+  return person;
+}
+
 /** A role for an existing person in the edition (helper roles from a staff spreadsheet). */
 export async function grantRole(tokens: CoordinationTokens, personId: string, role: string, editionId: string): Promise<boolean> {
   try {

@@ -52,7 +52,7 @@ Check-in stamps: `{at, byPersonId, byRole: CoreRole, note?}`.
 | `GET /:id/changes` | `{changes:[{id, personId, at, byPersonId, byRole, medical, fields}]}` (no before/after values). |
 | `PUT /:id/parent`, `PUT /:id/health` | same field names; health written to persons-api with the acting role token (parents: `responsavel`); answer `{camper: record + health, changed}`. Option ids = `GET /api/people/health-lists`. When core refuses to READ the block: 403 `{code:"CORE_FORBIDDEN", reason:"medicalForbidden"}` and nothing is saved (notes included) — a block we cannot read is never written over. |
 | **NEW** `POST /register` | coordenação: `{name, birthDate, responsible:{name, phone}, sex? ("F"\|"M", only when the family said it), homeChurch? (≤ 120), school? {name, grade}, emergencyContact? ({name, phone, relation?} or the free text "Maria (mãe) 11 9…"), health?, …ops}` → 201 `{camper, responsible:{personId, created}, medical: "written"|"unchanged"|"refused"}`. Person fields travel in core's registration (`sex`, `homeChurch`, `data.school/emergencyContact`); **health never does** — core answers a person it knows with `created:false` and would REPLACE their block. Health is merged afterwards (read with the coordenação token, lists unioned, texts kept/appended, never blanked); `refused` = core refused the read/write, nothing was changed. 400 `SEX_INVALID` \| `HOME_CHURCH_INVALID` \| `EMERGENCY_CONTACT_INVALID`. |
-| ~~`POST /:id/responsibles`~~ | **removed** (decision 57, CONTRACTS §23): a project role links a responsável only inside the registration / import of that kid (persons `POST /links` is steward-only — `403 linkOnlyDuringRegistration`). A second responsável comes in the spreadsheet import (2º responsável columns), or a steward links them / they accept in IPAlpha. |
+| ~~`POST /:id/responsibles`~~ | **removed** (decision 57, CONTRACTS §23): a project role links a responsável only inside the registration / import of that kid (persons `POST /links` is steward-only — `403 linkOnlyDuringRegistration`). A second responsável comes in the spreadsheet import (2º responsável columns), or through a link request (`/api/link-requests`, decision 80). |
 | `POST /` | `{personId, …ops}` (an existing IPAlpha person). |
 | `PUT /:id` | ops only: `team, transportation, bed, bedroom, caretakerId, invitedBy, qrToken, generalNotes, bedroomPreference`. |
 | `DELETE /:id` | `{success, membershipRemoved}`. |
@@ -141,6 +141,18 @@ import (`participants.importEdited`, keys only) is never overwritten by a differ
 **NEW `POST /api/dispatch/webhook`** (dispatch-api only — no session): HMAC-SHA256 of the raw body
 with `IPALPHA_WEBHOOK_SECRET` in `X-IPAlpha-Signature: sha256=<hex>` (401 `SIGNATURE_INVALID`, 503
 `WEBHOOK_DISABLED` when unset), idempotent by `X-IPAlpha-Delivery` (→ `{ok, duplicate:true}`); 202.
+
+## NEW `/api/link-requests` — another responsável (decision 80, CONTRACTS §25)
+
+The coordenação proposes, ONE current responsável of the kid accepts or declines (decision 83); nothing is linked
+or shared until then; persons-api expires it after 30 days. Acampa stores nothing of it (names only pass through
+to the family's screen).
+
+| Route | Answer |
+|---|---|
+| `POST /` `{camperId, name, phone, email?}` (coordenação) | 201 `{request:{id, childId, status:"pending", expiresAt}, responsible:{personId, created}}`. The person is registered (or found by phone) in persons-api with the coordenação token — role `responsavel`, `people:[…]`, NO child (no link) and NO membership — then `POST /projects/:p/link-requests {childId, responsibleId}`. 400 `RESPONSIBLE_INVALID` \| `EMAIL_INVALID`; 403 `COORDINATION_REQUIRED`; 404 `CAMPER_NOT_FOUND`; 409 `LINK_REQUEST_REFUSED` + `reason` `alreadyLinked` \| `requestPending` \| `noCurrentResponsible`; core 400/403 pass through as `CORE_REJECTED` / `CORE_FORBIDDEN` + reason (`notAMinor`, `missingBirthDate`, `noGrant`, `outsideWindow`, `cannotLinkSelf`) |
+| `GET /mine` (responsável) | `{items:[{id, childId, proposedResponsibleId, projectName, status:"pending", createdAt, expiresAt, child:{name, nickname, sex}\|null, proposedResponsible:{…}\|null}]}` — persons `GET /me/link-requests` with the family's own `responsavel` token |
+| `POST /:id/accept` \| `POST /:id/decline` (responsável) | `{request:{id, childId, status}}`; core 403 `notResponsible` / `cannotLinkSelf`, 409 `requestNotPending` / `requestExpired` pass through |
 
 ## Review fixes (2026-10-05)
 

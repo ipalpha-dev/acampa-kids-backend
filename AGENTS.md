@@ -38,6 +38,9 @@ Do NOT:
   `participants.importEdited` from an import: record an `importConflicts` entry (decision 78);
   every manual write goes through `updateCamper` / `updateStaff` (source "manual") so it is remembered.
   Raw observation / health text never goes into `generalNotes`;
+- link a responsável to a kid outside a registration / import (decision 57): another responsável is a
+  persons-api link request (`routes/linkRequests.ts`, decision 80) — registered without child / membership,
+  proposed with the coordenação token, accepted or declined by the family with THEIR `responsavel` token;
 - check a peer (core, dispatch) in `/ready` — only Mongo + boot; peers fail at call time;
 - send a role token, a phone or health to the browser outside the role's own reads;
 - put person data in the realtime snapshot (camp-ops records only);
