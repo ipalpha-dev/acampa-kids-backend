@@ -1,5 +1,5 @@
 import type { WSContext } from "hono/ws";
-import type { CheckinWindow, Role } from "../types";
+import type { CheckinWindow, CoreRole, Role } from "../types";
 import { todayInSaoPaulo } from "../utils";
 import { activeCampId, currentCampId, withCamp } from "./campContext";
 
@@ -7,8 +7,8 @@ import { activeCampId, currentCampId, withCamp } from "./campContext";
  * Realtime hub: every logged-in client keeps a WebSocket open and receives
  *   - a full `snapshot` right after connecting, and
  *   - an `update` with the collections that changed after every write.
- * Payloads are whole collections (the dataset is small: ~150 kids, ~70 staff,
- * ~40 rooms, ~50 events), which keeps the client logic a simple "replace".
+ * Payloads are whole collections of CAMP-OPS records (~150 kids, ~70 team
+ * rows, ~40 rooms, ~50 events) — never names or health (CONTRACTS §15).
  */
 
 export const COLLECTIONS = ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "medications", "gallery", "settings"] as const;
@@ -17,10 +17,13 @@ export type Snapshot = Partial<Record<Collection, unknown>>;
 
 export interface RealtimeClient {
   ws: WSContext;
+  /** the audience (admin on a history session) */
   role: Role;
-  userId: string;
-  /** the person's phone — staff payloads are personalised (own record un-redacted) */
-  phone: string;
+  /** the acting IPAlpha role */
+  coreRole: CoreRole;
+  /** payloads are personalised per person (own record, own room, own kids) */
+  personId: string;
+  sessionId: string;
   /** the camp this session (and every payload it receives) is scoped to */
   campId: string;
 }
@@ -87,7 +90,7 @@ async function flush(): Promise<void> {
       // one payload per distinct view (role, or role+person for staff)
       const byKey = new Map<string, string | null>();
       for (const client of campClients) {
-        const viewer = { activeRole: client.role, phone: client.phone };
+        const viewer = { activeRole: client.role, coreRole: client.coreRole, personId: client.personId };
         const key = snapshotKey(viewer);
         if (!byKey.has(key)) {
           try {
@@ -132,40 +135,23 @@ export function emitAiReviewed(kind: AiReviewedKind, id: string, status: AiRevie
  * 4401, so the phone logs out and wipes its local copy at once.
  */
 export async function evictStaffOutsideWindow(): Promise<void> {
-  const [{ findStaffByPhone }, { staffHasAccess }, { revokeUserSessions }, { staffAccessOpen }] = await Promise.all([
-    import("../models/staff"),
-    import("./scope"),
-    import("./session"),
-    import("../models/settings"),
-  ]);
-  const now = new Date();
+  const [{ accessWindowClosed }, { findSession }] = await Promise.all([import("../middleware/auth"), import("./session")]);
   const byCamp = new Map<string, RealtimeClient[]>();
   for (const client of clients) byCamp.set(client.campId, [...(byCamp.get(client.campId) ?? []), client]);
 
   for (const [campId, campClients] of byCamp) {
     await withCamp(campId, async () => {
-      const { getSettings } = await import("../models/settings");
-      const settings = await getSettings();
       for (const client of campClients) {
-        let name: string;
-        if (client.role === "parent") {
-          if (staffAccessOpen(settings.parentAccessWindow, now)) continue;
-          name = `parent ${client.phone}`;
-        } else {
-          if (client.role !== "staff" && client.role !== "health_staff") continue;
-          const me = await findStaffByPhone(client.phone);
-          if (!me || staffHasAccess(me._id, settings, now)) continue;
-          name = me.name;
-        }
-        await revokeUserSessions(client.userId);
+        const session = await findSession(client.sessionId);
+        if (session && !(await accessWindowClosed(session))) continue;
         try {
-          client.ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." }));
+          client.ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "O período de acesso terminou." }));
           client.ws.close(4401, "access window closed");
         } catch {
           /* already gone */
         }
         clients.delete(client);
-        console.log(`🚪 access window closed → logged out ${name}`);
+        console.log(`🚪 access window closed → logged out a ${client.coreRole} session`);
       }
     });
   }

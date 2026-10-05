@@ -34,16 +34,14 @@ function toDose(doc: Record<string, unknown> | null): MedicationDose | null {
   if (!doc) return null;
   return {
     _id: (doc._id as ObjectId).toString(),
-    camperId: (doc.camperId as string) ?? "",
-    camperName: (doc.camperName as string) ?? "",
+    personId: (doc.personId as string) ?? "",
     medKey: (doc.medKey as string) ?? "",
     medName: (doc.medName as string) ?? "",
     dose: (doc.dose as string) ?? "",
     day: (doc.day as string) ?? "",
     slot: (doc.slot as string) ?? "",
     givenAt: doc.givenAt as Date,
-    byUserId: (doc.byUserId as string) ?? "",
-    byName: (doc.byName as string) ?? "",
+    byPersonId: (doc.byPersonId as string) ?? "",
     note: (doc.note as string) ?? "",
   };
 }
@@ -66,7 +64,7 @@ export async function listMedicationDoses(): Promise<MedicationDose[]> {
 export async function insertMedicationDose(data: MedicationDoseData, unique: boolean): Promise<MedicationDose> {
   const db = await getDb();
   const givenAt = new Date();
-  const key = { camperId: data.camperId, medKey: data.medKey, day: data.day, slot: data.slot };
+  const key = { personId: data.personId, medKey: data.medKey, day: data.day, slot: data.slot };
   if (unique) {
     const existing = await db.collection(COLLECTION).findOne(key);
     if (existing) return toDose(existing as Record<string, unknown>)!;
@@ -105,17 +103,12 @@ export async function ensureMedicationIndexes(): Promise<void> {
   await db.collection(COLLECTION).updateMany({ [SCHEDULED_FIELD]: { $exists: false } }, [
     { $set: { [SCHEDULED_FIELD]: { $ne: ["$slot", MEDICATION_SOS_SLOT] } } },
   ]);
-  try {
-    await db.collection(COLLECTION).dropIndex("camperId_1_medKey_1_day_1_slot_1"); // legacy (auto-named, filtered on `slot`)
-  } catch {
-    // may not exist
-  }
   await Promise.all([
     db.collection(COLLECTION).createIndex({ day: -1, slot: 1 }),
-    db.collection(COLLECTION).createIndex({ camperId: 1, day: -1 }),
+    db.collection(COLLECTION).createIndex({ personId: 1, day: -1 }),
     // a scheduled dose exists once per kid / medicine / day; "quando necessário" doses repeat, so they stay out of it
     db.collection(COLLECTION).createIndex(
-      { camperId: 1, medKey: 1, day: 1, slot: 1 },
+      { personId: 1, medKey: 1, day: 1, slot: 1 },
       { name: SCHEDULED_UNIQUE_INDEX, unique: true, partialFilterExpression: { [SCHEDULED_FIELD]: true } },
     ),
   ]);

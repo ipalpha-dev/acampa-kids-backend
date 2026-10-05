@@ -1,30 +1,21 @@
 import { Hono, type Context } from "hono";
-import { config } from "../config";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireAdmin, requireManager } from "../middleware/roles";
 import { listTransports } from "../models/transports";
 import { checkinWindowOpen, getSettings, scoreHidden, staffAccessOpen, updateSettings } from "../models/settings";
-import { FOREIGN_LOOKUP_ALERT_AT, findStaffByPhone, listForeignLookupOffenders, listStaff, resetForeignLookups, resetStaffCheckins, resetStaffPhotosNotice, resetStaffVests, updateStaff } from "../models/staff";
+import { FOREIGN_LOOKUP_ALERT_AT, listForeignLookupOffenders, listStaff, resetForeignLookups, resetStaffCheckins, resetStaffPhotosNotice, resetStaffVests } from "../models/staff";
 import { clearCheckinLog, resetCamperCheckins } from "../models/campers";
-import { resetParentPhotosNotice } from "../models/users";
-import { comteleEnabled } from "../services/comtele";
-import { sampleNotificationEmails } from "../services/emails";
-import { mailEnabled, sendMail } from "../services/mail";
-import { normalizeBrazilPhone, normalizeEmail } from "../utils";
-import { notifyAccessListChange, sendBirthdayNotices, syncParentWelcomes, syncWelcomes, welcomePreview } from "../services/notify";
+import { resetUserPhotosNotice } from "../models/userCampState";
+import { syncParentWelcomes, syncWelcomes, welcomePreview } from "../services/notify";
 import { evictStaffOutsideWindow, publish, rearmWindows, scheduleCheckinReminder } from "../services/realtime";
 import { listEvents } from "../models/schedule";
 import { parentWindowOf, parentWindowOpen } from "../services/camp";
-import { type BusHelperList, type CheckinLocation, type CheckinWindow, type NotificationSettings, type ParentContact, type Role, type SessionUser, type Settings, type SmsRedirect, type StaffList } from "../types";
+import { coreClient } from "../services/ipalpha";
+import type { MessageTemplate } from "../services/ipalpha/coreClient";
+import { TEMPLATE_DEFAULTS, templateDefault, validateTemplate, type TemplateDefault } from "../messages/templates";
+import { type BusHelperList, type CheckinLocation, type CheckinWindow, type NotificationSettings, type ParentContact, type Settings } from "../types";
 
-interface Env {
-  Variables: {
-    userId: string;
-    sessionId: string;
-    activeRole: Role;
-    user: SessionUser;
-  };
-}
+type Env = { Variables: AuthVariables };
 
 const settings = new Hono<Env>();
 
@@ -67,43 +58,30 @@ export async function serializeSettings(s: Settings) {
     staffAccessWindow: serializeWindow(s.staffAccessWindow, staffAccessOpen(s.staffAccessWindow)),
     parentAccessWindow: serializeWindow(s.parentAccessWindow, staffAccessOpen(s.parentAccessWindow)),
     checkinReminder: { at: s.checkinReminder.at?.toISOString() ?? null, sentAt: s.checkinReminder.sentAt?.toISOString() ?? null },
-    smsRedirect: { ...s.smsRedirect },
-    checkinHelpers: { staffIds: s.checkinHelpers.staffIds },
-    busHelpers: { helpers: s.busHelpers.helpers.map((h) => ({ staffId: h.staffId, vehicleId: h.vehicleId })) },
-    organizers: { staffIds: s.organizers.staffIds },
-    gameOrganizers: { staffIds: s.gameOrganizers.staffIds },
-    scoreHelpers: { staffIds: s.scoreHelpers.staffIds },
-    medicalStaff: { staffIds: s.medicalStaff.staffIds },
-    vestHelpers: { staffIds: s.vestHelpers.staffIds },
-    photographers: { staffIds: s.photographers.staffIds },
+    /** the vehicle each `checkin-onibus` person stands at (the role itself lives in projects-api) */
+    busHelpers: { helpers: s.busHelpers.helpers.map((h) => ({ personId: h.personId, vehicleId: h.vehicleId })) },
     parentContacts: s.parentContacts.map((contact) => ({ ...contact })),
-    /** whether SMS can actually go out (Comtele key configured) — read-only, shown on the settings page */
-    smsEnabled: comteleEnabled(),
-    /** whether notification emails can actually go out (SendGrid API key + from-address) */
-    mailEnabled: mailEnabled(),
     /**
      * Staff who scanned ≥3 kids outside their scope (emergency QR). Always an
      * empty list for non-managers; empty for managers too when nobody reached
      * the threshold — the Geral card stays hidden then.
      */
-    foreignLookupOffenders: [] as { staffId: string; name: string; count: number; names: string[]; blocked: boolean }[],
+    foreignLookupOffenders: [] as { personId: string; count: number; camperIds: string[]; blocked: boolean }[],
     updatedAt: s.updatedAt,
   };
 }
 
-/** Same as serializeSettings, plus the offenders list (admin / organizer only) and the super-admin flag (drives the ⚙️ → Sementes tab). */
-export async function serializeSettingsForManager(s: Awaited<ReturnType<typeof getSettings>>, viewerPhone?: string) {
+/** Same as serializeSettings, plus the offenders list (managers) and the super-admin flag. Names are read by the client (POST /api/people/names). */
+export async function serializeSettingsForManager(s: Awaited<ReturnType<typeof getSettings>>, superAdmin = false) {
   const base = await serializeSettings(s);
-  const superPhone = config.superAdminPhone ? normalizeBrazilPhone(config.superAdminPhone) : null;
   return {
     ...base,
-    /** read-only: this session is the deployment owner (SUPER_ADMIN_PHONE) — the only one who maintains the seeds */
-    superAdmin: !!superPhone && viewerPhone === superPhone,
+    /** read-only: this session is a deployment owner (SUPER_ADMIN_PERSON_IDS) */
+    superAdmin,
     foreignLookupOffenders: (await listForeignLookupOffenders(FOREIGN_LOOKUP_ALERT_AT)).map((p) => ({
-      staffId: p._id,
-      name: p.name,
+      personId: p._id,
       count: p.foreignLookupCount,
-      names: p.foreignLookupNames,
+      camperIds: p.foreignLookupCamperIds,
       blocked: p.foreignLookupCount >= 5,
     })),
   };
@@ -117,29 +95,6 @@ function parseNotifications(value: unknown, current: NotificationSettings): Noti
     if (o[k] === undefined) continue;
     if (typeof o[k] !== "boolean") return { error: "Cada notificação deve ser ligada ou desligada." };
     out[k] = o[k] as boolean;
-  }
-  return out;
-}
-
-/** `{ enabled?, staffPhone?, parentPhone? }` — partial; phones are normalised to E.164 (empty / null clears). */
-function parseSmsRedirect(value: unknown, current: SmsRedirect): SmsRedirect | { error: string } {
-  if (!value || typeof value !== "object") return { error: "Informe o redirecionamento de SMS." };
-  const o = value as Record<string, unknown>;
-  const out: SmsRedirect = { ...current };
-  if (o.enabled !== undefined) {
-    if (typeof o.enabled !== "boolean") return { error: "O redirecionamento deve ser ligado ou desligado." };
-    out.enabled = o.enabled;
-  }
-  for (const key of ["staffPhone", "parentPhone"] as const) {
-    if (o[key] === undefined) continue;
-    const raw = o[key];
-    if (raw === null || (typeof raw === "string" && !raw.trim())) {
-      out[key] = null;
-      continue;
-    }
-    const phone = typeof raw === "string" ? normalizeBrazilPhone(raw) : null;
-    if (!phone) return { error: `Celular de ${key === "staffPhone" ? "equipe" : "pais"} inválido: informe um celular brasileiro com DDD.` };
-    out[key] = phone;
   }
   return out;
 }
@@ -172,15 +127,6 @@ function parseLocations(value: unknown): CheckinLocation[] | { error: string } {
   return out;
 }
 
-/** string[] of ACTIVE staff ids (deduplicated) */
-async function parseStaffIds(value: unknown): Promise<string[] | { error: string }> {
-  if (!Array.isArray(value) || value.some((x) => typeof x !== "string")) return { error: "A lista de pessoas é inválida." };
-  const staffIds = [...new Set(value as string[])];
-  const active = new Set((await listStaff({ active: true })).map((s) => s._id));
-  if (staffIds.some((id) => !active.has(id))) return { error: "Alguma pessoa não existe ou está inativa na equipe." };
-  return staffIds;
-}
-
 /** { from: ISO | null, until: ISO | null } — from < until when both are set */
 export function parseWindow(value: unknown): CheckinWindow | { error: string } {
   if (!value || typeof value !== "object") return { error: "Informe a janela do check-in." };
@@ -209,37 +155,30 @@ function parseReminderAt(value: unknown): Date | null | { error: string } {
   return Number.isNaN(d.getTime()) ? { error: "Data do lembrete inválida." } : d;
 }
 
-/** { staffIds: string[] } */
-async function parseStaffList(value: unknown): Promise<StaffList | { error: string }> {
-  const o = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
-  const staffIds = await parseStaffIds(o ? o.staffIds : undefined);
-  return Array.isArray(staffIds) ? { staffIds } : staffIds;
-}
-
-/** [{ id, title, staffId }] — ordered, unique entries pointing to active staff */
+/** [{ id, title, personId }] — ordered, unique entries pointing to active team members of this camp */
 async function parseParentContacts(value: unknown): Promise<ParentContact[] | { error: string }> {
   if (!Array.isArray(value)) return { error: "A lista de contatos é inválida." };
   const contacts: ParentContact[] = [];
   for (const x of value) {
     const contact = x && typeof x === "object" ? (x as Record<string, unknown>) : null;
-    if (!contact || typeof contact.id !== "string" || typeof contact.title !== "string" || typeof contact.staffId !== "string") {
+    if (!contact || typeof contact.id !== "string" || typeof contact.title !== "string" || typeof contact.personId !== "string") {
       return { error: "Cada contato precisa de um título e uma pessoa da equipe." };
     }
     const id = contact.id.trim();
     const title = contact.title.trim();
-    const staffId = contact.staffId.trim();
+    const personId = contact.personId.trim();
     if (!id || id.length > 80) return { error: "Algum contato tem um identificador inválido." };
     if (!title || title.length > 80) return { error: "O título de cada contato deve ter entre 1 e 80 caracteres." };
-    if (!staffId) return { error: "Escolha uma pessoa da equipe para cada contato." };
-    contacts.push({ id, title, staffId });
+    if (!personId) return { error: "Escolha uma pessoa da equipe para cada contato." };
+    contacts.push({ id, title, personId });
   }
   if (new Set(contacts.map((contact) => contact.id)).size !== contacts.length) return { error: "Há contatos duplicados." };
   const active = new Set((await listStaff({ active: true })).map((staff) => staff._id));
-  if (contacts.some((contact) => !active.has(contact.staffId))) return { error: "Alguma pessoa não existe ou está inativa na equipe." };
+  if (contacts.some((contact) => !active.has(contact.personId))) return { error: "Alguma pessoa não existe ou está inativa na equipe." };
   return contacts;
 }
 
-/** { helpers: [{ staffId, vehicleId }] } — active staff, an existing Transport (bus / car), one vehicle per person */
+/** { helpers: [{ personId, vehicleId }] } — one vehicle per person, an existing Transport. The `checkin-onibus` ROLE comes from projects-api. */
 async function parseBusHelpers(value: unknown): Promise<BusHelperList | { error: string }> {
   const o = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
   const raw = o ? o.helpers : undefined;
@@ -247,14 +186,11 @@ async function parseBusHelpers(value: unknown): Promise<BusHelperList | { error:
   const helpers: BusHelperList["helpers"] = [];
   for (const x of raw) {
     const h = x && typeof x === "object" ? (x as Record<string, unknown>) : null;
-    if (!h || typeof h.staffId !== "string" || typeof h.vehicleId !== "string") return { error: "Cada ajudante do ônibus precisa de uma pessoa e um veículo." };
-    helpers.push({ staffId: h.staffId, vehicleId: h.vehicleId });
+    if (!h || typeof h.personId !== "string" || typeof h.vehicleId !== "string") return { error: "Cada ajudante do ônibus precisa de uma pessoa e um veículo." };
+    helpers.push({ personId: h.personId, vehicleId: h.vehicleId });
   }
-  if (new Set(helpers.map((h) => h.staffId)).size !== helpers.length) return { error: "Cada pessoa só pode ficar na porta de um veículo." };
-  const [staff, transports] = await Promise.all([listStaff({ active: true }), listTransports()]);
-  const active = new Set(staff.map((s) => s._id));
-  if (helpers.some((h) => !active.has(h.staffId))) return { error: "Alguma pessoa não existe ou está inativa na equipe." };
-  const vehicles = new Set(transports.map((v) => v._id));
+  if (new Set(helpers.map((h) => h.personId)).size !== helpers.length) return { error: "Cada pessoa só pode ficar na porta de um veículo." };
+  const vehicles = new Set((await listTransports()).map((v) => v._id));
   if (helpers.some((h) => !vehicles.has(h.vehicleId))) return { error: "Algum veículo não existe." };
   return { helpers };
 }
@@ -264,7 +200,14 @@ settings.use("*", requireAuth);
 /** GET /api/settings — any logged-in role (the team needs the check-in spot to know how far they are). */
 settings.get("/", async (c) => c.json({ settings: await serializeSettings(await getSettings()) }));
 
-/** PUT /api/settings — admin or organizer (`organizers` and `notifications` are admin-only). { checkinLocations?: [{ id, name, lat, lng, radiusM }], notifications?, checkinWindow?: { from, until }, checkinReminder?: { at }, checkinHelpers?: { staffIds }, busHelpers?: { helpers: [{ staffId, vehicleId }] }, organizers?: { staffIds }, gameOrganizers?: { staffIds }, scoreHelpers?: { staffIds }, medicalStaff?: { staffIds }, vestHelpers?: { staffIds }, parentContacts?: [{ id, title, staffId }] } */
+/**
+ * PUT /api/settings — coordenação or organização (`notifications` is the
+ * coordenação's). { checkinLocations?, notifications?, checkinWindow?,
+ * busReturnWindow?, staffAccessWindow?, parentAccessWindow?, checkinReminder?,
+ * busHelpers?: { helpers: [{ personId, vehicleId }] }, parentContacts?: [{ id,
+ * title, personId }], … }. WHO holds each helper role is managed in
+ * projects-api (Mordomia); the windows stay here.
+ */
 settings.put("/", requireManager, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
@@ -272,8 +215,8 @@ settings.put("/", requireManager, async (c) => {
   if (c.get("activeRole") !== "admin") {
     const n = body.notifications;
     const onlyReminder = n === undefined || (typeof n === "object" && n !== null && Object.keys(n).every((k) => k === "checkinReminder"));
-    if (body.organizers !== undefined || body.smsRedirect !== undefined || !onlyReminder) {
-      return c.json({ error: { code: "FORBIDDEN", message: "Só o admin altera os organizadores, as notificações e o redirecionamento de SMS." } }, 403);
+    if (!onlyReminder) {
+      return c.json({ error: { code: "FORBIDDEN", message: "Só a coordenação altera as notificações." } }, 403);
     }
   }
 
@@ -289,13 +232,6 @@ settings.put("/", requireManager, async (c) => {
     patch.notifications = n;
   }
   let windowChanged = false;
-  const LIST_ERROR = { checkinHelpers: "HELPERS_INVALID", organizers: "ORGANIZERS_INVALID", gameOrganizers: "GAME_ORGANIZERS_INVALID", scoreHelpers: "SCORE_HELPERS_INVALID", medicalStaff: "MEDICAL_INVALID", vestHelpers: "VEST_HELPERS_INVALID", photographers: "PHOTOGRAPHERS_INVALID" } as const;
-  for (const key of ["checkinHelpers", "organizers", "gameOrganizers", "scoreHelpers", "medicalStaff", "vestHelpers", "photographers"] as const) {
-    if (body[key] === undefined) continue;
-    const l = await parseStaffList(body[key]);
-    if ("error" in l) return fail(c, LIST_ERROR[key], l.error);
-    patch[key] = l;
-  }
   if (body.busHelpers !== undefined) {
     const l = await parseBusHelpers(body.busHelpers);
     if ("error" in l) return fail(c, "HELPERS_INVALID", l.error);
@@ -362,25 +298,18 @@ settings.put("/", requireManager, async (c) => {
   }
   if (body.wizardMode !== undefined) {
     if (typeof body.wizardMode !== "boolean") return fail(c, "WIZARD_MODE_INVALID", "O modo assistente deve ser ligado ou desligado.");
-    const superPhone = config.superAdminPhone ? normalizeBrazilPhone(config.superAdminPhone) : null;
-    const isSuper = !!superPhone && c.get("user").phone === superPhone;
+    const isSuper = c.get("user").superAdmin;
     // only the deployment owner turns the lock ON; any admin may turn it OFF (finish / leave the wizard)
     if (body.wizardMode === true && !isSuper) {
       return c.json({ error: { code: "FORBIDDEN", message: "Só o administrador da implantação liga o assistente." } }, 403);
     }
     patch.wizardMode = body.wizardMode;
   }
-  if (body.smsRedirect !== undefined) {
-    const r = parseSmsRedirect(body.smsRedirect, (await getSettings()).smsRedirect);
-    if ("error" in r) return fail(c, "SMS_REDIRECT_INVALID", r.error);
-    patch.smsRedirect = r;
-  }
   if (Object.keys(patch).length === 0) return fail(c, "NOTHING_TO_UPDATE", "Nada para atualizar.");
 
   const previous = await getSettings();
   const updated = await updateSettings(patch);
-  void notifyAccessListChange(previous, updated); // fire-and-forget: the SMS never delays the write
-  const scopeChanged = patch.organizers || patch.gameOrganizers || patch.scoreHelpers || patch.checkinHelpers || patch.busHelpers || patch.medicalStaff || patch.vestHelpers || patch.photographers || windowChanged || draftChanged;
+  const scopeChanged = patch.busHelpers || patch.parentContacts || windowChanged || draftChanged;
   if (scopeChanged) {
     // Any access-list change may alter which records a phone is allowed to keep.
     // Re-send every scoped collection so gains and revocations happen live.
@@ -395,14 +324,12 @@ settings.put("/", requireManager, async (c) => {
   if (reminderChanged || patch.notifications) scheduleCheckinReminder(updated.checkinReminder.at);
   // the album notice is a ONCE-PER-CAMP SMS: turning it back ON re-arms it for everybody
   if (patch.notifications?.photoPublishes && !previous.notifications.photoPublishes) {
-    const [staff, parents] = await Promise.all([resetStaffPhotosNotice(), resetParentPhotosNotice()]);
+    const [staff, parents] = await Promise.all([resetStaffPhotosNotice(), resetUserPhotosNotice()]);
     if (staff + parents > 0) console.log(`🧹 album notice re-armed: ${staff} staff, ${parents} parents`);
   }
   // a welcome toggle switched ON: whoever is inside their window and was never welcomed gets the SMS now
   if (patch.notifications?.enrolments && !previous.notifications.enrolments) void syncWelcomes();
   if (patch.notifications?.parentWelcome && !previous.notifications.parentWelcome) void syncParentWelcomes();
-  // birthdays switched ON after 07:45 on a camp day: today's birthday kids' rooms are texted now
-  if (patch.notifications?.birthdays && !previous.notifications.birthdays) void sendBirthdayNotices();
   if (windowChanged) {
     void rearmWindows();
     if (patch.staffAccessWindow) void syncWelcomes(); // the window may have just opened (start moved to the past)
@@ -410,61 +337,101 @@ settings.put("/", requireManager, async (c) => {
     // the admin may have closed the team's window right now: log those people out
     void evictStaffOutsideWindow().catch((err) => console.error("realtime: evict failed", err));
   }
-  return c.json({ settings: await serializeSettingsForManager(updated, c.get("user").phone) });
+  return c.json({ settings: await serializeSettingsForManager(updated, c.get("user").superAdmin) });
 });
 
-/** GET /api/settings/welcome-preview — admin. How many people would get the welcome SMS RIGHT NOW if the toggle were on (never welcomed, inside their window, with a phone). */
+/** GET /api/settings/welcome-preview — coordenação. Who would get the welcome RIGHT NOW (person ids; names via /api/people/names). */
 settings.get("/welcome-preview", requireAdmin, async (c) => c.json(await welcomePreview()));
 
-function sampleEmailList() {
-  return sampleNotificationEmails().map(({ id, audience, title, subject }) => ({ id, audience, title, subject }));
+// ── message templates (projects-api `projects:templates`, CONTRACTS §11/§15) ──
+
+type TemplatePatch = Partial<Pick<MessageTemplate, "name" | "body" | "subject">>;
+
+function serializeTemplate(def: TemplateDefault | null, live: MessageTemplate | null) {
+  const src = live ?? def!;
+  return {
+    slug: src.slug,
+    name: src.name,
+    channel: src.channel,
+    variables: def?.variables ?? live?.variables ?? [],
+    subject: src.subject ?? null,
+    body: src.body,
+    /** created in the project (else only the default copy exists) */
+    live: !!live,
+    version: live?.version ?? null,
+    /** the live copy differs from Acampa's default */
+    customized: !!live && !!def && (JSON.stringify(live.body) !== JSON.stringify(def.body) || JSON.stringify(live.subject ?? null) !== JSON.stringify(def.subject ?? null)),
+    /** pt-BR default, for "restaurar" */
+    defaults: def ? { body: def.body, subject: def.subject ?? null } : null,
+  };
 }
 
-function testSubject(audience: "parent" | "staff", subject: string): string {
-  return `Teste - ${audience === "parent" ? "Pais" : "Equipe"} - ${subject}`;
-}
+/** GET /api/settings/message-templates — the coordenação. Every Acampa template: live copy (projects-api) + default. */
+settings.get("/message-templates", requireAdmin, async (c) => {
+  const live = await coreClient().listTemplates();
+  const bySlug = new Map(live.map((t) => [t.slug, t]));
+  const known = TEMPLATE_DEFAULTS.map((d) => serializeTemplate(d, bySlug.get(d.slug) ?? null));
+  const extra = live.filter((t) => !templateDefault(t.slug)).map((t) => serializeTemplate(null, t));
+  return c.json({ templates: [...known, ...extra] });
+});
 
-/** GET /api/settings/sample-emails — admin. Catalog of every notification email, plus this admin's roster email. */
-settings.get("/sample-emails", requireAdmin, async (c) => {
-  const me = await findStaffByPhone(c.get("user").phone);
-  return c.json({ emails: sampleEmailList(), adminEmail: me?.email ?? null, mailEnabled: mailEnabled() });
+/** POST /api/settings/message-templates/seed — creates every catalog template the project does not have yet. */
+settings.post("/message-templates/seed", requireAdmin, async (c) => {
+  const live = new Set((await coreClient().listTemplates()).map((t) => t.slug));
+  let created = 0;
+  for (const d of TEMPLATE_DEFAULTS) {
+    if (live.has(d.slug)) continue;
+    await coreClient().createTemplate({ slug: d.slug, name: d.name, channel: d.channel, ...(d.subject ? { subject: d.subject } : {}), body: d.body, variables: d.variables });
+    created++;
+  }
+  return c.json({ created, total: TEMPLATE_DEFAULTS.length });
 });
 
 /**
- * POST /api/settings/sample-emails — admin. Sends the sample `id` (or every
- * sample when omitted) to `email` (subjects prefixed "Teste - Pais/Equipe - …").
- * When `save` is true, that address is written on the admin's roster record.
+ * PATCH /api/settings/message-templates/:slug { name?, body?, subject? } —
+ * edits the project's copy (variables are fixed by Acampa's code). Validated
+ * here with core's rules (pt-BR required, known `{vars}`, SMS ≤ 320 chars);
+ * a template not created yet is created from the default + the edit.
  */
-settings.post("/sample-emails", requireAdmin, async (c) => {
-  const body = await c.req.json<{ email?: string; save?: boolean; id?: string }>().catch(() => null);
-  const email = typeof body?.email === "string" ? normalizeEmail(body.email) : null;
-  if (!email) return fail(c, "EMAIL_INVALID", "Informe um e-mail válido.");
-  const user = c.get("user");
-  const me = await findStaffByPhone(user.phone);
-  if (!me) return fail(c, "STAFF_NOT_FOUND", "Seu cadastro na equipe não foi encontrado.", 404);
-  if (body?.save !== false && me.email !== email) {
-    await updateStaff(me._id, { email });
-    publish("staff");
-  }
-  const all = sampleNotificationEmails();
-  const samples = typeof body?.id === "string" && body.id ? all.filter((s) => s.id === body.id) : all;
-  if (typeof body?.id === "string" && body.id && samples.length === 0) return fail(c, "SAMPLE_NOT_FOUND", "Amostra não encontrada.", 404);
-  let sent = 0;
-  const failed: string[] = [];
-  for (const sample of samples) {
-    const res = await sendMail(email, testSubject(sample.audience, sample.subject), sample.html, sample.text);
-    if (res.ok) sent++;
-    else failed.push(sample.title);
-  }
-  console.log(`✉️  sample emails → ${email} (${sent}/${samples.length}) by ${user.name}`);
-  return c.json({ sent, total: samples.length, failed, email, emails: sampleEmailList(), adminEmail: email, mailEnabled: mailEnabled() });
+settings.patch("/message-templates/:slug", requireAdmin, async (c) => {
+  const slug = c.req.param("slug");
+  const def = templateDefault(slug);
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
+  const text = (v: unknown): Record<string, string> | undefined =>
+    v && typeof v === "object" ? (Object.fromEntries(Object.entries(v as Record<string, unknown>).filter(([, x]) => typeof x === "string")) as Record<string, string>) : undefined;
+  const patch: TemplatePatch = {};
+  if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim().slice(0, 120);
+  if (body.body !== undefined) patch.body = text(body.body);
+  if (body.subject !== undefined) patch.subject = text(body.subject);
+  const current = await coreClient().getTemplate(slug);
+  if (!current && !def) return fail(c, "TEMPLATE_NOT_FOUND", "Modelo não encontrado.", 404);
+  const base = current ?? { slug, name: def!.name, channel: def!.channel, subject: def!.subject, body: def!.body, variables: def!.variables };
+  const merged = { ...base, ...patch, variables: def?.variables ?? base.variables };
+  const invalid = validateTemplate({ slug, channel: merged.channel, body: merged.body as never, subject: merged.subject as never, variables: merged.variables });
+  if (invalid) return fail(c, "TEMPLATE_INVALID", `Modelo inválido: ${invalid}.`);
+  const saved = current
+    ? await coreClient().updateTemplate(slug, patch)
+    : await coreClient().createTemplate({ slug, name: merged.name, channel: merged.channel, ...(merged.subject ? { subject: merged.subject } : {}), body: merged.body, variables: merged.variables });
+  return c.json({ template: serializeTemplate(def, saved) });
+});
+
+/** POST /api/settings/message-templates/:slug/reset — back to Acampa's default copy. */
+settings.post("/message-templates/:slug/reset", requireAdmin, async (c) => {
+  const def = templateDefault(c.req.param("slug"));
+  if (!def) return fail(c, "TEMPLATE_NOT_FOUND", "Modelo não encontrado.", 404);
+  const current = await coreClient().getTemplate(def.slug);
+  const saved = current
+    ? await coreClient().updateTemplate(def.slug, { name: def.name, body: def.body, ...(def.subject ? { subject: def.subject } : {}) })
+    : await coreClient().createTemplate({ slug: def.slug, name: def.name, channel: def.channel, ...(def.subject ? { subject: def.subject } : {}), body: def.body, variables: def.variables });
+  return c.json({ template: serializeTemplate(def, saved) });
 });
 
 /** POST /api/settings/checkin/reset — admin only. Clears EVERY check-in (kids' church + both bus trips, team), the team vests and the audit log, so the process can be rehearsed. */
 settings.post("/checkin/reset", requireManager, async (c) => {
   const [campers, staff, vests] = await Promise.all([resetCamperCheckins(), resetStaffCheckins(), resetStaffVests()]);
   await clearCheckinLog();
-  console.log(`🧹 check-ins reset by ${c.get("user").name}: ${campers} campers, ${staff} staff, ${vests} vests`);
+  console.log(`🧹 check-ins reset: ${campers} campers, ${staff} staff, ${vests} vests`);
   publish("campers", "staff");
   return c.json({ campers, staff, vests });
 });
@@ -476,9 +443,9 @@ settings.post("/checkin/reset", requireManager, async (c) => {
  */
 settings.post("/foreign-lookups/reset", requireManager, async (c) => {
   const staff = await resetForeignLookups();
-  console.log(`🧹 foreign lookups reset by ${c.get("user").name}: ${staff} staff`);
+  console.log(`🧹 foreign lookups reset: ${staff} staff`);
   publish("staff", "settings");
-  return c.json({ staff, settings: await serializeSettingsForManager(await getSettings(), c.get("user").phone) });
+  return c.json({ staff, settings: await serializeSettingsForManager(await getSettings(), c.get("user").superAdmin) });
 });
 
 export default settings;

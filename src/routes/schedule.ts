@@ -1,3 +1,4 @@
+import { namesOf } from "../services/people";
 import { Hono, type Context } from "hono";
 import { isEmojiLike } from "../utils";
 import { publish, rearmWindows } from "../services/realtime";
@@ -111,7 +112,7 @@ schedule.use("*", requireAuth);
 // Roles (funções)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const TEAM = requireRole("admin", "staff", "health_staff", "parent");
+const TEAM = requireRole("admin", "staff", "parent");
 
 /** Writes to the programme: admin, or a team member the admin listed as an ORGANIZER (Settings → Organizadores). */
 const ORGANIZER = requireOrganizer;
@@ -157,11 +158,10 @@ schedule.get("/roles/:id/detail", ORGANIZER, async (c) => {
       const people = peopleInRole(e, r, staff, roleById)
         .map(({ staff: s, via, assignment }) => ({
           staffId: s._id,
-          name: s.name,
           via,
           ...assignmentDetail(r, assignment, byId.get(s._id), teams_),
         }))
-        .sort((a, b) => (a.via === b.via ? a.name.localeCompare(b.name, "pt-BR") : a.via === "person" ? -1 : 1));
+        .sort((a, b) => (a.via === b.via ? 0 : a.via === "person" ? -1 : 1));
       return {
         eventId: e._id,
         date: e.date,
@@ -255,7 +255,9 @@ function normaliseDetailFlags(patch: Partial<ScheduleRoleData>, current?: Schedu
 async function staffWithoutTeamIn(roleId: string): Promise<string[]> {
   const [events, staff] = await Promise.all([listEvents(), listStaff()]);
   const ids = new Set(events.flatMap((e) => e.assignments.filter((a) => a.roleId === roleId).map((a) => a.staffId)));
-  return staff.filter((s) => ids.has(s._id) && !s.team).map((s) => s.name);
+  const without = staff.filter((s) => ids.has(s._id) && !s.team).map((s) => s._id);
+  const names = await namesOf(without);
+  return without.map((id) => names.get(id)?.name ?? "").filter(Boolean);
 }
 
 /** POST /api/schedule/roles  { name, emoji?, instructions?, preparation?, forRoomRoles?, hasDetail?, detailPlaceholder? } */
@@ -460,7 +462,7 @@ schedule.put("/events/:id/assignments", ORGANIZER, async (c) => {
     const role = roleById.get(roleId);
     if (role?.detailFromTeam) {
       const person = staffById.get(staffId)!;
-      if (!person.team) return fail(c, "STAFF_WITHOUT_TEAM", `${person.name} não tem time — só quem tem time pode fazer "${role.name}".`, 409);
+      if (!person.team) return fail(c, "STAFF_WITHOUT_TEAM", `Uma das pessoas não tem time — só quem tem time pode fazer "${role.name}".`, 409);
       assignments.push({ staffId, roleId, detail: "", detailColor: "" });
       continue;
     }
@@ -521,7 +523,7 @@ schedule.put("/events/:id/assignments/:staffId", ORGANIZER, async (c) => {
   // the detail of a team-backed role is read from the staff record, never stored
   const role = await findRoleById(body.roleId);
   if (role?.detailFromTeam && !person.team) {
-    return fail(c, "STAFF_WITHOUT_TEAM", `${person.name} não tem time — só quem tem time pode fazer "${role.name}".`, 409);
+    return fail(c, "STAFF_WITHOUT_TEAM", `Esta pessoa não tem time — só quem tem time pode fazer "${role.name}".`, 409);
   }
   const detail = role?.detailFromTeam ? "" : typeof body.detail === "string" ? body.detail.trim().slice(0, DETAIL_MAX) : "";
   const assignments = [

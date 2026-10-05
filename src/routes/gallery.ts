@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { deleteFile, insertFile } from "../models/files";
 import { detachGalleryFromEvent, deleteGalleryPhoto, deleteGalleryPhotos, findGalleryPhoto, findGalleryPhotoThumb, insertGalleryPhoto, listGalleryFaceEmbeddings, listGalleryPhotos, listUnindexedGalleryPhotos, reorderGalleryPhotos, updateGalleryPhoto, updateGalleryPhotos, validGalleryIds } from "../models/gallery";
 import { getSettings, updateSettings } from "../models/settings";
@@ -10,17 +10,9 @@ import { notifyPhotosPublished } from "../services/notify";
 import { config } from "../config";
 import { cosineSimilarity, extractFaceEmbeddings, faceRecognitionEnabled } from "../services/faceRecognition";
 import { indexGalleryPhotoFaces } from "../services/galleryFaces";
-import type { GalleryPhoto, Role, SessionUser } from "../types";
+import type { GalleryPhoto } from "../types";
 
-interface Env {
-  Variables: {
-    userId: string;
-    sessionId: string;
-    activeRole: Role;
-    user: SessionUser;
-    campId: string;
-  };
-}
+type Env = { Variables: AuthVariables };
 
 /**
  * The camp's photo album ("Fotos" tab).
@@ -64,16 +56,16 @@ export function serializePhoto(p: GalleryPhoto) {
     caption: p.caption,
     order: p.order,
     eventId: p.eventId,
-    byName: p.byName,
+    byPersonId: p.byPersonId,
     createdAt: p.createdAt,
   };
 }
 
 /** May this session upload / edit / publish photos? (the admin or a listed photographer) */
-async function canManage(c: Context): Promise<boolean> {
+async function canManage(c: Context<Env>): Promise<boolean> {
   const role = c.get("activeRole");
   if (role === "admin") return true;
-  if (role !== "staff" && role !== "health_staff") return false;
+  if (role !== "staff") return false;
   const scope = await resolveScope(c.get("user"));
   return scope.all || scope.photographer;
 }
@@ -115,15 +107,14 @@ gallery.post("/", async (c) => {
     if (!event) return fail(c, "EVENT_INVALID", "Evento não encontrado.");
     eventId = event._id;
   }
-  const stored = await insertFile({ name: file.name.slice(0, 120), type: file.type, data: new Uint8Array(await file.arrayBuffer()), byUserId: c.get("userId") });
+  const stored = await insertFile({ name: file.name.slice(0, 120), type: file.type, data: new Uint8Array(await file.arrayBuffer()), byPersonId: c.get("userId") });
   const photo = await insertGalleryPhoto({
     fileId: stored._id,
     thumb: new Uint8Array(await thumb.arrayBuffer()),
     thumbType: thumb.type,
     caption,
     eventId,
-    byUserId: c.get("userId"),
-    byName: c.get("user").name,
+    byPersonId: c.get("userId"),
   });
   void indexGalleryPhotoFaces(photo._id, photo.fileId);
   publish("gallery");

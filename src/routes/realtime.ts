@@ -1,13 +1,10 @@
 import { Hono } from "hono";
 import { upgradeWebSocket } from "hono/bun";
-import { findById, toPublicUser } from "../models/users";
-import { revokeSession, verifySessionToken } from "../services/session";
+import { findSessionByToken, revokeSession } from "../services/session";
 import { addClient, clientCount, removeClient, type RealtimeClient } from "../services/realtime";
 import { loadCollections } from "../services/snapshot";
-import { roleNoLongerValid, staffSessionExpired } from "../middleware/auth";
+import { accessWindowClosed, canSwitchCamps, sessionUser } from "../middleware/auth";
 import { activeCampId, withCamp } from "../services/campContext";
-import { canSwitchCamps } from "../services/campAccess";
-import type { Role } from "../types";
 
 /**
  * GET /api/realtime?token=<jwt>  →  WebSocket
@@ -23,41 +20,35 @@ realtime.get(
   "/",
   upgradeWebSocket(async (c) => {
     const token = c.req.query("token") ?? "";
-    const payload = token ? await verifySessionToken(token) : null;
+    const session = token ? await findSessionByToken(token) : null;
     const unauthorized = () => ({
       onOpen(_evt: unknown, ws: { send: (s: string) => void; close: (code: number, reason: string) => void }) {
         ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "Sessão inválida ou expirada." }));
         ws.close(4401, "unauthorized");
       },
     });
-    if (!payload) return unauthorized();
+    if (!session) return unauthorized();
 
-    const campId = payload.campId;
+    const campId = session.campId;
     const history = campId !== activeCampId();
-    const { user, evicted } = await withCamp(campId, async () => {
-      const user = await findById(payload.userId);
-      if (!user) return { user: null, evicted: false };
+    const evicted = await withCamp(campId, async () => {
       if (history) {
-        // the roster row / access window belong to another year — irrelevant here
-        if (await canSwitchCamps(toPublicUser(user), payload.role)) return { user, evicted: false };
-        await revokeSession(payload.sessionId);
-        return { user, evicted: true };
+        if (canSwitchCamps(session)) return false;
+        await revokeSession(session._id);
+        return true;
       }
-      // window closed, or the profile itself is gone (parent with no kid, admin on a staff session)
-      const evicted = (await staffSessionExpired(payload.role, user.phone, user._id)) || (await roleNoLongerValid(payload.role, user));
-      return { user, evicted };
+      // the access window closed under an open session
+      return accessWindowClosed(session);
     });
+    if (evicted) return unauthorized();
 
-    if (!user || evicted) return unauthorized();
-
-    // forced to admin for reads on a history session
-    const effectiveRole: Role = history ? "admin" : payload.role;
-    const viewer = { activeRole: effectiveRole, phone: user.phone };
+    const user = sessionUser(session, history);
+    const viewer = { activeRole: user.activeRole, coreRole: user.coreRole, personId: user.personId };
     let client: RealtimeClient | null = null;
     return {
       async onOpen(_evt, ws) {
         await withCamp(campId, async () => {
-          client = { ws, role: effectiveRole, userId: user._id, phone: user.phone, campId };
+          client = { ws, role: user.activeRole, coreRole: user.coreRole, personId: user.personId, sessionId: session._id, campId };
           addClient(client);
           try {
             const data = await loadCollections(viewer);
@@ -66,7 +57,7 @@ realtime.get(
             console.error("realtime: snapshot failed", err);
             ws.send(JSON.stringify({ type: "error", code: "SNAPSHOT_FAILED", message: "Não foi possível carregar os dados." }));
           }
-          console.log(`🔌 ws +1 (${clientCount()} online) ${user.name} [${effectiveRole}]${history ? " (history)" : ""}`);
+          console.log(`🔌 ws +1 (${clientCount()} online) [${user.coreRole}]${history ? " (history)" : ""}`);
         });
       },
       onMessage(evt, ws) {

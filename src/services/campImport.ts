@@ -1,17 +1,20 @@
 import { insertBedroom, listBedrooms } from "../models/bedrooms";
-import { insertCamper, listCampers, updateCamper, type CamperData } from "../models/campers";
+import { insertCamper, listCampers, updateCamper } from "../models/campers";
 import { appendCategoryOption, insertCategory, listCategories, newOptionId, nextCategoryOrder } from "../models/categories";
 import { insertInstruction, listInstructions, nextInstructionOrder } from "../models/instructions";
 import { insertPrepSection, listPrepSections, nextPrepOrder } from "../models/preparation";
 import { insertEvent, insertRole, listEvents, listRoles } from "../models/schedule";
 import { getSettings, updateSettings } from "../models/settings";
-import { insertStaff, listStaff, updateStaff, type StaffData } from "../models/staff";
+import { insertStaff, listStaff, updateStaff } from "../models/staff";
 import { insertTeam, listTeams } from "../models/teams";
 import { insertTransport, listTransports } from "../models/transports";
-import { ensureLoginAccount } from "../models/users";
-import { activeCamp, activeCampId, withCamp } from "./campContext";
-import { campPeriod } from "./camp";
+import { activeCampId, withCamp } from "./campContext";
 import { normalizeImportValue } from "./camperImport";
+import { grantRole, type CoordinationTokens } from "./coreRegistration";
+import { responsiblesOf } from "./members";
+import { namesOf } from "./people";
+import { coreClient } from "./ipalpha";
+import { IpalphaRejected } from "./ipalpha/coreClient";
 import { publish, type Collection as RealtimeCollection } from "./realtime";
 import type {
   Bedroom,
@@ -38,6 +41,8 @@ export type ImportBlock = (typeof IMPORT_BLOCKS)[number];
 
 export interface ImportOptions {
   blocks: ImportBlock[];
+  /** coordenação tokens + the target edition: copied people get their memberships there (null = camp ops only) */
+  core?: { tokens: CoordinationTokens; editionId: string } | null;
   camperIds?: string[];
   staffIds?: string[];
   withRoles: boolean;
@@ -45,15 +50,14 @@ export interface ImportOptions {
   onMatch: "skip" | "update";
 }
 
-export type BlockResult = { created: number; updated: number; skipped: number };
+/** `membershipsFailed`: people copied whose membership in the target edition core refused (they need it in Mordomia). */
+export type BlockResult = { created: number; updated: number; skipped: number; membershipsFailed?: number };
 
+/** A kid of another year (names live from core; `matched` = already in the ACTIVE camp — same person id). */
 export interface CamperRow {
   id: string;
   name: string;
-  birthDate: string | null;
-  age: number | null;
   sex: CamperSex | null;
-  guardianFirstName: string | null;
   bedroom: string | null;
   team: string | null;
   matched: boolean;
@@ -62,7 +66,6 @@ export interface CamperRow {
 export interface StaffRow {
   id: string;
   name: string;
-  phone: string | null;
   roomRole: RoomRole;
   bedroom: string | null;
   team: string | null;
@@ -71,24 +74,6 @@ export interface StaffRow {
 
 /** Accent/case-insensitive comparison key, e.g. "Ana Lúcia" → "ana lucia". */
 export const normalizeKey = normalizeImportValue;
-
-/** `name + birthDate` when both are known; otherwise `cpf`, then `externalId`; null when none identify the camper. */
-export function camperMatchKey(c: { name: string; birthDate: string | null; cpf?: string | null; externalId?: string | null }): string | null {
-  const nameKey = normalizeKey(c.name ?? "");
-  if (nameKey && c.birthDate) return `nb:${nameKey}|${c.birthDate}`;
-  const cpfDigits = (c.cpf ?? "").replace(/\D/g, "");
-  if (cpfDigits) return `cpf:${cpfDigits}`;
-  if (c.externalId) return `ext:${c.externalId}`;
-  return null;
-}
-
-/** `phone` when known; otherwise the normalized `name`; null when neither identifies the person. */
-export function staffMatchKey(s: { phone?: string | null; name: string }): string | null {
-  const phoneDigits = (s.phone ?? "").replace(/\D/g, "");
-  if (phoneDigits) return `phone:${phoneDigits}`;
-  const nameKey = normalizeKey(s.name ?? "");
-  return nameKey ? `name:${nameKey}` : null;
-}
 
 /** The `idMap` entry for `oldId` when this run already created/matched it; otherwise the pre-computed soft match; otherwise null. */
 export function remapLink(oldId: string | null, idMap: Map<string, string>, softMatchIndex: Map<string, string>): string | null {
@@ -110,50 +95,25 @@ export function stripForCopy(doc: Record<string, unknown>, extraStrip: string[] 
 }
 
 export interface SettingsRemap {
-  staff: (oldId: string) => string | null;
+  /** a person (same id across camps) → kept only when on the target camp's team */
+  person: (personId: string) => string | null;
   vehicle: (oldId: string) => string | null;
 }
 
-/** The importable subset of `source`: never windows, drafts, the reminder, `galleryPublished` or `wizardMode`; staff/vehicle references are remapped, unresolved ones dropped. */
+/** The importable subset of `source`: never windows, drafts, the reminder, `galleryPublished` or `wizardMode`; person / vehicle references that don't resolve are dropped. */
 export function settingsToImport(source: Settings, remap: SettingsRemap): Partial<Settings> {
-  const staffList = (ids: string[]): string[] => ids.map((id) => remap.staff(id)).filter((id): id is string => !!id);
   const busHelpers: BusHelper[] = source.busHelpers.helpers
-    .map((h) => ({ staffId: remap.staff(h.staffId), vehicleId: remap.vehicle(h.vehicleId) }))
-    .filter((h): h is BusHelper => !!h.staffId && !!h.vehicleId);
+    .map((h) => ({ personId: remap.person(h.personId), vehicleId: remap.vehicle(h.vehicleId) }))
+    .filter((h): h is BusHelper => !!h.personId && !!h.vehicleId);
   const parentContacts: ParentContact[] = source.parentContacts
-    .map((p) => ({ ...p, staffId: remap.staff(p.staffId) }))
-    .filter((p): p is ParentContact => !!p.staffId);
+    .map((p) => ({ ...p, personId: remap.person(p.personId) }))
+    .filter((p): p is ParentContact => !!p.personId);
   return {
     checkinLocations: source.checkinLocations,
     notifications: source.notifications,
-    checkinHelpers: { staffIds: staffList(source.checkinHelpers.staffIds) },
     busHelpers: { helpers: busHelpers },
-    organizers: { staffIds: staffList(source.organizers.staffIds) },
-    gameOrganizers: { staffIds: staffList(source.gameOrganizers.staffIds) },
-    scoreHelpers: { staffIds: staffList(source.scoreHelpers.staffIds) },
-    medicalStaff: { staffIds: staffList(source.medicalStaff.staffIds) },
-    vestHelpers: { staffIds: staffList(source.vestHelpers.staffIds) },
-    photographers: { staffIds: staffList(source.photographers.staffIds) },
     parentContacts,
-    smsRedirect: source.smsRedirect,
   };
-}
-
-function ageAt(birthDate: string | null, atIso: string): number | null {
-  if (!birthDate) return null;
-  const [by, bm, bd] = birthDate.split("-").map(Number);
-  const [ay, am, ad] = atIso.split("-").map(Number);
-  if (!by || !bm || !bd || !ay || !am || !ad) return null;
-  let age = ay - by;
-  if (am < bm || (am === bm && ad < bd)) age--;
-  return age >= 0 && age < 120 ? age : null;
-}
-
-async function ageReferenceIso(): Promise<string> {
-  const period = await campPeriod();
-  if (period.from) return period.from;
-  const today = new Date();
-  return `${activeCamp().year}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 }
 
 function buildSoftMatchIndex<T extends { _id: string }>(source: T[], target: T[], keyFn: (t: T) => string | null): Map<string, string> {
@@ -306,132 +266,82 @@ interface SoftIndexes {
   team: Map<string, string>;
   bedroom: Map<string, string>;
   transport: Map<string, string>;
-  staff: Map<string, string>;
 }
 
-const STAFF_RESET_KEYS = ["checkin", "vest", "welcomeSentAt", "photosSmsSentAt", "prepDone", "foreignLookupCount", "foreignLookupNames", "foreignLookupAlertedAt", "foreignLookupCamperIds", "bedroom", "team", "transportation", "allergies", "drugAllergies", "healthIssues", "active", "draft"];
-
-async function buildNewStaffData(src: Staff, idMap: Map<string, string>, softIdx: SoftIndexes, catCtx: CategoryOptionContext): Promise<StaffData> {
-  const base = stripForCopy(src as unknown as Record<string, unknown>, STAFF_RESET_KEYS);
-  return {
-    ...base,
-    active: true,
-    bedroom: remapLink(src.bedroom, idMap, softIdx.bedroom),
-    team: remapLink(src.team, idMap, softIdx.team),
-    transportation: remapLink(src.transportation, idMap, softIdx.transport),
-    allergies: await remapCategoryOptions(src.allergies, catCtx),
-    drugAllergies: await remapCategoryOptions(src.drugAllergies, catCtx),
-    healthIssues: await remapCategoryOptions(src.healthIssues, catCtx),
-  } as StaffData;
-}
-
-async function buildStaffUpdatePatch(src: Staff, catCtx: CategoryOptionContext): Promise<Partial<StaffData>> {
-  const base = stripForCopy(src as unknown as Record<string, unknown>, STAFF_RESET_KEYS) as Partial<StaffData>;
-  base.allergies = await remapCategoryOptions(src.allergies, catCtx);
-  base.drugAllergies = await remapCategoryOptions(src.drugAllergies, catCtx);
-  base.healthIssues = await remapCategoryOptions(src.healthIssues, catCtx);
-  return base;
-}
-
-async function importStaff(sourceStaff: Staff[], opts: ImportOptions, idMap: Map<string, string>, softIdx: SoftIndexes, catCtx: CategoryOptionContext): Promise<BlockResult> {
+/**
+ * People are the SAME IPAlpha person in every year (person id), so a copy is a
+ * camp-ops row in the target camp + (with the coordenação tokens) the
+ * membership of the target edition: `equipe` for the team, `participante`
+ * (naming the source year's responsáveis as involved) + their `responsavel`
+ * for the kids. A refused membership is counted, never fatal.
+ */
+async function importStaff(sourceStaff: Staff[], opts: ImportOptions, idMap: Map<string, string>, softIdx: SoftIndexes): Promise<BlockResult> {
   let created = 0;
   let updated = 0;
   let skipped = 0;
+  let membershipsFailed = 0;
   const pool = opts.staffIds?.length ? sourceStaff.filter((s) => opts.staffIds!.includes(s._id)) : sourceStaff.filter((s) => s.active);
-  const targetStaff = await listStaff({ includeDraft: false });
-  const byKey = new Map<string, Staff>();
-  for (const t of targetStaff) {
-    const key = staffMatchKey(t);
-    if (key) byKey.set(key, t);
-  }
+  const target = new Set((await listStaff({ includeDraft: true })).map((s) => s._id));
   for (const src of pool) {
-    const key = staffMatchKey(src);
-    const existing = key ? byKey.get(key) : undefined;
-    if (existing) {
-      idMap.set(src._id, existing._id);
+    const ops = { roomRole: src.roomRole, generalNotes: src.generalNotes, bedroom: remapLink(src.bedroom, idMap, softIdx.bedroom), team: remapLink(src.team, idMap, softIdx.team), transportation: remapLink(src.transportation, idMap, softIdx.transport) };
+    if (target.has(src._id)) {
       if (opts.onMatch === "update") {
-        await updateStaff(existing._id, await buildStaffUpdatePatch(src, catCtx));
+        await updateStaff(src._id, { roomRole: src.roomRole, generalNotes: src.generalNotes });
         updated++;
-      } else {
-        skipped++;
-      }
+      } else skipped++;
       continue;
     }
-    const data = await buildNewStaffData(src, idMap, softIdx, catCtx);
-    const createdDoc = await insertStaff(data);
-    idMap.set(src._id, createdDoc._id);
-    const newKey = staffMatchKey(createdDoc);
-    if (newKey) byKey.set(newKey, createdDoc);
-    if (createdDoc.phone) await ensureLoginAccount(createdDoc.name, createdDoc.phone, "staff");
+    if (opts.core && !(await grantRole(opts.core.tokens, src._id, "equipe", opts.core.editionId))) membershipsFailed++;
+    await insertStaff(src._id, { ...ops, sex: src.bedroom && ops.bedroom ? src.sex : null, active: true, importId: null });
+    target.add(src._id);
     created++;
   }
-  return { created, updated, skipped };
+  return { created, updated, skipped, membershipsFailed };
 }
 
-const CAMPER_RESET_KEYS = ["checkin", "busCheckin", "busReturnCheckin", "parentEditedAt", "birthdayNoticeDay", "caretakerId", "bedroom", "bed", "team", "transportation", "allergies", "drugAllergies", "healthIssues"];
-
-async function buildNewCamperData(src: Camper, idMap: Map<string, string>, softIdx: SoftIndexes, catCtx: CategoryOptionContext): Promise<CamperData> {
-  const base = stripForCopy(src as unknown as Record<string, unknown>, CAMPER_RESET_KEYS);
-  return {
-    ...base,
-    caretakerId: remapLink(src.caretakerId, idMap, softIdx.staff),
-    bedroom: remapLink(src.bedroom, idMap, softIdx.bedroom),
-    bed: await remapCategoryOption(src.bed, catCtx),
-    team: remapLink(src.team, idMap, softIdx.team),
-    transportation: remapLink(src.transportation, idMap, softIdx.transport),
-    allergies: await remapCategoryOptions(src.allergies, catCtx),
-    drugAllergies: await remapCategoryOptions(src.drugAllergies, catCtx),
-    healthIssues: await remapCategoryOptions(src.healthIssues, catCtx),
-    importId: null,
-    aiReviewStatus: null,
-    aiReviewError: "",
-    aiReviewStartedAt: null,
-    aiReviewFinishedAt: null,
-  } as CamperData;
-}
-
-async function buildCamperUpdatePatch(src: Camper, catCtx: CategoryOptionContext): Promise<Partial<CamperData>> {
-  const base = stripForCopy(src as unknown as Record<string, unknown>, CAMPER_RESET_KEYS) as Partial<CamperData>;
-  base.allergies = await remapCategoryOptions(src.allergies, catCtx);
-  base.drugAllergies = await remapCategoryOptions(src.drugAllergies, catCtx);
-  base.healthIssues = await remapCategoryOptions(src.healthIssues, catCtx);
-  return base;
-}
-
-async function importCampers(sourceCampers: Camper[], opts: ImportOptions, idMap: Map<string, string>, softIdx: SoftIndexes, catCtx: CategoryOptionContext): Promise<BlockResult> {
+async function importCampers(sourceCampers: Camper[], opts: ImportOptions, idMap: Map<string, string>, softIdx: SoftIndexes, catCtx: CategoryOptionContext, sourceCampId: string): Promise<BlockResult> {
   let created = 0;
   let updated = 0;
   let skipped = 0;
+  let membershipsFailed = 0;
   const pool = opts.camperIds?.length ? sourceCampers.filter((c) => opts.camperIds!.includes(c._id)) : sourceCampers;
-  const targetCampers = await listCampers();
-  const byKey = new Map<string, Camper>();
-  for (const t of targetCampers) {
-    const key = camperMatchKey(t);
-    if (key) byKey.set(key, t);
-  }
+  const target = new Set((await listCampers({ includeDraft: true })).map((k) => k._id));
+  const responsibles = opts.core ? await withCamp(sourceCampId, () => responsiblesOf(pool.map((k) => k._id), sourceCampId)) : new Map<string, string[]>();
   for (const src of pool) {
-    const key = camperMatchKey(src);
-    const existing = key ? byKey.get(key) : undefined;
-    if (existing) {
-      idMap.set(src._id, existing._id);
+    if (target.has(src._id)) {
       if (opts.onMatch === "update") {
-        await updateCamper(existing._id, await buildCamperUpdatePatch(src, catCtx));
+        await updateCamper(src._id, { invitedBy: src.invitedBy, generalNotes: src.generalNotes, bedroomPreference: src.bedroomPreference });
         updated++;
-      } else {
-        skipped++;
-      }
-      if (src.guardianPhone) await ensureLoginAccount(src.guardianName || src.name, src.guardianPhone, "parent");
+      } else skipped++;
       continue;
     }
-    const data = await buildNewCamperData(src, idMap, softIdx, catCtx);
-    const createdDoc = await insertCamper(data);
-    idMap.set(src._id, createdDoc._id);
-    const newKey = camperMatchKey(createdDoc);
-    if (newKey) byKey.set(newKey, createdDoc);
-    if (createdDoc.guardianPhone) await ensureLoginAccount(createdDoc.guardianName || createdDoc.name, createdDoc.guardianPhone, "parent");
+    if (opts.core) {
+      const parents = responsibles.get(src._id) ?? [];
+      try {
+        await coreClient().addMembership(opts.core.tokens.projects, { personId: src._id, role: "participante", editionId: opts.core.editionId, involved: parents.map((personId) => ({ personId, purpose: "responsible" as const, kinds: [] })) });
+        for (const parent of parents) await grantRole(opts.core.tokens, parent, "responsavel", opts.core.editionId);
+      } catch (err) {
+        if (!(err instanceof IpalphaRejected)) throw err;
+        membershipsFailed++;
+      }
+    }
+    await insertCamper(src._id, {
+      sex: null,
+      invitedBy: src.invitedBy,
+      generalNotes: src.generalNotes,
+      bedroomPreference: src.bedroomPreference,
+      qrToken: src.qrToken,
+      caretakerId: null,
+      bedroom: null,
+      bed: await remapCategoryOption(src.bed, catCtx),
+      team: remapLink(src.team, idMap, softIdx.team),
+      transportation: remapLink(src.transportation, idMap, softIdx.transport),
+      importId: null,
+    });
+    target.add(src._id);
     created++;
   }
-  return { created, updated, skipped };
+  return { created, updated, skipped, membershipsFailed };
 }
 
 async function importRoles(sourceRoles: ScheduleRole[], idMap: Map<string, string>): Promise<BlockResult> {
@@ -467,7 +377,7 @@ function eventKey(e: Pick<CampEvent, "date" | "startTime" | "title">): string {
   return `${e.date}|${e.startTime}|${normalizeKey(e.title)}`;
 }
 
-async function importEvents(sourceEvents: CampEvent[], idMap: Map<string, string>, opts: ImportOptions, staffSoftMatch: Map<string, string>): Promise<BlockResult> {
+async function importEvents(sourceEvents: CampEvent[], idMap: Map<string, string>, opts: ImportOptions, onTeam: Set<string>): Promise<BlockResult> {
   let created = 0;
   let skipped = 0;
   const target = await listEvents();
@@ -480,7 +390,7 @@ async function importEvents(sourceEvents: CampEvent[], idMap: Map<string, string
     const roles = opts.withRoles ? src.roles.map((r) => idMap.get(r)).filter((r): r is string => !!r) : [];
     const assignments: EventAssignment[] = opts.withAssignments
       ? src.assignments.flatMap((a) => {
-          const staffId = remapLink(a.staffId, idMap, staffSoftMatch);
+          const staffId = onTeam.has(a.staffId) ? a.staffId : null;
           const roleId = idMap.get(a.roleId);
           return staffId && roleId ? [{ staffId, roleId, detail: a.detail, detailColor: a.detailColor }] : [];
         })
@@ -527,8 +437,7 @@ async function importPrepSections(sourceSections: PrepSection[]): Promise<BlockR
 }
 
 /** Copies the selected blocks of `sourceCampId` into the current (request) camp; every written document gets a brand-new id. */
-export async function importFromCamp(sourceCampId: string, opts: ImportOptions, actorUserId: string): Promise<Partial<Record<ImportBlock, BlockResult>>> {
-  void actorUserId;
+export async function importFromCamp(sourceCampId: string, opts: ImportOptions): Promise<Partial<Record<ImportBlock, BlockResult>>> {
   const blocks = new Set(opts.blocks);
   const idMap = new Map<string, string>();
   const results: Partial<Record<ImportBlock, BlockResult>> = {};
@@ -548,13 +457,12 @@ export async function importFromCamp(sourceCampId: string, opts: ImportOptions, 
     settings: await getSettings(),
   }));
 
-  const [targetTeams, targetBedrooms, targetTransports, targetStaffAll, targetCategories] = await Promise.all([listTeams(true), listBedrooms({ includeDraft: false }), listTransports(true), listStaff({ includeDraft: false }), listCategories()]);
+  const [targetTeams, targetBedrooms, targetTransports, targetCategories] = await Promise.all([listTeams(true), listBedrooms({ includeDraft: false }), listTransports(true), listCategories()]);
 
   const softIdx: SoftIndexes = {
     team: buildSoftMatchIndex(source.teams, targetTeams, (t) => normalizeKey(t.name)),
     bedroom: buildSoftMatchIndex(source.bedrooms, targetBedrooms, (b) => normalizeKey(b.name)),
     transport: buildSoftMatchIndex(source.transports, targetTransports, transportMatchKey),
-    staff: buildSoftMatchIndex(source.staff, targetStaffAll, staffMatchKey),
   };
 
   const targetCategoriesByKey = new Map(targetCategories.map((c) => [c.key, c]));
@@ -579,16 +487,17 @@ export async function importFromCamp(sourceCampId: string, opts: ImportOptions, 
     touched.add("transports");
   }
   if (blocks.has("staff")) {
-    results.staff = await importStaff(source.staff, opts, idMap, softIdx, catCtx);
+    results.staff = await importStaff(source.staff, opts, idMap, softIdx);
     touched.add("staff");
   }
   if (blocks.has("campers")) {
-    results.campers = await importCampers(source.campers, opts, idMap, softIdx, catCtx);
+    results.campers = await importCampers(source.campers, opts, idMap, softIdx, catCtx, sourceCampId);
     touched.add("campers");
   }
   if (blocks.has("schedule")) {
     const rolesResult = opts.withRoles ? await importRoles(source.roles, idMap) : { created: 0, updated: 0, skipped: 0 };
-    const eventsResult = await importEvents(source.events, idMap, opts, softIdx.staff);
+    const onTeam = new Set((await listStaff({ includeDraft: true })).map((s) => s._id));
+    const eventsResult = await importEvents(source.events, idMap, opts, onTeam);
     results.schedule = { created: rolesResult.created + eventsResult.created, updated: 0, skipped: rolesResult.skipped + eventsResult.skipped };
     touched.add("roles");
     touched.add("events");
@@ -601,8 +510,9 @@ export async function importFromCamp(sourceCampId: string, opts: ImportOptions, 
     touched.add("preparation");
   }
   if (blocks.has("settings")) {
+    const onTeam = new Set((await listStaff({ includeDraft: true })).map((s) => s._id));
     const remap: SettingsRemap = {
-      staff: (oldId) => remapLink(oldId, idMap, softIdx.staff),
+      person: (personId) => (onTeam.has(personId) ? personId : null),
       vehicle: (oldId) => remapLink(oldId, idMap, softIdx.transport),
     };
     await updateSettings(settingsToImport(source.settings, remap));
@@ -647,70 +557,34 @@ export async function campSummary(campId: string): Promise<Record<ImportBlock | 
   });
 }
 
-function matchesQuery(haystacks: string[], normalizedQuery: string, digitHaystacks: string[], digitQuery: string): boolean {
-  if (!normalizedQuery && !digitQuery) return true;
-  if (normalizedQuery && haystacks.some((h) => h.includes(normalizedQuery))) return true;
-  return !!digitQuery && digitHaystacks.some((h) => h.includes(digitQuery));
-}
-
-/** Campers of `campId`, filtered by `q` (name / guardian name / CPF); `matched` says whether a soft match already exists in the ACTIVE camp. */
+/** Kids of `campId`, filtered by `q` (name, live from core); `matched` = the same person is already in the ACTIVE camp. */
 export async function searchCampCampers(campId: string, q: string, limit = 50): Promise<CamperRow[]> {
   const [sourceCampers, sourceBedrooms, sourceTeams] = await withCamp(campId, () => Promise.all([listCampers(), listBedrooms({ includeDraft: true }), listTeams(true)]));
   const bedroomName = new Map(sourceBedrooms.map((b) => [b._id, b.name]));
   const teamName = new Map(sourceTeams.map((t) => [t._id, t.name]));
-
-  const [activeCampers, referenceIso] = await withCamp(activeCampId(), async () => [await listCampers(), await ageReferenceIso()] as const);
-  const matchedKeys = new Set(activeCampers.map((c) => camperMatchKey(c)).filter((k): k is string => !!k));
-
-  const normalizedQuery = normalizeKey(q);
-  const digitQuery = q.replace(/\D/g, "");
-  const filtered = sourceCampers.filter((c) => matchesQuery([normalizeKey(c.name), normalizeKey(c.guardianName)], normalizedQuery, [c.cpf.replace(/\D/g, "")], digitQuery));
-
-  return filtered
+  const active = new Set((await withCamp(activeCampId(), () => listCampers({ includeDraft: true }))).map((k) => k._id));
+  const names = await namesOf(sourceCampers.map((k) => k._id));
+  const query = normalizeKey(q);
+  return sourceCampers
+    .map((k) => ({ k, name: names.get(k._id)?.name ?? "" }))
+    .filter(({ name }) => !query || normalizeKey(name).includes(query))
     .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"))
     .slice(0, limit)
-    .map((c) => {
-      const key = camperMatchKey(c);
-      return {
-        id: c._id,
-        name: c.name,
-        birthDate: c.birthDate,
-        age: ageAt(c.birthDate, referenceIso),
-        sex: c.sex,
-        guardianFirstName: c.guardianName ? c.guardianName.trim().split(/\s+/)[0] ?? null : null,
-        bedroom: c.bedroom ? bedroomName.get(c.bedroom) ?? null : null,
-        team: c.team ? teamName.get(c.team) ?? null : null,
-        matched: !!key && matchedKeys.has(key),
-      };
-    });
+    .map(({ k, name }) => ({ id: k._id, name, sex: k.sex, bedroom: k.bedroom ? bedroomName.get(k.bedroom) ?? null : null, team: k.team ? teamName.get(k.team) ?? null : null, matched: active.has(k._id) }));
 }
 
-/** Staff of `campId`, filtered by `q` (name / phone); `matched` says whether a soft match already exists in the ACTIVE camp. */
+/** Team of `campId`, filtered by `q` (name, live); `matched` = already on the ACTIVE camp's team. */
 export async function searchCampStaff(campId: string, q: string, limit = 50): Promise<StaffRow[]> {
   const [sourceStaff, sourceBedrooms, sourceTeams] = await withCamp(campId, () => Promise.all([listStaff({ includeDraft: true }), listBedrooms({ includeDraft: true }), listTeams(true)]));
   const bedroomName = new Map(sourceBedrooms.map((b) => [b._id, b.name]));
   const teamName = new Map(sourceTeams.map((t) => [t._id, t.name]));
-
-  const activeStaff = await withCamp(activeCampId(), () => listStaff({ includeDraft: true }));
-  const matchedKeys = new Set(activeStaff.map((s) => staffMatchKey(s)).filter((k): k is string => !!k));
-
-  const normalizedQuery = normalizeKey(q);
-  const digitQuery = q.replace(/\D/g, "");
-  const filtered = sourceStaff.filter((s) => matchesQuery([normalizeKey(s.name)], normalizedQuery, [(s.phone ?? "").replace(/\D/g, "")], digitQuery));
-
-  return filtered
+  const active = new Set((await withCamp(activeCampId(), () => listStaff({ includeDraft: true }))).map((s) => s._id));
+  const names = await namesOf(sourceStaff.map((s) => s._id));
+  const query = normalizeKey(q);
+  return sourceStaff
+    .map((s) => ({ s, name: names.get(s._id)?.name ?? "" }))
+    .filter(({ name }) => !query || normalizeKey(name).includes(query))
     .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"))
     .slice(0, limit)
-    .map((s) => {
-      const key = staffMatchKey(s);
-      return {
-        id: s._id,
-        name: s.name,
-        phone: s.phone,
-        roomRole: s.roomRole,
-        bedroom: s.bedroom ? bedroomName.get(s.bedroom) ?? null : null,
-        team: s.team ? teamName.get(s.team) ?? null : null,
-        matched: !!key && matchedKeys.has(key),
-      };
-    });
+    .map(({ s, name }) => ({ id: s._id, name, roomRole: s.roomRole, bedroom: s.bedroom ? bedroomName.get(s.bedroom) ?? null : null, team: s.team ? teamName.get(s.team) ?? null : null, matched: active.has(s._id) }));
 }

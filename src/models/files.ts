@@ -29,7 +29,7 @@ function pathOf(id: string): string {
   return join(DIR, id);
 }
 
-export async function insertFile(input: { name: string; type: string; data: Uint8Array; byUserId: string }): Promise<StoredFile> {
+export async function insertFile(input: { name: string; type: string; data: Uint8Array; byPersonId: string }): Promise<StoredFile> {
   await ensureDir();
   const db = await getDb();
   const _id = randomBytes(24).toString("hex");
@@ -39,7 +39,7 @@ export async function insertFile(input: { name: string; type: string; data: Uint
     name: input.name,
     type: input.type,
     size: input.data.byteLength,
-    byUserId: input.byUserId,
+    byPersonId: input.byPersonId,
     createdAt: new Date(),
   };
   await db.collection(COLLECTION).insertOne(meta as never);
@@ -53,7 +53,7 @@ export async function findFileWithData(id: string): Promise<(StoredFile & { data
   if (!doc) return null;
   // bytes on disk (the normal path)
   const disk = await readFile(pathOf(id)).catch(() => null);
-  if (disk) return { _id: id, name: doc.name as string, type: doc.type as string, size: doc.size as number, byUserId: doc.byUserId as string, createdAt: doc.createdAt as Date, data: new Uint8Array(disk) };
+  if (disk) return { _id: id, name: doc.name as string, type: doc.type as string, size: doc.size as number, byPersonId: doc.byPersonId as string, createdAt: doc.createdAt as Date, data: new Uint8Array(disk) };
   // legacy: the bytes still live inside the document → move them to disk once
   const bin = doc.data as Binary | undefined;
   if (!bin) return null;
@@ -61,7 +61,7 @@ export async function findFileWithData(id: string): Promise<(StoredFile & { data
   await writeFile(pathOf(id), bin.buffer);
   await db.collection(COLLECTION).updateOne({ _id: id as never }, { $unset: { data: "" } });
   console.log(`📦 file ${id} migrated from Mongo to ${DIR}`);
-  return { _id: id, name: doc.name as string, type: doc.type as string, size: doc.size as number, byUserId: doc.byUserId as string, createdAt: doc.createdAt as Date, data: bin.buffer };
+  return { _id: id, name: doc.name as string, type: doc.type as string, size: doc.size as number, byPersonId: doc.byPersonId as string, createdAt: doc.createdAt as Date, data: bin.buffer };
 }
 
 /** Id of the most recent upload with this exact name (used by the seeds to avoid re-uploading their assets). */

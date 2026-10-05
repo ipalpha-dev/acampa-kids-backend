@@ -42,8 +42,7 @@ export interface CamperImportRecord {
   finishedSmsSentAt: Date | null;
   errorSmsSentAt: Date | null;
   notificationCheckedAt: Date | null;
-  createdByUserId: string;
-  createdByName: string;
+  createdByPersonId: string;
   error: string;
   createdAt: Date;
   updatedAt: Date;
@@ -75,8 +74,7 @@ function toImport(doc: Record<string, unknown> | null): CamperImportRecord | nul
     finishedSmsSentAt: (doc.finishedSmsSentAt as Date) ?? null,
     errorSmsSentAt: (doc.errorSmsSentAt as Date) ?? null,
     notificationCheckedAt: (doc.notificationCheckedAt as Date) ?? null,
-    createdByUserId: (doc.createdByUserId as string) ?? "",
-    createdByName: (doc.createdByName as string) ?? "",
+    createdByPersonId: (doc.createdByPersonId as string) ?? "",
     error: (doc.error as string) ?? "",
     createdAt: doc.createdAt as Date,
     updatedAt: doc.updatedAt as Date,

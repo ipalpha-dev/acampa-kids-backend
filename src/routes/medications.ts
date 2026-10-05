@@ -1,30 +1,27 @@
 import { Hono, type Context } from "hono";
-import { requireAuth } from "../middleware/auth";
-import { findCamperById } from "../models/campers";
+import { requireAuth, type AuthVariables } from "../middleware/auth";
+import { findCamperById, listCampers } from "../models/campers";
 import { deleteMedicationDose, findMedicationDoseById, insertMedicationDose, listMedicationDoses, medKeyOf } from "../models/medications";
 import { publish } from "../services/realtime";
 import { resolveScope } from "../services/scope";
 import { todayInSaoPaulo } from "../utils";
-import { MEDICATION_SOS_SLOT, type MedicationDose, type Role, type SessionUser } from "../types";
+import { MEDICATION_SOS_SLOT, PARTICIPANT_ROLE, type MedicationDose } from "../types";
+import { actingToken } from "../services/acting";
+import { coreClient } from "../services/ipalpha";
+import { PERSONS_RESOURCE } from "../services/ipalpha/coreClient";
+import { MEDICAL_KIND, readHealth, toHealth } from "../services/people";
 
-interface Env {
-  Variables: {
-    userId: string;
-    sessionId: string;
-    activeRole: Role;
-    user: SessionUser;
-  };
-}
+type Env = { Variables: AuthVariables };
 
 /**
  * Medicações — the medical team's daily checklist of the CONTINUOUS
- * medication the kids take. The prescription lives on the camper
- * (`Camper.medications`, filled by the parents / admin); here the team only
- * ticks what was actually given, so nobody has to remember whether the 12:30
- * pill already went out.
+ * medication the kids take. The prescription lives in persons-api (the
+ * kid's `medical` block, read with the acting role token — logged by core);
+ * here the team only ticks what was actually given.
  *
- *   GET    /api/medications          every tick (admin / organizer / medical)
- *   POST   /api/medications          tick one dose { camperId, medName, day?, slot, note? }
+ *   GET    /api/medications                every tick (coordenação / organização / saúde)
+ *   GET    /api/medications/prescriptions  the kids of this camp with medicines (name + medications), live from core
+ *   POST   /api/medications                tick one dose { personId, medName, day?, slot, note? }
  *   DELETE /api/medications/:id      untick (a mistake)
  *
  * A scheduled slot ("HH:MM") is one tick per kid, medicine and day — posting
@@ -44,15 +41,14 @@ function fail(c: Context, code: string, message: string, status: 400 | 403 | 404
 export function serializeMedicationDose(d: MedicationDose) {
   return {
     id: d._id,
-    camperId: d.camperId,
-    camperName: d.camperName,
+    personId: d.personId,
     medKey: d.medKey,
     medName: d.medName,
     dose: d.dose,
     day: d.day,
     slot: d.slot,
     givenAt: d.givenAt,
-    by: { id: d.byUserId, name: d.byName },
+    byPersonId: d.byPersonId,
     note: d.note,
   };
 }
@@ -61,7 +57,7 @@ export function serializeMedicationDose(d: MedicationDose) {
 async function medicationAccess(c: Context<Env, string>): Promise<boolean> {
   const role = c.get("activeRole");
   if (role === "admin") return true;
-  if (role !== "staff" && role !== "health_staff") return false;
+  if (role !== "staff") return false;
   const scope = await resolveScope(c.get("user"));
   return scope.all || scope.medical;
 }
@@ -73,20 +69,37 @@ medications.get("/", async (c) => {
   return c.json({ medications: (await listMedicationDoses()).map(serializeMedicationDose) });
 });
 
+/**
+ * GET /api/medications/prescriptions?cursor — one page (≤ 200) of the camp's
+ * kids who take medicines: `{items: [{personId, name, medications}], nextCursor}`.
+ * Read from persons-api with the acting role token (role rules decide).
+ */
+medications.get("/prescriptions", async (c) => {
+  if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe médica e a organização veem as medicações.", 403);
+  const kids = new Set((await listCampers()).map((k) => k._id));
+  const page = await coreClient().listPeople(actingToken(c, PERSONS_RESOURCE), { role: PARTICIPANT_ROLE, kinds: [MEDICAL_KIND], cursor: c.req.query("cursor") || undefined, limit: 200 });
+  const items = page.items
+    .filter((p) => kids.has(p.personId))
+    .map((p) => ({ personId: p.personId, name: p.name, medications: toHealth(p.data.health).medications }))
+    .filter((p) => p.medications.length > 0);
+  return c.json({ items, nextCursor: page.nextCursor });
+});
+
 medications.post("/", async (c) => {
   if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe médica e a organização marcam medicações.", 403);
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
 
-  const camper = typeof body.camperId === "string" ? await findCamperById(body.camperId) : null;
+  const camper = typeof body.personId === "string" ? await findCamperById(body.personId) : null;
   if (!camper) return fail(c, "CAMPER_NOT_FOUND", "Criança não encontrada.", 404);
 
   const medName = typeof body.medName === "string" ? body.medName.trim().slice(0, 120) : "";
   if (!medName) return fail(c, "MED_REQUIRED", "Informe qual medicamento foi dado.");
   const medKey = medKeyOf(medName);
-  // the medicine must be on the kid's prescription (the parents' / admin's list)
-  const prescribed = camper.medications.find((m) => medKeyOf(m.name) === medKey);
-  if (!prescribed) return fail(c, "MED_NOT_PRESCRIBED", `${medName} não está na medicação de ${camper.name.split(" ")[0]}.`, 404);
+  // the medicine must be on the kid's prescription (persons-api, read now with the acting token)
+  const health = await readHealth(actingToken(c, PERSONS_RESOURCE), camper._id);
+  const prescribed = health?.medications.find((m) => medKeyOf(m.name) === medKey);
+  if (!prescribed) return fail(c, "MED_NOT_PRESCRIBED", `${medName} não está na medicação desta criança.`, 404);
 
   const slot = typeof body.slot === "string" ? body.slot.trim() : "";
   const scheduled = TIME_RE.test(slot);
@@ -98,7 +111,7 @@ medications.post("/", async (c) => {
   const note = typeof body.note === "string" ? body.note.trim().slice(0, NOTE_MAX) : "";
   const user = c.get("user");
   const created = await insertMedicationDose(
-    { camperId: camper._id, camperName: camper.name, medKey, medName: prescribed.name, dose: prescribed.dose, day, slot, byUserId: user.id, byName: user.name, note },
+    { personId: camper._id, medKey, medName: prescribed.name, dose: prescribed.dose, day, slot, byPersonId: user.id, note },
     scheduled,
   );
   publish("medications");

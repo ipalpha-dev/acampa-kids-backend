@@ -1,12 +1,15 @@
 /**
- * IPAlpha (core auth-api + persons-api) login. Every REQUIRED variable must be
- * present for the feature to turn on; absent = the IPAlpha button is hidden and
- * the legacy phone + code login keeps sending its own SMS (see README → IPAlpha).
+ * IPAlpha core (auth-api, persons-api, projects-api, notifications-api). IPAlpha
+ * owns identity and roles (CONTRACTS_ACAMPA §10–§15): without every REQUIRED
+ * variable nobody can sign in (the login answers IPALPHA_UNAVAILABLE) — the
+ * rest of the API still boots.
  */
 export const IPALPHA_REQUIRED_ENV = [
   "IPALPHA_AUTH_API_URL",
   "IPALPHA_AUTH_ORIGIN",
   "IPALPHA_PERSONS_API_URL",
+  "IPALPHA_PROJECTS_API_URL",
+  "IPALPHA_NOTIFICATIONS_API_URL",
   "IPALPHA_TOKEN_ISSUER",
   "IPALPHA_CLIENT_ID",
   "IPALPHA_ENTRY_POINT",
@@ -14,6 +17,8 @@ export const IPALPHA_REQUIRED_ENV = [
   "IPALPHA_REDIRECT_URI",
   "IPALPHA_SYSTEM_CLIENT_ID",
   "IPALPHA_SYSTEM_CLIENT_SECRET",
+  "IPALPHA_PROJECT_ID",
+  "SESSION_TOKEN_KEY",
 ] as const;
 
 export interface IpalphaConfig {
@@ -24,6 +29,8 @@ export interface IpalphaConfig {
   authApiUrl: string;
   authOrigin: string;
   personsApiUrl: string;
+  projectsApiUrl: string;
+  notificationsApiUrl: string;
   tokenIssuer: string;
   clientId: string;
   entryPoint: string;
@@ -31,10 +38,10 @@ export interface IpalphaConfig {
   redirectUri: string;
   systemClientId: string;
   systemClientSecret: string;
-  /** the long-lived Acampa project in projects-api (optional: login + edition rollover become project-scoped) */
-  projectId: string | null;
-  /** projects-api base URL — only used by the camp → edition rollover (optional) */
-  projectsApiUrl: string | null;
+  /** the long-lived, yearly Acampa project in projects-api */
+  projectId: string;
+  /** 32-byte AES-256-GCM key (base64 or hex) that encrypts the per-role core tokens kept in the session */
+  sessionTokenKey: string;
 }
 
 const trimSlash = (v: string) => v.replace(/\/+$/, "");
@@ -48,6 +55,8 @@ export function readIpalphaConfig(env: Record<string, string | undefined>): Ipal
     authApiUrl: trimSlash(get("IPALPHA_AUTH_API_URL")),
     authOrigin: trimSlash(get("IPALPHA_AUTH_ORIGIN")),
     personsApiUrl: trimSlash(get("IPALPHA_PERSONS_API_URL")),
+    projectsApiUrl: trimSlash(get("IPALPHA_PROJECTS_API_URL")),
+    notificationsApiUrl: trimSlash(get("IPALPHA_NOTIFICATIONS_API_URL")),
     tokenIssuer: get("IPALPHA_TOKEN_ISSUER"),
     clientId: get("IPALPHA_CLIENT_ID"),
     entryPoint: get("IPALPHA_ENTRY_POINT"),
@@ -55,9 +64,14 @@ export function readIpalphaConfig(env: Record<string, string | undefined>): Ipal
     redirectUri: get("IPALPHA_REDIRECT_URI"),
     systemClientId: get("IPALPHA_SYSTEM_CLIENT_ID"),
     systemClientSecret: get("IPALPHA_SYSTEM_CLIENT_SECRET"),
-    projectId: get("IPALPHA_PROJECT_ID") || null,
-    projectsApiUrl: get("IPALPHA_PROJECTS_API_URL") ? trimSlash(get("IPALPHA_PROJECTS_API_URL")) : null,
+    projectId: get("IPALPHA_PROJECT_ID"),
+    sessionTokenKey: get("SESSION_TOKEN_KEY"),
   };
+}
+
+/** `SUPER_ADMIN_PERSON_IDS` (comma list of IPAlpha person ids) — deployment owners, always coordenação. */
+export function readSuperAdminPersonIds(raw: string | undefined): string[] {
+  return [...new Set((raw ?? "").split(",").map((s) => s.trim()).filter(Boolean))];
 }
 
 const aiBaseUrl = (process.env.AI_BASE_URL ?? "https://ai-models.kevyn.com.br/v1").replace(/\/$/, "");

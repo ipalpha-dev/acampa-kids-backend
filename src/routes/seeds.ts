@@ -1,31 +1,17 @@
 import { Hono, type Context } from "hono";
-import { config } from "../config";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireAdmin, requireManager } from "../middleware/roles";
 import { cleanHtml } from "../services/html";
 import { clearSeeds, getSeeds, saveSeeds } from "../models/seeds";
-import type { Role, SeedBus, SeedDocs, SeedEvent, SeedPlace, SeedPlaceRoom, SeedRole, Seeds, SessionUser } from "../types";
-import { normalizeBrazilPhone } from "../utils";
+import type { SeedBus, SeedDocs, SeedEvent, SeedPlace, SeedPlaceRoom, SeedRole, Seeds } from "../types";
 
-interface Env {
-  Variables: {
-    userId: string;
-    sessionId: string;
-    activeRole: Role;
-    user: SessionUser;
-  };
-}
+type Env = { Variables: AuthVariables };
 
 const seeds = new Hono<Env>();
 
-/** The deployment owner (SUPER_ADMIN_PHONE) — the only one who may change the seeds. */
-function superAdminPhone(): string | null {
-  return config.superAdminPhone ? normalizeBrazilPhone(config.superAdminPhone) : null;
-}
-
-function isSuperAdmin(c: Context): boolean {
-  const phone = superAdminPhone();
-  return !!phone && c.get("user").phone === phone;
+/** The deployment owners (SUPER_ADMIN_PERSON_IDS) — the only ones who may change the seeds. */
+function isSuperAdmin(c: Context<Env>): boolean {
+  return c.get("user").superAdmin;
 }
 
 function fail(c: Context, code: string, message: string, status: 400 | 403 | 404 = 400) {
@@ -231,20 +217,20 @@ seeds.get("/", requireManager, async (c) => c.json({ seeds: await getSeeds() }))
 
 /** PUT /api/seeds — SUPER ADMIN only. Replaces the whole seeds document the wizard imports from. */
 seeds.put("/", requireAdmin, async (c) => {
-  if (!isSuperAdmin(c)) return fail(c, "SUPER_ADMIN_ONLY", "Só o administrador da implantação (SUPER_ADMIN_PHONE) mantém as sementes.", 403);
+  if (!isSuperAdmin(c)) return fail(c, "SUPER_ADMIN_ONLY", "Só o administrador da implantação (SUPER_ADMIN_PERSON_IDS) mantém as sementes.", 403);
   const body = await c.req.json().catch(() => null);
   const parsed = parseSeeds(body);
   if (!("places" in parsed)) return fail(c, "SEEDS_INVALID", parsed.error);
   const saved = await saveSeeds(parsed);
-  console.log(`🌱 seeds updated by ${c.get("user").name}`);
+  console.log("🌱 seeds updated");
   return c.json({ seeds: saved });
 });
 
 /** DELETE /api/seeds — SUPER ADMIN only. "Restaurar tudo": back to the app's built-in defaults. */
 seeds.delete("/", requireAdmin, async (c) => {
-  if (!isSuperAdmin(c)) return fail(c, "SUPER_ADMIN_ONLY", "Só o administrador da implantação (SUPER_ADMIN_PHONE) mantém as sementes.", 403);
+  if (!isSuperAdmin(c)) return fail(c, "SUPER_ADMIN_ONLY", "Só o administrador da implantação (SUPER_ADMIN_PERSON_IDS) mantém as sementes.", 403);
   await clearSeeds();
-  console.log(`🌱 seeds reset by ${c.get("user").name}`);
+  console.log("🌱 seeds reset");
   return c.json({ seeds: null });
 });
 

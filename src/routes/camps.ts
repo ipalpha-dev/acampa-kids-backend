@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { createMiddleware } from "hono/factory";
-import { requireAuth } from "../middleware/auth";
+import { canSwitchCamps, requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireManager } from "../middleware/roles";
 import {
   activateCamp,
@@ -11,32 +11,21 @@ import {
   getCampDeleteOtp,
   listCamps,
   setCampDeleteOtp,
+  setCampEditionId,
   updateCamp,
   type Camp,
 } from "../models/camps";
 import { updateSettings } from "../models/settings";
 import { activeCamp, inHistoryCamp, withCamp } from "../services/campContext";
-import { canSwitchCamps } from "../services/campAccess";
-import { comteleEnabled, comteleSendSms } from "../services/comtele";
-import { deleteCamp, evaluateCampDeleteCode } from "../services/campDelete";
+import { deleteCamp, evaluateCampDeleteCode, generateDeleteCode, hashDeleteCode } from "../services/campDelete";
 import { IMPORT_BLOCKS, campSummary, importFromCamp, searchCampCampers, searchCampStaff, type ImportBlock, type ImportOptions } from "../services/campImport";
-import { generateLocalCode, hashCode } from "../services/otp";
 import { rearmActiveCampTimers } from "../services/realtime";
 import { rolloverEdition } from "../services/ipalpha";
-import { sms, smsPrefix } from "../i18n";
-import type { Role, SessionUser } from "../types";
-import { formatBrazilPhone } from "../utils";
+import { sendMessage } from "../services/messages";
+import { coordinationContext } from "../services/acting";
+import { COORDINATION_ROLE } from "../types";
 
-interface Env {
-  Variables: {
-    userId: string;
-    sessionId: string;
-    activeRole: Role;
-    user: SessionUser;
-    campId: string;
-    targetCamp: Camp;
-  };
-}
+type Env = { Variables: AuthVariables & { targetCamp: Camp } };
 
 const camps = new Hono<Env>();
 
@@ -48,9 +37,10 @@ function serializeCampFull(c: Camp): { id: string; label: string; year: number; 
   return { ...serializeCamp(c), active: c.active, archivedAt: c.archivedAt ? c.archivedAt.toISOString() : null };
 }
 
-/** the global admin role only (super admin included — it's just the account whose phone matches SUPER_ADMIN_PHONE) */
+/** the coordenação (project-wide role, acting as it) or a SUPER_ADMIN_PERSON_IDS owner */
 const requireGlobalAdmin = createMiddleware<Env>(async (c, next) => {
-  if (!c.get("user").roles.includes("admin")) {
+  const user = c.get("user");
+  if (user.coreRole !== COORDINATION_ROLE && !user.superAdmin) {
     return c.json({ error: { code: "FORBIDDEN", message: "Só administradores podem gerenciar acampamentos." } }, 403);
   }
   await next();
@@ -67,7 +57,7 @@ camps.get("/active", (c) => c.json(serializeCamp(activeCamp())));
  * passed the guard (there is no per-camp restriction beyond that).
  */
 camps.get("/", requireAuth, async (c) => {
-  if (!(await canSwitchCamps(c.get("user"), c.get("activeRole")))) {
+  if (!canSwitchCamps(c.get("session"))) {
     return c.json({ error: { code: "CAMP_FORBIDDEN", message: "Só a organização pode ver outros anos." } }, 403);
   }
   const list = await listCamps();
@@ -97,12 +87,12 @@ camps.post("/", requireAuth, requireGlobalAdmin, async (c) => {
     return c.json({ error: { code: "YEAR_INVALID", message: "Informe um ano entre 2000 e 2100." } }, 400);
   }
 
-  const created = await createCamp({ label, year, createdByUserId: c.get("userId") });
+  const created = await createCamp({ label, year, createdByPersonId: c.get("userId") });
   await activateCamp(created._id);
   await withCamp(created._id, () => updateSettings({ wizardMode: false }));
   await rearmActiveCampTimers();
-  // IPAlpha: this year's edition becomes the project's current one (best effort, never blocks)
-  void rolloverEdition(created.year);
+  // IPAlpha: this year's edition becomes the project's current one (best effort, never blocks); its id is kept on the camp
+  void rolloverEdition(created.year).then((r) => (r.editionId ? setCampEditionId(created._id, r.editionId) : undefined));
 
   return c.json({ camp: serializeCampFull((await findCamp(created._id)) ?? created) }, 201);
 });
@@ -139,14 +129,15 @@ camps.put("/:id", requireAuth, requireGlobalAdmin, async (c) => {
   if (typeof body?.archived === "boolean") patch.archived = body.archived;
   const updated = Object.keys(patch).length ? await updateCamp(id, patch) : await findCamp(id);
   // IPAlpha: the activated camp's year becomes the project's current edition (best effort, never blocks)
-  if (body?.active === true && updated) void rolloverEdition(updated.year);
+  if (body?.active === true && updated) void rolloverEdition(updated.year).then((r) => (r.editionId ? setCampEditionId(updated._id, r.editionId) : undefined));
 
   return c.json({ camp: serializeCampFull(updated!) });
 });
 
 /**
  * POST /api/camps/:id/delete/request — admin, target must not be active.
- * Sends a 6-digit code, valid 5 minutes, to the CALLER's own phone.
+ * Sends a 6-digit code, valid 5 minutes, to the CALLER (template
+ * `acampa-camp-delete-code`, by person id — core picks the phone).
  */
 camps.post("/:id/delete/request", requireAuth, requireGlobalAdmin, async (c) => {
   const id = c.req.param("id");
@@ -154,24 +145,15 @@ camps.post("/:id/delete/request", requireAuth, requireGlobalAdmin, async (c) => 
   if (!target) return c.json({ error: { code: "CAMP_NOT_FOUND", message: "Acampamento não encontrado." } }, 404);
   if (target.active) return c.json({ error: { code: "CAMP_ACTIVE", message: "Torne outro acampamento ativo primeiro." } }, 409);
 
-  const user = c.get("user");
-  const code = generateLocalCode();
+  const code = generateDeleteCode();
   const expiresAt = new Date(Date.now() + DELETE_CODE_MINUTES * 60_000);
-  await setCampDeleteOtp(id, { codeHash: hashCode(code), requestedByUserId: c.get("userId"), expiresAt, attempts: 0 });
-
-  const viaSms = comteleEnabled();
-  if (viaSms) {
-    const result = await comteleSendSms(user.phone, sms(user.locale, "otp", { prefix: smsPrefix(), code, minutes: DELETE_CODE_MINUTES }));
-    if (!result.ok) {
-      await clearCampDeleteOtp(id);
-      console.error("[comtele] delete-camp code failed:", result.message);
-      return c.json({ error: { code: "SMS_SEND_FAILED", message: "Não foi possível enviar o SMS agora. Tente novamente em instantes." } }, 502);
-    }
-  } else {
-    console.log(`🔐 delete-camp code for ${target.label}: ${code}`);
+  await setCampDeleteOtp(id, { codeHash: hashDeleteCode(code), requestedByPersonId: c.get("userId"), expiresAt, attempts: 0 });
+  const sent = await sendMessage("campDeleteCode", [{ personId: c.get("userId"), variables: { code, minutes: DELETE_CODE_MINUTES } }], "camp-delete-code");
+  if (!sent || sent.sent === 0) {
+    await clearCampDeleteOtp(id);
+    return c.json({ error: { code: "SMS_SEND_FAILED", message: "Não foi possível enviar o código agora. Tente novamente em instantes." } }, 502);
   }
-
-  return c.json({ success: true, phone: formatBrazilPhone(user.phone), expiresAt: expiresAt.toISOString(), delivery: viaSms ? "sms" : "mock" });
+  return c.json({ success: true, expiresAt: expiresAt.toISOString(), delivery: "sms" });
 });
 
 /**
@@ -196,9 +178,8 @@ camps.post("/:id/delete/confirm", requireAuth, requireGlobalAdmin, async (c) => 
   }
 
   await clearCampDeleteOtp(id);
-  const user = c.get("user");
   const removed = await deleteCamp(id);
-  console.log(`🗑️ camp "${target.label}" deleted by ${user.name} (${user.phone})`, removed);
+  console.log(`🗑️ camp "${target.label}" deleted`, removed);
   return c.json({ success: true, removed });
 });
 
@@ -260,7 +241,9 @@ camps.post("/:id/import", requireAuth, requireManager, requireOtherCamp, async (
     onMatch: body?.onMatch === "update" ? "update" : "skip",
   };
 
-  const result = await importFromCamp(target._id, opts, c.get("userId"));
+  // the coordenação's tokens let the copied people join this year's edition in IPAlpha (otherwise camp ops only)
+  const ctx = await coordinationContext(c.get("session"));
+  const result = await importFromCamp(target._id, { ...opts, core: ctx.ok ? { tokens: ctx.tokens, editionId: ctx.editionId } : null });
   return c.json({ result });
 });
 

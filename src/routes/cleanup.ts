@@ -130,7 +130,7 @@ cleanup.post("/:group", async (c) => {
   const touched = new Set<Collection>(groups.flatMap((g) => TOUCHES[g]));
   if (all) touched.add("settings");
   publish(...touched);
-  console.log(`🧹 cleanup (${all ? "tudo" : group}) by ${c.get("user").name}${keep.length ? ` (mantendo ${keep.join(", ")})` : ""}${roles ? " (+funções)" : ""}: ${Object.entries(removed).map(([g, n]) => `${g} ${n}`).join(", ")}`);
+  console.log(`🧹 cleanup (${all ? "tudo" : group})${keep.length ? ` (mantendo ${keep.join(", ")})` : ""}${roles ? " (+funções)" : ""}: ${Object.entries(removed).map(([g, n]) => `${g} ${n}`).join(", ")}`);
 
   return c.json({ removed });
 });

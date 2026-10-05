@@ -1,123 +1,85 @@
 import { createMiddleware } from "hono/factory";
-import { findById, toPublicUser } from "../models/users";
-import { listCampersOfGuardian } from "../models/campers";
-import { revokeSession, revokeUserSessions, verifySessionToken } from "../services/session";
+import { config, readSuperAdminPersonIds } from "../config";
+import { findSessionByToken, revokeSession } from "../services/session";
 import { getSettings, staffAccessOpen } from "../models/settings";
-import { findStaffByPhone } from "../models/staff";
 import { staffHasAccess } from "../services/scope";
 import { activeCampId, withCamp } from "../services/campContext";
-import { canSwitchCamps } from "../services/campAccess";
-import type { Role, SessionUser, User } from "../types";
+import { audienceOf, COORDINATION_ROLE, RESPONSIBLE_ROLE, type Role, type Session, type SessionUser } from "../types";
 
-/**
- * A live session whose profile the person may no longer enter with (tokens
- * last days, the data changes under them):
- *
- *   - PARENT without a single kid enrolled — the enrolment was cancelled, or
- *     the account merely carries a stale `roles: ["parent"]`.
- *   - STAFF without an active roster record — including an administrator who
- *     chose the separate team profile after OTP.
- *
- * Returns true when the session must be dropped (and drops it).
- */
-export async function roleNoLongerValid(role: Role, user: Pick<User, "_id" | "phone" | "roles">): Promise<boolean> {
-  const invalid = role === "parent"
-    ? (await listCampersOfGuardian(user.phone)).length === 0
-    : role === "staff" ? !(await findStaffByPhone(user.phone))?.active : false;
-  if (!invalid) return false;
-  await revokeUserSessions(user._id);
-  return true;
+export const superAdminIds = (): string[] => readSuperAdminPersonIds(process.env.SUPER_ADMIN_PERSON_IDS);
+
+/** SUPER_ADMIN_PERSON_IDS member (deployment owner — always coordenação, decision 36). */
+export function isSuperAdmin(personId: string): boolean {
+  return superAdminIds().includes(personId);
+}
+
+/** The bearer token of the request (`Authorization: Bearer …`), or null. */
+export function bearerOf(header: string | undefined): string | null {
+  const h = header ?? "";
+  return h.startsWith("Bearer ") ? h.slice(7) : null;
+}
+
+/** May this session look at other years? Coordenação (project-wide role, every edition) and the super admin. */
+export function canSwitchCamps(session: Pick<Session, "personId" | "activeRole">): boolean {
+  return session.activeRole === COORDINATION_ROLE || isSuperAdmin(session.personId);
+}
+
+/** The request's user (no person data — names are read live where shown). */
+export function sessionUser(session: Session, history: boolean): SessionUser {
+  const superAdmin = isSuperAdmin(session.personId);
+  // a history session reads as the coordenação
+  const activeRole: Role = history ? "admin" : audienceOf(session.activeRole);
+  return { id: session.personId, personId: session.personId, roles: session.roles, coreRole: session.activeRole, activeRole, superAdmin };
 }
 
 /**
- * Ordinary team members lose their session the moment `staffAccessWindow`
- * closes; parents the moment `parentAccessWindow` closes. Returns true when the session must be dropped (and drops it).
+ * Plain team members lose their session when `staffAccessWindow` closes;
+ * parents when `parentAccessWindow` closes. True when the session was dropped.
  */
-export async function staffSessionExpired(role: Role, phone: string, userId: string): Promise<boolean> {
-  if (role === "parent") {
-    if (staffAccessOpen((await getSettings()).parentAccessWindow)) return false;
-    await revokeUserSessions(userId);
-    return true;
-  }
-  if (role !== "staff" && role !== "health_staff") return false;
-  const me = await findStaffByPhone(phone);
-  if (!me) return false;
-  if (staffHasAccess(me._id, await getSettings())) return false;
-  await revokeUserSessions(userId);
+export async function accessWindowClosed(session: Session): Promise<boolean> {
+  if (session.activeRole === COORDINATION_ROLE || isSuperAdmin(session.personId)) return false;
+  const settings = await getSettings();
+  const open = session.activeRole === RESPONSIBLE_ROLE ? staffAccessOpen(settings.parentAccessWindow) : staffHasAccess(session.personId, session.activeRole, settings);
+  if (open) return false;
+  await revokeSession(session._id);
   return true;
 }
 
-export const requireAuth = createMiddleware<{
-  Variables: {
-    userId: string;
-    sessionId: string;
-    activeRole: SessionUser["activeRole"];
-    user: SessionUser;
-    campId: string;
-  };
-}>(async (c, next) => {
-  const header = c.req.header("authorization") ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+export type AuthVariables = {
+  userId: string;
+  sessionId: string;
+  session: Session;
+  activeRole: Role;
+  user: SessionUser;
+  campId: string;
+};
 
-  if (!token) {
-    return c.json(
-      { error: { code: "UNAUTHORIZED", message: "Token ausente." } },
-      401,
-    );
-  }
+export const requireAuth = createMiddleware<{ Variables: AuthVariables }>(async (c, next) => {
+  const token = bearerOf(c.req.header("authorization"));
+  if (!token) return c.json({ error: { code: "UNAUTHORIZED", message: "Token ausente." } }, 401);
+  const session = await findSessionByToken(token);
+  if (!session) return c.json({ error: { code: "UNAUTHORIZED", message: "Sessão inválida ou expirada." } }, 401);
 
-  const payload = await verifySessionToken(token);
-  if (!payload) {
-    return c.json(
-      { error: { code: "UNAUTHORIZED", message: "Sessão inválida ou expirada." } },
-      401,
-    );
-  }
-
-  return withCamp(payload.campId, async () => {
-    const user = await findById(payload.userId);
-    if (!user) {
-      return c.json(
-        { error: { code: "UNAUTHORIZED", message: "Usuário não encontrado." } },
-        401,
-      );
-    }
-
-    const history = payload.campId !== activeCampId();
-
+  return withCamp(session.campId, async () => {
+    const history = session.campId !== activeCampId();
     if (history) {
-      // the roster row / access window belong to another year — irrelevant here
-      if (!(await canSwitchCamps(toPublicUser(user), payload.role))) {
-        await revokeSession(payload.sessionId);
-        return c.json(
-          { error: { code: "UNAUTHORIZED", message: "Sessão inválida ou expirada." } },
-          401,
-        );
+      if (!canSwitchCamps(session)) {
+        await revokeSession(session._id);
+        return c.json({ error: { code: "UNAUTHORIZED", message: "Sessão inválida ou expirada." } }, 401);
       }
-    } else {
-      if (await staffSessionExpired(payload.role, user.phone, user._id)) {
-        return c.json(
-          { error: { code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." } },
-          401,
-        );
-      }
-
-      if (await roleNoLongerValid(payload.role, user)) {
-        return c.json(
-          { error: { code: "UNAUTHORIZED", message: "Este perfil não está mais disponível para você. Entre novamente." } },
-          401,
-        );
-      }
+    } else if (await accessWindowClosed(session)) {
+      return c.json({ error: { code: "UNAUTHORIZED", message: "O período de acesso terminou." } }, 401);
     }
-
-    // the active role is the one chosen at login — forced to admin for reads on a history session
-    const activeRole: Role = history ? "admin" : payload.role;
-    c.set("userId", user._id);
-    c.set("sessionId", payload.sessionId);
-    c.set("activeRole", activeRole);
-    c.set("user", { ...toPublicUser(user), activeRole });
-    c.set("campId", payload.campId);
-
+    const user = sessionUser(session, history);
+    c.set("userId", user.id);
+    c.set("sessionId", session._id);
+    c.set("session", session);
+    c.set("activeRole", user.activeRole);
+    c.set("user", user);
+    c.set("campId", session.campId);
     await next();
   });
 });
+
+/** config is imported for its side effect on test setups that read it before the routes */
+void config;

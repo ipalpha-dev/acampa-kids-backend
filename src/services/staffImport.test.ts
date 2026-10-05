@@ -9,7 +9,7 @@ describe("staff import review delta",()=>{
   test("skipping an invalid phone still imports a staff member without login",()=>{
     const [row]=applyStaffDelta([{row:2,name:"Ana",phone:null}], [item({})], {r1:{skip:true}});
     expect(row.phone).toBeNull();
-    expect(staffDataFromPreview(row,"import-1").aiReviewStatus).toBe("pending");
+    expect(staffDataFromPreview(row,"import-1").ops.aiReviewStatus).toBe("pending");
   });
   test("different people never keep a conflicting phone",()=>{
     const [row]=applyStaffDelta([{row:2,name:"Ana",phone:"+5561999999999",existingStaffId:"old"}], [item({kind:"duplicate",existingId:"old"})], {r1:{value:"insert"}});
@@ -18,14 +18,16 @@ describe("staff import review delta",()=>{
   });
   test("admin-safe preview data defaults to helper-compatible values",()=>{
     const data=staffDataFromPreview({name:"Ana",phone:null,active:true,roomRole:"helper",team:null},"import-1",true);
-    expect(data.draft).toBe(true);
-    expect(data.roomRole).toBe("helper");
-    expect(data.aiReviewStatus).toBeNull();
+    expect(data.ops.draft).toBe(true);
+    expect(data.ops.roomRole).toBe("helper");
+    expect(data.ops.aiReviewStatus).toBeNull();
   });
-  test("spreadsheet sex is persisted only as probable gender",()=>{
-    const data=staffDataFromPreview({name:"Ana",sex:null,probableGender:"F"},"import-1");
-    expect(data.sex).toBeNull();
-    expect(data.probableGender).toBe("F");
+  test("only the room wing sets the sex; the person goes to core and the duty columns become project roles",()=>{
+    const data=staffDataFromPreview({name:"Ana",phone:"+5511999999999",sex:null,probableGender:"F",organizer:true,checkinHelper:true,vestHelper:false},"import-1");
+    expect(data.ops.sex).toBeNull();
+    expect(data.person).toMatchObject({name:"Ana",phone:"+5511999999999"});
+    expect(data.roles).toEqual(["equipe","organizacao","checkin"]);
+    expect(JSON.stringify(data.ops)).not.toContain("Ana");
   });
   test("parses only explicit staff sex values",()=>{
     expect(parseStaffImportSex("Feminino")).toBe("F");
@@ -64,11 +66,11 @@ describe("staff import review delta",()=>{
     expect(directStaffField("Identidade")?.key).toBe("document");
     expect(directStaffField("Passaporte")?.key).toBe("document");
     expect(directStaffField("CDIN")?.key).toBe("document");
-    expect(staffDataFromPreview({name:"Ana",document:" 123.456.789-00 "},"import-1").document).toBe("123.456.789-00");
+    expect(staffDataFromPreview({name:"Ana",document:" 529.982.247-25 "},"import-1").person.data).toEqual({document:[{type:"cpf",number:"52998224725"}]});
     expect(directStaffField("Data de nascimento")?.key).toBe("birthDate");
     expect(directStaffField("Nascimento")?.key).toBe("birthDate");
-    expect(staffDataFromPreview({name:"Ana",birthDate:"1990-04-12"},"import-1").birthDate).toBe("1990-04-12");
-    expect(staffDataFromPreview({name:"Ana"},"import-1").birthDate).toBeNull();
+    expect(staffDataFromPreview({name:"Ana",birthDate:"1990-04-12"},"import-1").person.birthDate).toBe("1990-04-12");
+    expect(staffDataFromPreview({name:"Ana"},"import-1").person.birthDate).toBeNull();
     expect(resolveStaffColumnTarget("Data de nascimento")).toBe("birthDate");
     expect(directStaffField("Alergias (alimentar, tópica ou de medicamentos)")?.key).toBe("healthNotes");
     expect(directStaffField("Função no quarto")?.key).toBe("roomRole");
@@ -80,7 +82,7 @@ describe("staff import review delta",()=>{
     expect(resolveStaffColumnTarget("Notas internas", undefined, null, "roomRole")).toBeNull();
     expect(resolveStaffColumnTarget("Cargo", undefined, "roomRole", "roomRole")).toBeNull();
     expect(resolveStaffColumnTarget("Cargo", "roomRole")).toBe("roomRole");
-    expect(staffDataFromPreview({name:"Ana"},"import-1").roomRole).toBe("helper");
+    expect(staffDataFromPreview({name:"Ana"},"import-1").ops.roomRole).toBe("helper");
     expect(parseStaffRoomRole("")).toBe("helper");
     expect(parseStaffRoomRole("auxiliar")).toBe("helper");
     expect(parseStaffRoomRole("líder")).toBe("caretaker");

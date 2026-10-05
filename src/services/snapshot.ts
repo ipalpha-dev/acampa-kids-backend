@@ -27,6 +27,7 @@ import { serializePhoto } from "../routes/gallery";
 import { serializeStaffList } from "../routes/staff";
 import { getSettings } from "../models/settings";
 import type { Role } from "../types";
+import { isSuperAdmin } from "../middleware/auth";
 import { COLLECTIONS, type Collection, type Snapshot } from "./realtime";
 import { canManageGallery, canSeeBedroom, canSeeDoc, canSeeScores, isParent, resolveScope, scopeEvent, scopeRoles, viewerOccurrenceGroup, type Viewer } from "./scope";
 
@@ -38,21 +39,27 @@ import { canManageGallery, canSeeBedroom, canSeeDoc, canSeeScores, isParent, res
 const READABLE: Record<Role, readonly Collection[]> = {
   admin: COLLECTIONS,
   staff: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "medications", "gallery", "settings"],
-  health_staff: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "medications", "gallery", "settings"],
   // parents: their own kids + rooms, the team of those rooms / important contacts (inside the window), the programme — and the PUBLISHED photos
   parent: ["campers", "staff", "bedrooms", "categories", "transports", "teams", "roles", "events", "preparation", "gallery", "settings"],
 };
 
 /**
- * Cache key for a built payload: admins get the same data regardless of who
- * they are; staff and parent payloads differ per person (scoped to their
- * room / their kids).
+ * Cache key for a built payload: the coordenação gets the same data
+ * regardless of who they are; every other payload depends on the acting role
+ * and the person (their room / their kids).
  */
 export function snapshotKey(viewer: Viewer): string {
-  return viewer.activeRole === "admin" ? viewer.activeRole : `${viewer.activeRole}|${viewer.phone}`;
+  return viewer.activeRole === "admin" ? viewer.activeRole : `${viewer.coreRole}|${viewer.personId}`;
 }
 
-/** Reads and serializes `names` exactly like the REST endpoints do, honouring the viewer's role and scope. */
+/**
+ * Reads and serializes `names` exactly like the REST endpoints do, honouring
+ * the viewer's role and scope. PERSON DATA NEVER TRAVELS HERE (CONTRACTS
+ * §15): `campers` / `staff` are camp-ops records keyed by person id; names
+ * come from the paged REST lists (GET /api/campers, /api/staff) or
+ * POST /api/people/names for the page being viewed; health only from REST
+ * with the acting role token.
+ */
 export async function loadCollections(viewer: Viewer, names: readonly Collection[] = COLLECTIONS): Promise<Snapshot> {
   const role: Role = viewer.activeRole;
   const allowed = new Set(READABLE[role]);
@@ -138,7 +145,7 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
         case "settings":
           // offenders list (out-of-scope emergency QR) + super-admin flag are manager-only
           out.settings = scope.all
-            ? await serializeSettingsForManager(await getSettings(), viewer.phone)
+            ? await serializeSettingsForManager(await getSettings(), isSuperAdmin(viewer.personId))
             : await serializeSettings(await getSettings());
           break;
       }

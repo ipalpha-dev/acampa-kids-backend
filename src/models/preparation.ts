@@ -80,7 +80,7 @@ export async function clearPrepDoneKey(key: string): Promise<void> {
   const db = await getDb();
   const now = new Date();
   await Promise.all([
-    db.collection("staff").updateMany({ prepDone: key }, { $pull: { prepDone: key }, $set: { updatedAt: now } } as never),
+    db.collection("participants").updateMany({ kind: "team", prepDone: key }, { $pull: { prepDone: key }, $set: { updatedAt: now } } as never),
     clearUserPrepDoneKey(key),
   ]);
 }

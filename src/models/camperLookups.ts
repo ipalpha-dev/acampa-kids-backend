@@ -6,11 +6,10 @@ const COLLECTION = "camperLookups";
 export interface CamperLookup {
   _id: string;
   at: Date;
+  /** the kid (person id) */
   camperId: string;
-  camperName: string;
+  /** who scanned (person id) */
   byStaffId: string;
-  byStaffName: string;
-  byUserId: string;
   /** true when the kid was already in the scanner's normal scope */
   belonged: boolean;
 }

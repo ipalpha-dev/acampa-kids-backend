@@ -75,9 +75,9 @@ export async function deleteBedroom(id: string): Promise<boolean> {
 export async function countStaffPerBedroom(): Promise<Map<string, number>> {
   const db = await getDb();
   const rows = await db
-    .collection("staff")
+    .collection("participants")
     .aggregate<{ _id: string; n: number }>([
-      { $match: { bedroom: { $type: "string" } } },
+      { $match: { kind: "team", draft: { $ne: true }, bedroom: { $type: "string" } } },
       { $group: { _id: "$bedroom", n: { $sum: 1 } } },
     ])
     .toArray();
@@ -88,4 +88,20 @@ export async function ensureBedroomIndexes(): Promise<void> {
   const db = await getDb();
   await db.collection(COLLECTION).createIndex({ name: 1 }, { unique: true });
   await db.collection(COLLECTION).createIndex({ group: 1, name: 1 });
+}
+
+/** The wing's sex for a room: girls → "F", boys → "M", staff room / none → null (camp ops, never collected). */
+export function sexOfGroup(group: BedroomGroup | null | undefined): "F" | "M" | null {
+  return group === "girls" ? "F" : group === "boys" ? "M" : null;
+}
+
+export async function sexFromBedroomId(id: string | null | undefined): Promise<"F" | "M" | null> {
+  return id ? sexOfGroup((await findBedroomById(id))?.group) : null;
+}
+
+/** A room changed wing: every participant sleeping there follows it. Returns how many rows changed. */
+export async function applyBedroomGroupToOccupants(bedroomId: string, group: BedroomGroup): Promise<number> {
+  const db = await getDb();
+  const res = await db.collection("participants").updateMany({ bedroom: bedroomId }, { $set: { sex: sexOfGroup(group), updatedAt: new Date() } });
+  return res.modifiedCount;
 }

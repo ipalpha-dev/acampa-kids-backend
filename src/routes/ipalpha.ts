@@ -1,14 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Hono } from "hono";
-import { resolveLocale } from "../i18n";
-import { findByPersonId } from "../models/users";
 import { consumeLoginState, saveLoginState } from "../models/ipalphaLoginStates";
 import { coreClient, ipalpha, ipalphaEnabled, IpalphaRejected, IpalphaTokenInvalid, IpalphaUnavailable, MISCONFIGURED_ERROR, UNAVAILABLE_ERROR } from "../services/ipalpha";
 import { clientIp } from "../services/clientIp";
-import type { PhoneEntry } from "../services/ipalpha/coreClient";
-import { NO_PROFILE_ERROR, bindPersonId, completeLogin, frozenError, landingRole, resolveAccountByPhone, staffWindowError } from "../services/login";
-import type { User } from "../types";
-import { normalizeBrazilPhone } from "../utils";
+import { completeLogin } from "../services/login";
+import { SessionKeyMissing } from "../services/session";
 
 /**
  * "Entrar com IPAlpha" — mounted at /api/auth/ipalpha (see README → IPAlpha).
@@ -17,8 +13,9 @@ import { normalizeBrazilPhone } from "../utils";
  *   POST /start     PAR server-side (client secret + PKCE) → popup URL
  *   POST /complete  the popup's web_message { code, state } → Acampa session
  *
- * The person token is verified locally, used once (phone read on the first
- * login only) and dropped: never stored, cached, logged or returned.
+ * The persons resource token is verified locally (the person id); the
+ * per-role tokens of the answer go sealed into the session (§15). Nothing is
+ * logged or returned to the browser but the Acampa session token.
  */
 const ipalphaRoutes = new Hono();
 
@@ -79,20 +76,6 @@ function s256(verifier: string): string {
   return createHash("sha256").update(verifier).digest("base64url");
 }
 
-/**
- * The Acampa account behind the person's VERIFIED IPAlpha phones: an existing
- * account first, else roster / guardian provisioning (same as the phone
- * login). Unverified phones are ignored — they prove nothing.
- */
-async function accountForPhones(phones: PhoneEntry[]): Promise<User | null> {
-  const verified = [...new Set(phones.filter((p) => p.verified).map((p) => normalizeBrazilPhone(p.e164)).filter((p): p is string => !!p))];
-  for (const phone of verified) {
-    const user = await resolveAccountByPhone(phone);
-    if (user) return user;
-  }
-  return null;
-}
-
 ipalphaRoutes.get("/config", (c) => {
   const cfg = ipalpha.config;
   c.header("Cache-Control", "no-store");
@@ -135,8 +118,7 @@ ipalphaRoutes.post("/start", async (c) => {
 
 ipalphaRoutes.post("/complete", async (c) => {
   if (!ipalphaEnabled()) return c.json({ error: DISABLED_ERROR }, 404);
-  const body = await c.req.json<{ code?: unknown; state?: unknown; error?: unknown; locale?: string }>().catch(() => null);
-  const deviceLocale = resolveLocale(body?.locale ?? c.req.header("accept-language"));
+  const body = await c.req.json<{ code?: unknown; state?: unknown; error?: unknown }>().catch(() => null);
 
   // one-time: a replayed, unknown or stale state is refused before anything else
   const stored = await consumeLoginState(typeof body?.state === "string" ? body.state : "");
@@ -147,13 +129,9 @@ ipalphaRoutes.post("/complete", async (c) => {
   const code = typeof body?.code === "string" ? body.code : "";
   if (!code) return c.json({ error: CODE_INVALID_ERROR }, 400);
 
-  const client = coreClient();
-  let personToken: string;
-  let personId: string;
-  let sessionIdleHours: number | null;
+  let answer;
   try {
-    ({ token: personToken, sessionIdleHours } = await client.exchangeCode({ code, codeVerifier: stored.codeVerifier }));
-    ({ personId } = await client.verifyPersonsToken(personToken));
+    answer = await coreClient().exchangeCode({ code, codeVerifier: stored.codeVerifier });
   } catch (err) {
     if (err instanceof IpalphaRejected && err.oauthError && TOKEN_CONFIG_ERRORS.has(err.oauthError)) {
       console.error(`[ipalpha] code exchange refused — check the IPALPHA_* configuration (${err.status} ${err.oauthError} ${err.reason})`);
@@ -172,32 +150,17 @@ ipalphaRoutes.post("/complete", async (c) => {
     return c.json({ error: UNAVAILABLE_ERROR }, 503);
   }
 
-  // a known person goes straight in; the phone is read (fresh) only the first time
-  let user = await findByPersonId(personId);
-  if (!user) {
-    let phones: PhoneEntry[] = [];
-    try {
-      phones = await client.readPhones(personId, personToken);
-    } catch (err) {
-      if (!(err instanceof IpalphaRejected)) return c.json({ error: UNAVAILABLE_ERROR }, 503);
-      // no consent to the phone / no person record: nothing proves an Acampa account
-      console.warn(`[ipalpha] phone read refused (${err.status} ${err.reason})`);
+  // no live role in the project → NOT_IN_PROJECT; closed access window → STAFF_ACCESS_*
+  try {
+    const result = await completeLogin(answer);
+    return result.ok ? c.json(result.body) : c.json({ error: result.error }, result.status);
+  } catch (err) {
+    if (err instanceof SessionKeyMissing) {
+      console.error(`[auth] ${err.message}`);
+      return c.json({ error: MISCONFIGURED_ERROR }, 500);
     }
-    user = await accountForPhones(phones);
-    if (!user) return c.json({ error: NO_PROFILE_ERROR }, 403);
-    await bindPersonId(user, personId);
+    throw err;
   }
-
-  // the same gates as the phone + code login
-  const { role, available } = await landingRole(user);
-  if (available.length === 0) return c.json({ error: NO_PROFILE_ERROR }, 403);
-  const frozen = frozenError(user);
-  if (frozen) return c.json({ error: frozen }, 423);
-  const windowErr = await staffWindowError(user.phone, role);
-  if (windowErr) return c.json({ error: windowErr }, 403);
-
-  // session length: the entry point's `session_idle_hours` from this very token answer (absent → SESSION_HOURS)
-  return c.json(await completeLogin(user, role, available, deviceLocale, sessionIdleHours ?? undefined));
 });
 
 export default ipalphaRoutes;

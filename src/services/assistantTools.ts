@@ -5,7 +5,10 @@ import { getDb } from "../db";
  * Read-only MongoDB tools for the camp assistant.
  *
  * Security rules:
- * - only explicit application collections are visible (never `sessions`)
+ * - only explicit application collections are visible (never `sessions` or
+ *   the transient `healthQueue`)
+ * - Acampa's Mongo holds camp operations only (CONTRACTS §15): no names,
+ *   contacts or health — those live in IPAlpha and are not reachable here
  * - credentials, QR secrets, binary files and face embeddings are stripped
  * - aggregation stages that can write or run server-side code are rejected
  * - every query has a result and execution-time cap
@@ -17,8 +20,7 @@ interface AssistantCollection {
 }
 
 const COLLECTIONS: Record<string, AssistantCollection> = {
-  campers: { description: "Acampantes: cadastro, responsáveis, saúde, quarto, time, transporte e check-ins.", hiddenFields: ["qrToken"] },
-  staff: { description: "Equipe: cadastro, saúde, quarto, função no quarto, time, transporte, check-in e colete." },
+  participants: { description: "Participantes do acampamento por personId (kind camper = criança, team = equipe): quarto, cama, líder (caretakerId), time, transporte, check-ins, colete, observações. Sem nomes nem saúde (ficam no IPAlpha).", hiddenFields: ["qrToken"] },
   bedrooms: { description: "Quartos, alas, quantidade de beliches/camas e capacidade." },
   teams: { description: "Times do acampamento e suas cores." },
   transports: { description: "Ônibus, carros, números, cores e capacidade." },
@@ -38,9 +40,8 @@ const COLLECTIONS: Record<string, AssistantCollection> = {
   camperLookups: { description: "Auditoria de leituras emergenciais de crachás." },
   camperImports: { description: "Processos de importação de planilhas de acampantes e equipe." },
   camperImportDictionary: { description: "Dicionário aprendido durante importações de planilhas." },
-  users: { description: "Contas de acesso, nomes, telefones e perfis; dados de autenticação são ocultados.", hiddenFields: ["otp", "ipalphaPersonIds"] },
   ai_usage: { description: "Métricas de uso das funções de IA." },
-  sms_usage: { description: "Métricas de envio de SMS." },
+  sms_usage: { description: "Métricas de envio de mensagens (modelo e quantidade)." },
 };
 
 /**
@@ -51,7 +52,7 @@ const COLLECTIONS: Record<string, AssistantCollection> = {
  */
 export type AssistantAudience = "all" | "medical";
 
-const MEDICAL_COLLECTIONS: readonly string[] = ["campers", "bedrooms", "teams", "transports", "categories", "medicationDoses"];
+const MEDICAL_COLLECTIONS: readonly string[] = ["participants", "bedrooms", "teams", "transports", "categories", "medicationDoses"];
 
 function collectionsFor(audience: AssistantAudience): Record<string, AssistantCollection> {
   if (audience === "all") return COLLECTIONS;
@@ -192,7 +193,7 @@ export function buildAssistantTools(audience: AssistantAudience): AssistantTool[
       type: "object",
       properties: {
         collection: { type: "string", enum: Object.keys(allowed) },
-        filter: { type: "object", description: "Filtro MongoDB. Ex.: {\"bedroom\":\"id\"}, {\"checkin\":null}, {\"name\":{\"$regex\":\"Ana\",\"$options\":\"i\"}}", additionalProperties: true },
+        filter: { type: "object", description: "Filtro MongoDB. Ex.: {\"bedroom\":\"id\"}, {\"checkin\":null}, {\"kind\":\"camper\"}", additionalProperties: true },
         projection: { type: "object", description: "Campos a incluir (1) ou excluir (0).", additionalProperties: { type: "integer", enum: [0, 1] } },
         sort: { type: "object", description: "Ordenação por campo: 1 crescente, -1 decrescente.", additionalProperties: { type: "integer", enum: [-1, 1] } },
         limit: { type: "integer", minimum: 1, maximum: MAX_ROWS },

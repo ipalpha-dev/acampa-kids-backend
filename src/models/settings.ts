@@ -1,6 +1,6 @@
 import { getDb } from "../db";
 import { currentCampId } from "../services/campContext";
-import type { BusHelperList, CheckinLocation, CheckinReminder, CheckinWindow, ParentContact, Settings, SmsRedirect, StaffList } from "../types";
+import type { BusHelperList, CheckinLocation, CheckinReminder, CheckinWindow, ParentContact, Settings } from "../types";
 
 const COLLECTION = "settings";
 /** the settings live in ONE document per camp — its `_id` IS the camp id (see services/campContext.ts) */
@@ -21,14 +21,7 @@ export const DEFAULT_SETTINGS: Settings = {
   notifications: { bedroomChanges: false, roleChanges: false, checkinConfirmation: false, contentChanges: false, parentContentChanges: false, staffChanges: false, enrolments: false, occurrences: false, checkinReminder: false, parentEdits: false, busCheckin: false, parentWelcome: false, birthdays: false, photoPublishes: false },
   checkinWindow: { from: null, until: null },
   busReturnWindow: { from: null, until: null },
-  checkinHelpers: { staffIds: [] },
   busHelpers: { helpers: [] },
-  organizers: { staffIds: [] },
-  gameOrganizers: { staffIds: [] },
-  scoreHelpers: { staffIds: [] },
-  medicalStaff: { staffIds: [] },
-  vestHelpers: { staffIds: [] },
-  photographers: { staffIds: [] },
   parentContacts: [],
   staffAccessWindow: { from: null, until: null },
   parentAccessWindow: { from: null, until: null },
@@ -39,7 +32,6 @@ export const DEFAULT_SETTINGS: Settings = {
   wizardMode: false,
   galleryPublished: false,
   checkinReminder: { at: null, sentAt: null },
-  smsRedirect: { enabled: false, staffPhone: null, parentPhone: null },
   updatedAt: null,
 };
 
@@ -70,19 +62,14 @@ export function staffAccessOpen(w: CheckinWindow, now = new Date()): boolean {
   return true;
 }
 
-function toStaffList(raw: unknown): StaffList {
-  const h = (raw as Partial<Record<"staffIds", unknown>> | undefined) ?? {};
-  return { staffIds: Array.isArray(h.staffIds) ? h.staffIds.filter((x): x is string => typeof x === "string") : [] };
-}
-
-/** `{ helpers: [{ staffId, vehicleId }] }` — older documents held `{ staffIds }` (helper rode in their own vehicle): those entries are dropped, the admin re-links them */
+/** `{ helpers: [{ personId, vehicleId }] }` — the vehicle each `checkin-onibus` person stands at */
 function toBusHelperList(raw: unknown): BusHelperList {
   const h = (raw as Partial<Record<"helpers", unknown>> | undefined) ?? {};
   if (!Array.isArray(h.helpers)) return { helpers: [] };
   const helpers = h.helpers
     .map((x) => (x && typeof x === "object" ? (x as Record<string, unknown>) : null))
-    .filter((x): x is Record<string, unknown> => !!x && typeof x.staffId === "string" && typeof x.vehicleId === "string")
-    .map((x) => ({ staffId: x.staffId as string, vehicleId: x.vehicleId as string }));
+    .filter((x): x is Record<string, unknown> => !!x && typeof x.personId === "string" && typeof x.vehicleId === "string")
+    .map((x) => ({ personId: x.personId as string, vehicleId: x.vehicleId as string }));
   return { helpers };
 }
 
@@ -123,20 +110,15 @@ function toCheckinLocations(doc: Record<string, unknown>): CheckinLocation[] {
   ];
 }
 
-function toSmsRedirect(raw: unknown): SmsRedirect {
-  const r = (raw as Partial<Record<keyof SmsRedirect, unknown>> | undefined) ?? {};
-  return { enabled: r.enabled === true, staffPhone: typeof r.staffPhone === "string" ? r.staffPhone : null, parentPhone: typeof r.parentPhone === "string" ? r.parentPhone : null };
-}
-
 function toParentContacts(raw: unknown): ParentContact[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .map((x) => (x && typeof x === "object" ? (x as Record<string, unknown>) : null))
     .filter(
       (x): x is Record<string, unknown> =>
-        !!x && typeof x.id === "string" && typeof x.title === "string" && typeof x.staffId === "string",
+        !!x && typeof x.id === "string" && typeof x.title === "string" && typeof x.personId === "string",
     )
-    .map((x) => ({ id: x.id as string, title: x.title as string, staffId: x.staffId as string }));
+    .map((x) => ({ id: x.id as string, title: x.title as string, personId: x.personId as string }));
 }
 
 function toSettings(doc: Record<string, unknown> | null): Settings {
@@ -145,14 +127,7 @@ function toSettings(doc: Record<string, unknown> | null): Settings {
   return {
     checkinWindow: toWindow(doc.checkinWindow),
     busReturnWindow: toWindow(doc.busReturnWindow),
-    checkinHelpers: toStaffList(doc.checkinHelpers),
     busHelpers: toBusHelperList(doc.busHelpers),
-    organizers: toStaffList(doc.organizers),
-    gameOrganizers: toStaffList(doc.gameOrganizers),
-    scoreHelpers: toStaffList(doc.scoreHelpers),
-    medicalStaff: toStaffList(doc.medicalStaff),
-    vestHelpers: toStaffList(doc.vestHelpers),
-    photographers: toStaffList(doc.photographers),
     parentContacts: toParentContacts(doc.parentContacts),
     staffAccessWindow: toWindow(doc.staffAccessWindow),
     parentAccessWindow: toWindow(doc.parentAccessWindow),
@@ -163,7 +138,6 @@ function toSettings(doc: Record<string, unknown> | null): Settings {
     wizardMode: doc.wizardMode === true,
     galleryPublished: doc.galleryPublished === true,
     checkinReminder: toReminder(doc.checkinReminder),
-    smsRedirect: toSmsRedirect(doc.smsRedirect),
     notifications: {
       bedroomChanges: typeof n.bedroomChanges === "boolean" ? n.bedroomChanges : DEFAULT_SETTINGS.notifications.bedroomChanges,
       roleChanges: typeof n.roleChanges === "boolean" ? n.roleChanges : DEFAULT_SETTINGS.notifications.roleChanges,

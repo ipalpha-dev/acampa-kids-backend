@@ -2,19 +2,37 @@ import * as XLSX from "xlsx";
 import { randomUUID } from "node:crypto";
 import { Script } from "node:vm";
 import { findBedroomByName, insertBedroom, listBedrooms, updateBedroom } from "../models/bedrooms";
-import { insertCamper, listCampers, updateCamper, type CamperData } from "../models/campers";
+import { EMPTY_CAMPER, findCamperById, insertCamper, listCampers, updateCamper, type CamperData } from "../models/campers";
 import { appendCategoryOption, listCategories, newOptionId } from "../models/categories";
-import { insertStaff, listStaff, type StaffData } from "../models/staff";
+import { EMPTY_STAFF, insertStaff, listStaff } from "../models/staff";
 import { insertTeam, listTeams, TEAM_PALETTE } from "../models/teams";
 import { insertTransport, listTransports, nextTransportOrder } from "../models/transports";
-import { busColorName, BUS_COLORS, CAMPER_CATEGORY_KEYS, bedroomCapacity, type BedroomGroup, type CamperImportDictionaryEntry, type CamperImportReviewItem, type CamperSex, type Category, type Staff } from "../types";
+import { busColorName, BUS_COLORS, CAMPER_CATEGORY_KEYS, bedroomCapacity, TEAM_ROLE, type BedroomGroup, type CamperImportDictionaryEntry, type CamperImportReviewItem, type CamperSex, type Category, type HealthInfo, type Staff } from "../types";
 import { formatBrazilPhone, formatCpf, normalizeBrazilPhone, titleCaseName } from "../utils";
 import { transportLabel } from "../routes/transports";
-import { resolveGender } from "./camperSex";
 import { bestImportMatch, bestImportMatches, classifyImportItems, dedupeImportValues, guessNamesSex, mapImportColumns, matchLeaderWithAi, askDateParser, SPLIT_CATEGORY_FIELDS } from "./importAi";
 import { getDb } from "../db";
 import { listImportDictionary, type CamperImportColumn, type CamperImportCreatedItem } from "../models/camperImports";
-import { ensureLoginAccount } from "../models/users";
+import { namesOf } from "./people";
+import { IpalphaRejected } from "./ipalpha/coreClient";
+import { documentsOf, emergencyContactOf, registerAdult, registerKid, type CoordinationTokens } from "./coreRegistration";
+import { sexOfGroup } from "../models/bedrooms";
+
+/** A team member with the name read live from core (imports match leaders by name). */
+export type NamedStaff = Staff & { name: string };
+
+/** The current camp's team, with names (one paged names read). */
+export async function namedStaff(filter: Parameters<typeof listStaff>[0] = { active: true }): Promise<NamedStaff[]> {
+  const list = await listStaff(filter);
+  const names = await namesOf(list.map((s) => s._id));
+  return list.map((s) => ({ ...s, name: names.get(s._id)?.name ?? "" }));
+}
+
+/** What an import apply needs to create people in core. */
+export interface ImportCoreContext {
+  tokens: CoordinationTokens;
+  editionId: string;
+}
 
 export const IMPORT_FILE_MAX_BYTES = 12 * 1024 * 1024;
 export const IMPORT_ROWS_MAX = 5_000;
@@ -73,7 +91,7 @@ export interface ImportLookups {
   transports: Awaited<ReturnType<typeof listTransports>>;
   teams: Awaited<ReturnType<typeof listTeams>>;
   categories: Awaited<ReturnType<typeof listCategories>>;
-  staff: Awaited<ReturnType<typeof listStaff>>;
+  staff: NamedStaff[];
 }
 
 export const normalizeImportValue = (value: string): string => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR").replace(/[^a-z0-9]+/g, " ").trim();
@@ -401,7 +419,7 @@ function review(kind: CamperImportReviewItem["kind"], row: number, kidName: stri
   return { id: randomUUID(), row, kind, field: kind, kidName, guardianName: "", birthDate: "", age: null, emergencyContact: "", original, value: "", skip: false, resolved: false, ...extras };
 }
 
-export function deterministicLeader(raw: string, staff: Staff[]): { id: string | null; options: Staff[] } {
+export function deterministicLeader(raw: string, staff: NamedStaff[]): { id: string | null; options: NamedStaff[] } {
   const words = normalize(raw).split(" ").filter(Boolean);
   if (!words.length) return { id: null, options: [] };
   const scored = staff.map((s) => {
@@ -586,7 +604,10 @@ export async function analyzeCamperImport(input: { data: Uint8Array; fileName: s
   // reassigned from the summary before applying.
   if (missing.length) return { columns, rows: parsed.rows, dictionaries: [], reviews: [], preview: [], skipped: [], createdItems: [], dateFunction: BUILTIN_DATE_FUNCTION, status: "needs_mapping", panicMessage: `Escolha as colunas de ${missing.map((k) => IMPORT_FIELDS.find((f) => f.key === k)?.label).join(" e ")}.` };
 
-  const [bedrooms, transports, teams, rawCategories, staff, previousDictionary, existingCampers] = await Promise.all([listBedrooms(), listTransports(), listTeams(), listCategories(), listStaff({ active: true }), listImportDictionary(), listCampers()]);
+  const [bedrooms, transports, teams, rawCategories, staff, previousDictionary, campersNow] = await Promise.all([listBedrooms(), listTransports(), listTeams(), listCategories(), namedStaff({ active: true }), listImportDictionary(), listCampers()]);
+  // this camp's kids with their names (live) — the duplicate check matches full names
+  const camperNames = await namesOf(campersNow.map((k) => k._id));
+  const existingCampers = campersNow.map((k) => ({ ...k, name: camperNames.get(k._id)?.name ?? "", birthDate: null as string | null }));
   // Draft entities belong to another unfinished import and must never leak
   // into this preview. Published dictionary values are still reused below.
   const categories = rawCategories.map((cat) => ({ ...cat, options: cat.options.filter((option) => !option.draft) }));
@@ -981,28 +1002,60 @@ export function applyImportDelta(preview: Record<string, unknown>[], reviews: Ca
   return { rows, skipped };
 }
 
-export async function createLeaderFromReview(name: string, phone: string, importId: string): Promise<Staff> {
+/** A leader named in the spreadsheet but not on the team: registered in core (`equipe`) and added as a DRAFT caretaker. */
+export async function createLeaderFromReview(name: string, phone: string, importId: string, ctx: ImportCoreContext): Promise<NamedStaff> {
   const normalized = normalizeBrazilPhone(phone);
   if (!normalized) throw new Error("Informe um celular brasileiro válido com DDD.");
-  const data: StaffData = { name: titleCaseName(name), sex: null, probableGender: null, phone: normalized, email: null, document: "", birthDate: null, active: true, team: null, transportation: null, bedroom: null, roomRole: "caretaker", allergies: [], drugAllergies: [], foodRestrictions: "", healthIssues: [], medications: [], healthNotes: "", draft: true, importId };
-  const leaderGender = await resolveGender({ name: data.name, bedroomId: null, requested: null, guessIfMissing: true });
-  data.sex = leaderGender.sex;
-  data.probableGender = leaderGender.probableGender;
-  const staff = await insertStaff(data);
-  await ensureLoginAccount(staff.name, normalized, "staff");
-  return staff;
+  const clean = titleCaseName(name);
+  const { personId } = await registerAdult(ctx.tokens, { name: clean, phone: normalized, roles: [TEAM_ROLE], editionId: ctx.editionId });
+  const existing = (await listStaff({ includeDraft: true, personIds: [personId] }))[0];
+  const staff = existing ?? (await insertStaff(personId, { ...EMPTY_STAFF, roomRole: "caretaker", draft: true, importId }));
+  return { ...staff, name: clean };
 }
 
-export function camperDataFromPreview(row: Record<string, unknown>, importId: string): CamperData | null {
+/** One preview row → what goes where: camp ops (Acampa), the kid + guardian (persons-api), health (persons-api `medical`). */
+export function camperDataFromPreview(row: Record<string, unknown>, importId: string): { ops: CamperData; kid: { name: string; birthDate: string; data: Record<string, unknown> }; guardian: { name: string; phone: string | null; email: string; data: Record<string, unknown> }; health: Partial<HealthInfo> } | null {
   if (row.blocked === true || !row.name || !row.birthDate) return null;
+  const kidData: Record<string, unknown> = {};
+  const docs = documentsOf({ cpf: String(row.cpf ?? ""), rg: String(row.rg ?? "") });
+  if (docs.length) kidData.document = docs;
+  if (row.school || row.schoolGrade) kidData.school = { name: String(row.school ?? ""), grade: String(row.schoolGrade ?? "") };
+  const emergency = emergencyContactOf(String(row.emergencyContact ?? ""));
+  if (emergency) kidData.emergencyContact = emergency;
+  const guardianDocs = documentsOf({ cpf: String(row.guardianCpf ?? "") });
   return {
-    name: String(row.name), birthDate: String(row.birthDate), sex: (row.sex as CamperSex | null) ?? null, probableGender: (row.probableGender as CamperSex | null) ?? null,
-    cpf: String(row.cpf ?? ""), rg: String(row.rg ?? ""), school: String(row.school ?? ""), schoolGrade: String(row.schoolGrade ?? ""), church: String(row.church ?? ""), invitedBy: String(row.invitedBy ?? ""),
-    caretakerId: (row.caretakerId as string | null) ?? null, qrToken: "", externalId: "", team: (row.team as string | null) ?? null, transportation: (row.transportation as string | null) ?? null, bed: (row.bed as string | null) ?? null, bedroom: (row.bedroom as string | null) ?? null,
-    weightKg: typeof row.weightKg === "number" ? row.weightKg : null, allergies: (row.allergies as string[]) ?? [], drugAllergies: (row.drugAllergies as string[]) ?? [], healthIssues: (row.healthIssues as string[]) ?? [], neurodivergent: row.neurodivergent === true, medications: [],
-    foodRestrictions: String(row.foodRestrictions ?? ""), healthNotes: String(row.healthNotes ?? ""), generalNotes: String(row.generalNotes ?? ""), bedroomPreference: String(row.bedroomPreference ?? ""), insurance: String(row.insurance ?? ""), insuranceCard: String(row.insuranceCard ?? ""), emergencyContact: String(row.emergencyContact ?? ""),
-    guardianName: String(row.guardianName ?? ""), guardianPhone: (row.guardianPhone as string | null) ?? null, guardianCpf: String(row.guardianCpf ?? ""), guardianEmail: String(row.guardianEmail ?? ""),
-    importId, aiReviewStatus: "pending", aiReviewError: "", aiReviewStartedAt: null, aiReviewFinishedAt: null, aiReviewAttempts: 0, aiReviewNextRetryAt: null,
+    ops: {
+      ...EMPTY_CAMPER,
+      invitedBy: String(row.invitedBy ?? ""),
+      caretakerId: (row.caretakerId as string | null) ?? null,
+      team: (row.team as string | null) ?? null,
+      transportation: (row.transportation as string | null) ?? null,
+      bed: (row.bed as string | null) ?? null,
+      bedroom: (row.bedroom as string | null) ?? null,
+      // the free-text observations stay with the camp (decision 33); the AI triage moves health out of them
+      generalNotes: String(row.generalNotes ?? ""),
+      bedroomPreference: String(row.bedroomPreference ?? ""),
+      importId,
+      aiReviewStatus: "pending",
+      aiReviewError: "",
+      aiReviewStartedAt: null,
+      aiReviewFinishedAt: null,
+      aiReviewAttempts: 0,
+      aiReviewNextRetryAt: null,
+    },
+    kid: { name: String(row.name), birthDate: String(row.birthDate), data: kidData },
+    guardian: { name: String(row.guardianName ?? ""), phone: (row.guardianPhone as string | null) ?? null, email: String(row.guardianEmail ?? ""), data: guardianDocs.length ? { document: guardianDocs } : {} },
+    health: {
+      allergies: (row.allergies as string[]) ?? [],
+      drugAllergies: (row.drugAllergies as string[]) ?? [],
+      healthIssues: (row.healthIssues as string[]) ?? [],
+      neurodivergent: row.neurodivergent === true,
+      foodRestrictions: String(row.foodRestrictions ?? "").slice(0, 300),
+      healthNotes: String(row.healthNotes ?? "").slice(0, 2000),
+      ...(typeof row.weightKg === "number" ? { weightKg: row.weightKg } : {}),
+      insurance: String(row.insurance ?? "").slice(0, 60),
+      insuranceCard: String(row.insuranceCard ?? "").slice(0, 60),
+    },
   };
 }
 
@@ -1029,28 +1082,69 @@ export async function publishImportDrafts(importId: string): Promise<void> {
     db.collection("bedrooms").updateMany({ importId, draft: true }, { $set: { draft: false, updatedAt: now } }),
     db.collection("transports").updateMany({ importId, draft: true }, { $set: { draft: false, updatedAt: now } }),
     db.collection("teams").updateMany({ importId, draft: true }, { $set: { draft: false, updatedAt: now } }),
-    db.collection("staff").updateMany({ importId, draft: true }, { $set: { draft: false, updatedAt: now } }),
+    db.collection("participants").updateMany({ kind: "team", importId, draft: true }, { $set: { draft: false, updatedAt: now } }),
     db.collection("categories").updateMany({ "options.importId": importId }, { $set: { "options.$[option].draft": false, updatedAt: now } }, { arrayFilters: [{ "option.importId": importId }] }),
   ]);
 }
 
-export async function insertImportCampers(rows: Record<string, unknown>[], importId: string): Promise<{ inserted: number; updated: number; skipped: Record<string, unknown>[] }> {
-  let inserted = 0,updated=0;
+/**
+ * Applies the reviewed rows: each kid + responsável is registered in core
+ * (persons registration + `participante` / `responsavel` memberships of the
+ * camp's edition, health in persons-api) with the coordenação tokens, then
+ * the camp-ops row is written (or updated, for a duplicate the reviewer
+ * chose to update / merge). The AI triage of the observations runs later in
+ * the worker (health results wait in `healthQueue` for a coordenação flush).
+ */
+export async function insertImportCampers(rows: Record<string, unknown>[], importId: string, ctx: ImportCoreContext): Promise<{ inserted: number; updated: number; skipped: Record<string, unknown>[] }> {
+  let inserted = 0;
+  let updated = 0;
   const skipped: Record<string, unknown>[] = [];
   const rooms = await listBedrooms({ includeDraft: true });
   for (const row of rows) {
     const data = camperDataFromPreview(row, importId);
-    if (!data) { skipped.push({ row: row.row, name: row.name, reason: "Campos obrigatórios não revisados" }); continue; }
-    const room = data.bedroom ? rooms.find((b) => b._id === data.bedroom) : null;
-    if (room && bedroomCapacity(room) <= 0) { skipped.push({ row: row.row, name: row.name, reason: "Quarto sem camas" }); continue; }
-    if (room?.group === "girls") data.sex = "F";
-    else if (room?.group === "boys") data.sex = "M";
-    const existingId=typeof row.existingCamperId==="string"?row.existingCamperId:"",choice=String(row.duplicateChoice??"");
-    if(choice==="keep"){skipped.push({row:row.row,name:row.name,reason:"Cadastro existente mantido"});continue;}
-    const camper=existingId&&["update","merge"].includes(choice)?await updateCamper(existingId,data):await insertCamper(data);
-    if(!camper){skipped.push({row:row.row,name:row.name,reason:"Cadastro existente não encontrado"});continue;}
-    if (camper.guardianPhone) await ensureLoginAccount(camper.guardianName || camper.name, camper.guardianPhone, "parent");
-    if(existingId&&["update","merge"].includes(choice))updated++;else inserted++;
+    if (!data) {
+      skipped.push({ row: row.row, name: row.name, reason: "Campos obrigatórios não revisados" });
+      continue;
+    }
+    const room = data.ops.bedroom ? rooms.find((b) => b._id === data.ops.bedroom) : null;
+    if (room && bedroomCapacity(room) <= 0) {
+      skipped.push({ row: row.row, name: row.name, reason: "Quarto sem camas" });
+      continue;
+    }
+    data.ops.sex = sexOfGroup(room?.group);
+    const existingId = typeof row.existingCamperId === "string" ? row.existingCamperId : "";
+    const choice = String(row.duplicateChoice ?? "");
+    if (choice === "keep") {
+      skipped.push({ row: row.row, name: row.name, reason: "Cadastro existente mantido" });
+      continue;
+    }
+    if (existingId && ["update", "merge"].includes(choice)) {
+      const camper = await updateCamper(existingId, data.ops);
+      if (!camper) {
+        skipped.push({ row: row.row, name: row.name, reason: "Cadastro existente não encontrado" });
+        continue;
+      }
+      updated++;
+      continue;
+    }
+    if (!data.guardian.phone || !data.guardian.name) {
+      skipped.push({ row: row.row, name: row.name, reason: "Responsável sem nome ou celular" });
+      continue;
+    }
+    try {
+      const { kidId } = await registerKid(ctx.tokens, { kid: data.kid, guardian: { name: data.guardian.name, phone: data.guardian.phone, email: data.guardian.email || undefined, data: data.guardian.data }, editionId: ctx.editionId, health: data.health });
+      if (await findCamperById(kidId)) {
+        await updateCamper(kidId, data.ops);
+        updated++;
+      } else {
+        await insertCamper(kidId, data.ops);
+        inserted++;
+      }
+    } catch (err) {
+      // a refusal for THIS row is reported; a revoked token / outage stops the apply (the caller answers it)
+      if (!(err instanceof IpalphaRejected)) throw err;
+      skipped.push({ row: row.row, name: row.name, reason: `O IPAlpha recusou o cadastro (${err.reason})` });
+    }
   }
   return { inserted, updated, skipped };
 }

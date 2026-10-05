@@ -1,0 +1,181 @@
+import { coreClient } from "./ipalpha";
+import { COUNT_IDS_MAX, IpalphaRejected, NAMES_BATCH_MAX, type HealthBlock, type HealthTagFilter, type PersonName } from "./ipalpha/coreClient";
+import { EMPTY_HEALTH, type HealthInfo, type Medication } from "../types";
+
+/**
+ * Person data at the moment of use (CONTRACTS §15, decisions 22/31, LGPD):
+ *
+ *   names    app client `persons:app-names`, ≤ 200 ids per call, logged by
+ *            persons-api per person. Request-scoped only — nothing cached.
+ *   health   the ACTING role token (persons-api role rules decide), logged.
+ *   counts   app client count endpoint (anonymized, not logged).
+ *
+ * Nothing returned here is ever written to Mongo or to a log line.
+ */
+
+export const PAGE_MAX = NAMES_BATCH_MAX;
+
+function chunks<T>(list: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
+/** Names of the given project members (unknown ids are simply absent). */
+export async function namesOf(personIds: readonly string[]): Promise<Map<string, PersonName>> {
+  const unique = [...new Set(personIds.filter(Boolean))];
+  const out = new Map<string, PersonName>();
+  if (unique.length === 0) return out;
+  const pages = await Promise.all(chunks(unique, NAMES_BATCH_MAX).map((ids) => coreClient().names(ids)));
+  for (const page of pages) for (const p of page) out.set(p.personId, p);
+  return out;
+}
+
+/** One name ("" when core does not know the id). */
+export async function nameOf(personId: string): Promise<string> {
+  return (await namesOf([personId])).get(personId)?.name ?? "";
+}
+
+export function firstName(name: string): string {
+  return name.trim().split(/\s+/)[0] ?? "";
+}
+
+/** `items` with `name` / `nickname` merged from core (one paged batch per 200). */
+export async function withNames<T extends { id: string }>(items: T[]): Promise<(T & { name: string; nickname: string | null })[]> {
+  const names = await namesOf(items.map((i) => i.id));
+  return items.map((i) => ({ ...i, name: names.get(i.id)?.name ?? "", nickname: names.get(i.id)?.nickname ?? null }));
+}
+
+function str(v: unknown, max = 2000): string {
+  return typeof v === "string" ? v.slice(0, max) : "";
+}
+
+function strs(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+/** persons-api `health` block → Acampa's HealthInfo (missing fields default empty). */
+export function toHealth(v: unknown): HealthInfo {
+  if (!v || typeof v !== "object") return { ...EMPTY_HEALTH };
+  const o = v as Record<string, unknown>;
+  const meds: Medication[] = Array.isArray(o.medications)
+    ? o.medications
+        .filter((m): m is Record<string, unknown> => !!m && typeof m === "object")
+        .map((m) => ({ name: str(m.name, 100), dose: str(m.dose, 60), times: strs(m.times), asNeeded: m.asNeeded === true, notes: str(m.notes, 300) }))
+        .filter((m) => m.name)
+    : [];
+  return {
+    allergies: strs(o.allergies),
+    drugAllergies: strs(o.drugAllergies),
+    healthIssues: strs(o.healthIssues),
+    neurodivergent: o.neurodivergent === true,
+    medications: meds,
+    foodRestrictions: str(o.foodRestrictions, 300),
+    healthNotes: str(o.healthNotes),
+    weightKg: typeof o.weightKg === "number" ? o.weightKg : null,
+    insurance: str(o.insurance, 60),
+    insuranceCard: str(o.insuranceCard, 60),
+  };
+}
+
+/** Is there anything in the health block? (drives the neutral ♥ — decision 31) */
+export function hasHealthInfo(h: HealthInfo): boolean {
+  return h.allergies.length > 0 || h.drugAllergies.length > 0 || h.healthIssues.length > 0 || h.neurodivergent || h.medications.length > 0 || !!h.foodRestrictions.trim() || !!h.healthNotes.trim();
+}
+
+/** The kind / storage field of health in persons-api. */
+export const MEDICAL_KIND = "medical";
+
+/**
+ * Health of one person with the acting role token. `null` when the role may
+ * not read it (403) or the person has none (404) — role rules decide in core.
+ */
+export async function readHealth(token: string, personId: string): Promise<HealthInfo | null> {
+  try {
+    return toHealth(await coreClient().readData(token, personId, MEDICAL_KIND));
+  } catch (err) {
+    if (err instanceof IpalphaRejected && (err.status === 403 || err.status === 404)) return null;
+    throw err;
+  }
+}
+
+/** Health of many people, a few calls at a time (each read is logged by persons-api for its owner). */
+export async function readHealthMany(token: string, personIds: string[], concurrency = 8): Promise<Map<string, HealthInfo>> {
+  const out = new Map<string, HealthInfo>();
+  for (const batch of chunks([...new Set(personIds)], concurrency)) {
+    const results = await Promise.all(batch.map(async (id) => [id, await readHealth(token, id)] as const));
+    for (const [id, h] of results) if (h) out.set(id, h);
+  }
+  return out;
+}
+
+/** Writes a health patch (merged over the current block) with the acting role token. */
+export async function writeHealth(token: string, personId: string, patch: Partial<HealthInfo>, current?: HealthInfo | null): Promise<HealthInfo> {
+  const base = current ?? (await readHealth(token, personId)) ?? { ...EMPTY_HEALTH };
+  const next: HealthBlock = { ...base, ...patch };
+  return toHealth(await coreClient().writeData(token, personId, MEDICAL_KIND, next));
+}
+
+/** Health-tag counts for the list chips (anonymized, not logged — decision 22). */
+export async function healthCounts(personIds: string[], filters: HealthTagFilter, editionId?: string | null): Promise<{ total: number; byTag: Record<string, number> }> {
+  if (personIds.length === 0) return { total: 0, byTag: {} };
+  let total = 0;
+  const byTag: Record<string, number> = {};
+  for (const ids of chunks([...new Set(personIds)], COUNT_IDS_MAX)) {
+    const answer = await coreClient().count({ personIds: ids, ...(editionId ? { editionId } : {}), filters: { healthTags: filters } });
+    total += answer.total;
+    for (const [k, n] of Object.entries(answer.byTag)) byTag[k] = (byTag[k] ?? 0) + n;
+  }
+  return { total, byTag };
+}
+
+/** Does `h` match a "field:value" health tag filter (`allergies:<optionId>`, `medications`, `neurodivergent`, `foodRestrictions`)? */
+export function matchesHealthTag(h: HealthInfo, tag: string): boolean {
+  const [field, value] = tag.split(":", 2);
+  switch (field) {
+    case "allergies":
+    case "drugAllergies":
+    case "healthIssues":
+      return value ? h[field].includes(value) : h[field].length > 0;
+    case "medications":
+      return h.medications.length > 0;
+    case "neurodivergent":
+      return h.neurodivergent;
+    case "foodRestrictions":
+      return !!h.foodRestrictions.trim();
+    default:
+      return false;
+  }
+}
+
+/** "field:value" → the count endpoint filter. */
+export function tagFilter(tag: string): HealthTagFilter | null {
+  const [field, value] = tag.split(":", 2);
+  if ((field === "allergies" || field === "drugAllergies" || field === "healthIssues") && value) return { [field]: [value] };
+  if (field === "medications" || field === "neurodivergent" || field === "foodRestrictions") return { [field]: true };
+  return null;
+}
+
+/** Decodes an opaque list cursor (an offset) — invalid = start. */
+export function decodeCursor(cursor: string | undefined | null): number {
+  const n = Number(cursor ? Buffer.from(cursor, "base64url").toString("utf8") : 0);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+export function encodeCursor(offset: number): string {
+  return Buffer.from(String(offset), "utf8").toString("base64url");
+}
+
+/** One page of `items` (cursor = offset). */
+export function pageOf<T>(items: T[], cursor: string | undefined | null, limit: number): { items: T[]; nextCursor: string | null } {
+  const start = decodeCursor(cursor);
+  const size = Math.max(1, Math.min(PAGE_MAX, Math.floor(limit) || 50));
+  const slice = items.slice(start, start + size);
+  return { items: slice, nextCursor: start + size < items.length ? encodeCursor(start + size) : null };
+}
+
+/** Accent / case-insensitive "contains" for the name filter. */
+export function nameMatches(name: string, q: string): boolean {
+  const norm = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLocaleLowerCase("pt-BR");
+  return norm(name).includes(norm(q.trim()));
+}

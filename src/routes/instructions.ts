@@ -89,7 +89,7 @@ function buildPatch(body: Record<string, unknown>, partial: boolean): { patch: P
 
 instructions.use("*", requireAuth);
 
-instructions.get("/", requireRole("admin", "staff", "health_staff"), async (c) => {
+instructions.get("/", requireRole("admin", "staff"), async (c) => {
   const [list, scope] = await Promise.all([listInstructions(), resolveScope(c.get("user"))]);
   return c.json({ instructions: list.filter((d) => canSeeDoc(scope, d)).map(serializeInstruction) });
 });

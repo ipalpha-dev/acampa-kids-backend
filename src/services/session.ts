@@ -1,111 +1,183 @@
-import { ObjectId } from "mongodb";
-import { SignJWT, jwtVerify } from "jose";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { config } from "../config";
 import { getDb } from "../db";
 import { activeCampId } from "./campContext";
-import type { Role, Session } from "../types";
+import type { RoleGrant } from "./ipalpha/coreClient";
+import type { CoreRole, Session } from "../types";
 
-const secret = new TextEncoder().encode(config.jwtSecret);
+/**
+ * Acampa sessions (CONTRACTS §15): `{personId, roles[], activeRole, campId,
+ * roleTokens, offlineKey, expiresAt (sliding), hours}`.
+ *
+ *   - The browser holds only an opaque random token; the collection keys the
+ *     session by its sha256, so a database dump never yields a usable token.
+ *   - The per-role IPAlpha tokens are sealed with AES-256-GCM
+ *     (`SESSION_TOKEN_KEY`) and opened only to call core for this person —
+ *     never logged, never sent to the browser.
+ *   - The offline key (decision 35) is random per session and per role switch.
+ *   - The idle length (`hours`) is auth-api's `sessionIdleHours`, fixed at
+ *     login; every authenticated request slides `expiresAt` (at most once a
+ *     minute, to spare writes).
+ */
 
-export async function createSession(
-  userId: string,
-  role: Session["role"],
-  campId: string = activeCampId(),
-  /** session length override (IPAlpha's `sessionIdleHours`); default `config.sessionHours` */
-  hours?: number,
-): Promise<{ token: string; session: Session }> {
-  const db = await getDb();
-  const now = new Date();
-  const ttlHours = hours !== undefined && Number.isFinite(hours) && hours > 0 ? hours : config.sessionHours;
-  const expiresAt = new Date(now.getTime() + ttlHours * 60 * 60 * 1000);
+const COLLECTION = "sessions";
+const SLIDE_EVERY_MS = 60_000;
 
-  const { insertedId } = await db.collection("sessions").insertOne({
-    userId,
-    role,
-    campId,
-    createdAt: now,
-    expiresAt,
-    hours: ttlHours,
-  });
+export class SessionKeyMissing extends Error {}
 
-  const session: Session = {
-    _id: insertedId.toString(),
-    userId,
-    role,
-    campId,
-    createdAt: now,
-    expiresAt,
-    hours: ttlHours,
-  };
-
-  const token = await new SignJWT({
-    sid: session._id,
-    role,
-    camp: campId,
-  })
-    .setProtectedHeader({ alg: "HS256" })
-    .setSubject(userId)
-    .setIssuedAt()
-    .setExpirationTime(Math.floor(expiresAt.getTime() / 1000))
-    .sign(secret);
-
-  return { token, session };
+function key(): Buffer {
+  const raw = config.ipalpha.sessionTokenKey;
+  if (!raw) throw new SessionKeyMissing("SESSION_TOKEN_KEY is not set");
+  const buf = /^[0-9a-f]{64}$/i.test(raw) ? Buffer.from(raw, "hex") : Buffer.from(raw, "base64");
+  if (buf.length !== 32) throw new SessionKeyMissing("SESSION_TOKEN_KEY must be 32 bytes (64 hex chars or base64)");
+  return buf;
 }
 
-export async function verifySessionToken(
-  token: string,
-): Promise<{ userId: string; sessionId: string; role: Role; campId: string } | null> {
+/** AES-256-GCM: base64url(iv[12] | tag[16] | ciphertext). */
+export function seal(plain: string): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key(), iv);
+  const data = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), data]).toString("base64url");
+}
+
+export function unseal(sealed: string): string {
+  const buf = Buffer.from(sealed, "base64url");
+  const decipher = createDecipheriv("aes-256-gcm", key(), buf.subarray(0, 12));
+  decipher.setAuthTag(buf.subarray(12, 28));
+  return Buffer.concat([decipher.update(buf.subarray(28)), decipher.final()]).toString("utf8");
+}
+
+export function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+export type RoleTokens = Record<string, Omit<RoleGrant, "role">>;
+
+function sealGrants(grants: RoleGrant[]): string {
+  const map: RoleTokens = {};
+  for (const g of grants) map[g.role] = { tokens: g.tokens, expiresAt: g.expiresAt, editionId: g.editionId };
+  return seal(JSON.stringify(map));
+}
+
+export function openRoleTokens(session: Pick<Session, "roleTokens">): RoleTokens {
   try {
-    const { payload } = await jwtVerify(token, secret);
-    if (!payload.sub || typeof payload.sid !== "string") return null;
-
-    // make sure the session still exists and hasn't expired
-    const db = await getDb();
-    const session = await db.collection("sessions").findOne({
-      _id: new ObjectId(payload.sid),
-    });
-
-    if (!session) return null;
-    if (session.expiresAt <= new Date()) {
-      await db.collection("sessions").deleteOne({ _id: session._id });
-      return null;
-    }
-
-    // sessions created before the multi-year camps feature carry no campId — the active camp
-    const campId = typeof session.campId === "string" ? session.campId : (typeof payload.camp === "string" ? payload.camp : activeCampId());
-    return { userId: payload.sub, sessionId: payload.sid, role: session.role as Role, campId };
+    return JSON.parse(unseal(session.roleTokens)) as RoleTokens;
   } catch {
-    return null;
+    return {};
   }
 }
 
-/** Logs a person out everywhere: every session of that user (any role) is dropped. */
-export async function revokeUserSessions(userId: string): Promise<number> {
-  const db = await getDb();
-  const res = await db.collection("sessions").deleteMany({ userId });
-  return res.deletedCount;
+/** a fresh 32-byte key for the offline copy, sealed for storage */
+function newOfflineKey(): string {
+  return seal(randomBytes(32).toString("base64"));
+}
+
+export function openOfflineKey(session: Pick<Session, "offlineKey">): string {
+  return unseal(session.offlineKey);
+}
+
+function toSession(doc: Record<string, unknown> | null): Session | null {
+  if (!doc) return null;
+  return {
+    _id: doc._id as string,
+    personId: doc.personId as string,
+    roles: (doc.roles as CoreRole[]) ?? [],
+    activeRole: doc.activeRole as CoreRole,
+    campId: (doc.campId as string) ?? activeCampId(),
+    roleTokens: (doc.roleTokens as string) ?? "",
+    offlineKey: (doc.offlineKey as string) ?? "",
+    createdAt: doc.createdAt as Date,
+    expiresAt: doc.expiresAt as Date,
+    hours: typeof doc.hours === "number" ? doc.hours : config.sessionHours,
+  };
 }
 
 /**
- * Profile / camp switch: the current session is revoked and a new one issued
- * with the SAME length it was opened with (`hours`, fixed at login — e.g.
- * IPAlpha's `sessionIdleHours`). Sessions from before `hours` existed get
- * `config.sessionHours`.
+ * Opens a session for `personId` holding `grants` (one per live project role).
+ * Returns the opaque token for the browser — shown once, stored only hashed.
  */
-export async function replaceSession(
-  sessionId: string,
-  userId: string,
-  role: Session["role"],
-  campId: string,
-): Promise<{ token: string; session: Session }> {
+export async function createSession(input: { personId: string; grants: RoleGrant[]; activeRole: CoreRole; campId?: string; hours?: number | null }): Promise<{ token: string; session: Session }> {
   const db = await getDb();
-  const current = await db.collection("sessions").findOne({ _id: new ObjectId(sessionId) }, { projection: { hours: 1 } });
-  const hours = typeof current?.hours === "number" ? current.hours : undefined;
-  await db.collection("sessions").deleteOne({ _id: new ObjectId(sessionId) });
-  return createSession(userId, role, campId, hours);
+  const now = new Date();
+  const hours = input.hours && Number.isFinite(input.hours) && input.hours > 0 ? input.hours : config.sessionHours;
+  const token = randomBytes(32).toString("base64url");
+  const session: Session = {
+    _id: hashToken(token),
+    personId: input.personId,
+    roles: input.grants.map((g) => g.role),
+    activeRole: input.activeRole,
+    campId: input.campId ?? activeCampId(),
+    roleTokens: sealGrants(input.grants),
+    offlineKey: newOfflineKey(),
+    createdAt: now,
+    expiresAt: new Date(now.getTime() + hours * 3600_000),
+    hours,
+  };
+  await db.collection(COLLECTION).insertOne(session as never);
+  return { token, session };
 }
 
-export async function revokeSession(sessionId: string): Promise<void> {
+/** The live session behind a browser token (slides `expiresAt`), or null (unknown / expired — an expired one is dropped). */
+export async function findSessionByToken(token: string): Promise<Session | null> {
+  if (!token) return null;
   const db = await getDb();
-  await db.collection("sessions").deleteOne({ _id: new ObjectId(sessionId) });
+  const session = toSession((await db.collection(COLLECTION).findOne({ _id: hashToken(token) as never })) as Record<string, unknown> | null);
+  if (!session) return null;
+  const now = Date.now();
+  if (session.expiresAt.getTime() <= now) {
+    await db.collection(COLLECTION).deleteOne({ _id: session._id as never });
+    return null;
+  }
+  const slid = new Date(now + session.hours * 3600_000);
+  if (slid.getTime() - session.expiresAt.getTime() >= SLIDE_EVERY_MS) {
+    await db.collection(COLLECTION).updateOne({ _id: session._id as never }, { $set: { expiresAt: slid } });
+    session.expiresAt = slid;
+  }
+  return session;
+}
+
+export async function findSession(id: string): Promise<Session | null> {
+  const db = await getDb();
+  return toSession((await db.collection(COLLECTION).findOne({ _id: id as never })) as Record<string, unknown> | null);
+}
+
+/** Role switch: another role of the list; the offline key rotates (the offline copy is role-scoped and gets wiped). */
+export async function switchSessionRole(id: string, role: CoreRole): Promise<Session | null> {
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).findOneAndUpdate({ _id: id as never }, { $set: { activeRole: role, offlineKey: newOfflineKey() } }, { returnDocument: "after" });
+  return toSession(res as Record<string, unknown> | null);
+}
+
+/** History / camp switch (coordenação). The offline key rotates too. */
+export async function switchSessionCamp(id: string, campId: string): Promise<Session | null> {
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).findOneAndUpdate({ _id: id as never }, { $set: { campId, offlineKey: newOfflineKey() } }, { returnDocument: "after" });
+  return toSession(res as Record<string, unknown> | null);
+}
+
+/** A role whose membership is gone: dropped from the list (and its tokens). */
+export async function dropSessionRole(session: Session, role: CoreRole): Promise<void> {
+  const db = await getDb();
+  const tokens = openRoleTokens(session);
+  delete tokens[role];
+  await db.collection(COLLECTION).updateOne({ _id: session._id as never }, { $set: { roles: session.roles.filter((r) => r !== role), roleTokens: seal(JSON.stringify(tokens)) } });
+}
+
+export async function revokeSession(id: string): Promise<void> {
+  const db = await getDb();
+  await db.collection(COLLECTION).deleteOne({ _id: id as never });
+}
+
+/** Logs a person out everywhere (every session of that person id). */
+export async function revokePersonSessions(personId: string): Promise<number> {
+  const db = await getDb();
+  return (await db.collection(COLLECTION).deleteMany({ personId })).deletedCount;
+}
+
+export async function ensureSessionIndexes(): Promise<void> {
+  const db = await getDb();
+  await db.collection(COLLECTION).createIndex({ personId: 1 });
+  // Mongo drops expired sessions by itself (the sliding update moves the deadline)
+  await db.collection(COLLECTION).createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 }

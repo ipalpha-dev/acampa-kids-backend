@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { hashCode } from "./otp";
+import { hashDeleteCode as hashCode } from "./campDelete";
 import { DELETE_CODE_MAX_ATTEMPTS, evaluateCampDeleteCode, type CampDeleteCodeResult } from "./campDelete";
 import type { CampDeleteOtp } from "../models/camps";
 
@@ -7,7 +7,7 @@ const CODE = "123456";
 const now = new Date("2026-01-01T12:00:00Z");
 
 function otp(patch: Partial<CampDeleteOtp> = {}): CampDeleteOtp {
-  return { codeHash: hashCode(CODE), requestedByUserId: "user-1", expiresAt: new Date(now.getTime() + 5 * 60_000), attempts: 0, ...patch };
+  return { codeHash: hashCode(CODE), requestedByPersonId: "user-1", expiresAt: new Date(now.getTime() + 5 * 60_000), attempts: 0, ...patch };
 }
 
 function errorCode(result: CampDeleteCodeResult): string | null {
@@ -26,7 +26,7 @@ describe("evaluateCampDeleteCode", () => {
   });
 
   test("rejects a code requested by someone else", () => {
-    const result = evaluateCampDeleteCode(otp({ requestedByUserId: "user-2" }), "user-1", CODE, now);
+    const result = evaluateCampDeleteCode(otp({ requestedByPersonId: "user-2" }), "user-1", CODE, now);
     expect(errorCode(result)).toBe("CODE_EXPIRED");
   });
 

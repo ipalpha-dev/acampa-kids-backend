@@ -1,19 +1,28 @@
 import { config } from "./config";
 import { getDb } from "./db";
 import { activeCampId, refreshActiveCamp, withCamp } from "./services/campContext";
-import { claimCampersForAiReview, claimCampersForCleanup, finishCamperAiReview, finishCamperStructure, requeueStaleAiReviews, type CamperData } from "./models/campers";
-import { claimStaffForAiReview, claimStaffForCleanup, finishStaffAiReview, finishStaffStructure, requeueStaleStaffAiReviews, type StaffData } from "./models/staff";
+import { claimCampersForAiReview, claimCampersForCleanup, finishCamperAiReview, finishCamperStructure, requeueStaleAiReviews, updateCamper } from "./models/campers";
+import { claimStaffForAiReview, claimStaffForCleanup, finishStaffAiReview, finishStaffStructure, requeueStaleStaffAiReviews, updateStaff } from "./models/staff";
 import { AI_REVIEW_MAX_ATTEMPTS, aiReviewExhaustedFilter, aiReviewRetryDelayMs, aiReviewRetryPendingFilter, formatRetryDelay } from "./models/aiReviewRetry";
 import { findCamperImport, listImportsPendingNotification, updateCamperImport } from "./models/camperImports";
 import { recordAiUsage } from "./models/aiUsage";
 import { appendCategoryOption, listCategories, newOptionId } from "./models/categories";
-import { sortCamperNotes, type RawNotesCall } from "./services/camperNotesAi";
+import { enqueueHealth, listHealthQueue } from "./models/healthQueue";
 import { structureImportHealthWithJev } from "./services/importHealthStructureAi";
-import { CAMPER_CATEGORY_KEYS } from "./types";
+import { CAMPER_CATEGORY_KEYS, type HealthInfo } from "./types";
 import { cleanupImportObservations, type HealthOption, type HealthOptions, type ImportHealthSelection } from "./services/importObservationCleanupAi";
-import { comteleEnabled, comteleSendSms } from "./services/comtele";
+import { superAdminIds } from "./middleware/auth";
+import { sendMessage } from "./services/messages";
+import type { RawNotesCall } from "./services/camperNotesAi";
 import type { Camper, Staff } from "./types";
 
+/**
+ * Background AI triage of imported observations. The worker holds NO person
+ * token: it reads only Acampa's own free-text observations (`generalNotes`),
+ * writes the cleaned text back there, and leaves the structured HEALTH result
+ * in the transient `healthQueue`, which a coordenação session writes to
+ * persons-api (POST /api/people/health-queue/flush). Logs carry ids only.
+ */
 const POLL_MS = 10_000;
 const BATCH = 15;
 const SLOW_IMPORT_MS = 5 * 60_000;
@@ -105,137 +114,81 @@ function attemptLogger(who: string): (model: string, r: RawNotesCall) => void {
   };
 }
 
-/** phase 1 — Jev pre-fill (near-instant): writes the obvious closed health fields and reports "structured" right away; the cleanup model makes the final call */
-async function structureOne(camper: Camper): Promise<void> {
-  const who = `camper "${camper.name}" (${camper._id})`;
+/** the queued (not yet written) health patch of a person, as the base the next pass builds on */
+async function queuedPatch(personId: string): Promise<Partial<HealthInfo>> {
+  return (await listHealthQueue(1000)).find((q) => q.personId === personId)?.patch ?? {};
+}
+
+type Subject = { kind: "camper"; row: Camper } | { kind: "staff"; row: Staff };
+
+/** phase 1 — Jev pre-fill (near-instant): obvious closed health fields from the observations → health queue */
+async function structureOne(item: Subject): Promise<void> {
+  const { kind, row } = item;
+  const who = `${kind} ${row._id}`;
   try {
-    const reviewNotes = camper.generalNotes.trim();
-    log("camper", `${who} — start, observations=${reviewNotes.length} chars`);
-    const jev = await structureImportHealthWithJev(reviewNotes, {
-      allergies: camper.allergies,
-      drugAllergies: camper.drugAllergies,
-      healthIssues: camper.healthIssues,
-      neurodivergent: camper.neurodivergent,
-    }, "camper");
+    const notes = row.generalNotes.trim();
+    log(kind, `${who} — start, observations=${notes.length} chars`);
+    const jev = await structureImportHealthWithJev(notes, { allergies: [], drugAllergies: [], healthIssues: [], neurodivergent: false }, kind);
     void recordAiUsage({ at: new Date(), vendor: jev.vendor, model: jev.model, kind: "structure_health", userId: "worker", ...jev.usage, ok: jev.ok });
-    log("camper", `${who} — Jev structured: allergies=${jev.allergies.length} drugAllergies=${jev.drugAllergies.length} healthIssues=${jev.healthIssues.length} neurodivergent=${jev.neurodivergent}`);
     if (!jev.ok) throw new Error(`Jev: ${jev.error ?? "falhou"}`);
-    await finishCamperStructure(camper._id, { allergies: jev.allergies, drugAllergies: jev.drugAllergies, healthIssues: jev.healthIssues, neurodivergent: jev.neurodivergent });
-    log("camper", `${who} — structured, cleanup pending`);
-    await notifyBackend("camper", camper._id, "structured", 0);
+    log(kind, `${who} — Jev structured: allergies=${jev.allergies.length} drugAllergies=${jev.drugAllergies.length} healthIssues=${jev.healthIssues.length}`);
+    await enqueueHealth({ personId: row._id, kind: kind === "camper" ? "camper" : "team", importId: row.importId, patch: { allergies: jev.allergies, drugAllergies: jev.drugAllergies, healthIssues: jev.healthIssues, ...(kind === "camper" ? { neurodivergent: jev.neurodivergent } : {}) } });
+    if (kind === "camper") await finishCamperStructure(row._id);
+    else await finishStaffStructure(row._id);
+    await notifyBackend(kind, row._id, "structured", 0);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Falha na revisão por IA.";
-    const updated = await finishCamperStructure(camper._id, {}, message);
-    const attempts = updated?.aiReviewAttempts ?? 1;
-    log("camper", `${who} — ERROR: ${message} — ${retryNote(attempts)}`);
-    if (attempts >= AI_REVIEW_MAX_ATTEMPTS) await notifyBackend("camper", camper._id, "error", attempts);
+    const attempts = kind === "camper" ? ((await finishCamperStructure(row._id, message))?.aiReviewAttempts ?? 1) : await finishStaffStructure(row._id, message);
+    log(kind, `${who} — ERROR: ${message} — ${retryNote(attempts)}`);
+    if (attempts >= AI_REVIEW_MAX_ATTEMPTS) await notifyBackend(kind, row._id, "error", attempts);
   }
 }
 
-/** phase 2 — slow generative review (own batch; never blocks Jev): final health classification + free-text cleanup */
-async function cleanupOne(camper: Camper): Promise<void> {
-  const who = `camper "${camper.name}" (${camper._id})`;
+/** phase 2 — slow generative review: final health selection + cleaned observations */
+async function cleanupOne(item: Subject): Promise<void> {
+  const { kind, row } = item;
+  const who = `${kind} ${row._id}`;
   try {
-    // the claimed doc already carries the Jev-written structured fields
+    const base = await queuedPatch(row._id);
     const cleanup = await cleanupImportObservations({
-      notes: camper.generalNotes.trim(),
-      subject: "camper",
+      notes: row.generalNotes.trim(),
+      subject: kind,
       options: await healthOptions(),
-      structured: { allergies: camper.allergies, drugAllergies: camper.drugAllergies, healthIssues: camper.healthIssues, neurodivergent: camper.neurodivergent, medications: camper.medications },
-      currentFoodRestrictions: camper.foodRestrictions,
-      currentHealthNotes: camper.healthNotes,
-      current: { email: camper.guardianEmail, bedroomPreference: camper.bedroomPreference, emergencyContact: camper.emergencyContact, guardianPhone: camper.guardianPhone ?? "", insurance: camper.insurance, insuranceCard: camper.insuranceCard, weightKg: camper.weightKg },
+      structured: { allergies: base.allergies ?? [], drugAllergies: base.drugAllergies ?? [], healthIssues: base.healthIssues ?? [], neurodivergent: base.neurodivergent ?? false, medications: [] },
+      // the camp-ops fields Acampa owns are the only "current" values the worker can see
+      current: { email: "", ...(kind === "camper" ? { bedroomPreference: (row as Camper).bedroomPreference } : {}) },
     });
     void recordAiUsage({ at: new Date(), vendor: cleanup.vendor, model: cleanup.model, kind: "normalize_observations", userId: "worker", ...cleanup.usage, ok: cleanup.ok });
     if (!cleanup.ok) throw new Error(`Cleanup: ${cleanup.error ?? "falhou"}`);
-    // fill-only recovery: registration facts the sheet only carried as free text
-    const recovered: Partial<CamperData> = {};
-    if (!camper.guardianEmail && cleanup.recovered.email) recovered.guardianEmail = cleanup.recovered.email;
-    if (!camper.bedroomPreference && cleanup.recovered.bedroomPreference) recovered.bedroomPreference = cleanup.recovered.bedroomPreference;
-    if (!camper.emergencyContact && cleanup.recovered.emergencyContact) recovered.emergencyContact = cleanup.recovered.emergencyContact;
-    if (!camper.guardianPhone && cleanup.recovered.guardianPhone) recovered.guardianPhone = cleanup.recovered.guardianPhone;
-    if (!camper.insurance && cleanup.recovered.insurance) recovered.insurance = cleanup.recovered.insurance;
-    if (!camper.insuranceCard && cleanup.recovered.insuranceCard) recovered.insuranceCard = cleanup.recovered.insuranceCard;
-    if (camper.weightKg == null && cleanup.recovered.weightKg != null) recovered.weightKg = cleanup.recovered.weightKg;
-    if (Object.keys(recovered).length) log("camper", `${who} — recovered ${Object.keys(recovered).join(", ")}`);
-    const health = await applyHealthSelection(cleanup.health, camper.importId, who);
-    log("camper", `${who} — final health: allergies=${health.allergies.length} drugAllergies=${health.drugAllergies.length} healthIssues=${health.healthIssues.length} neurodivergent=${cleanup.health.neurodivergent}${health.created ? ` (+${health.created} new option(s))` : ""}`);
-    await finishCamperAiReview(camper._id, {
+    const health = await applyHealthSelection(cleanup.health, row.importId, who);
+    const r = cleanup.recovered;
+    const patch: Partial<HealthInfo> = {
       allergies: health.allergies,
       drugAllergies: health.drugAllergies,
       healthIssues: health.healthIssues,
-      neurodivergent: cleanup.health.neurodivergent,
+      ...(kind === "camper" ? { neurodivergent: cleanup.health.neurodivergent } : {}),
       medications: cleanup.medications,
       foodRestrictions: cleanup.foodRestrictions,
       healthNotes: cleanup.healthNotes,
-      generalNotes: cleanup.generalNotes,
-      ...recovered,
-    });
-    log("camper", `${who} — done`);
-    await notifyBackend("camper", camper._id, "reviewed", 0, health.created > 0);
+      ...(r.insurance ? { insurance: r.insurance } : {}),
+      ...(r.insuranceCard ? { insuranceCard: r.insuranceCard } : {}),
+      ...(r.weightKg != null ? { weightKg: r.weightKg } : {}),
+    };
+    await enqueueHealth({ personId: row._id, kind: kind === "camper" ? "camper" : "team", importId: row.importId, patch });
+    if (kind === "camper") {
+      await updateCamper(row._id, { generalNotes: cleanup.generalNotes, ...(r.bedroomPreference && !(row as Camper).bedroomPreference ? { bedroomPreference: r.bedroomPreference } : {}) });
+      await finishCamperAiReview(row._id);
+    } else {
+      await updateStaff(row._id, { generalNotes: cleanup.generalNotes });
+      await finishStaffAiReview(row._id);
+    }
+    log(kind, `${who} — done (health queued for the coordenação to write)`);
+    await notifyBackend(kind, row._id, "reviewed", 0, health.created > 0);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Falha na revisão por IA.";
-    const updated = await finishCamperAiReview(camper._id, {}, message);
-    const attempts = updated?.aiReviewAttempts ?? 1;
-    log("camper", `${who} — ERROR: ${message} — ${retryNote(attempts)}`);
-    if (attempts >= AI_REVIEW_MAX_ATTEMPTS) await notifyBackend("camper", camper._id, "error", attempts);
-  }
-}
-
-/** phase 1 — Jev pre-fill (near-instant) for a team member */
-async function structureStaffOne(member: Staff): Promise<void> {
-  const who = `staff "${member.name}" (${member._id})`;
-  try {
-    const notes = member.healthNotes.trim();
-    log("staff", `${who} — start, observations=${notes.length} chars`);
-    const jev = await structureImportHealthWithJev(notes, {
-      allergies: member.allergies,
-      drugAllergies: member.drugAllergies,
-      healthIssues: member.healthIssues,
-      neurodivergent: false,
-    }, "staff");
-    void recordAiUsage({ at: new Date(), vendor: jev.vendor, model: jev.model, kind: "structure_health", userId: "worker", ...jev.usage, ok: jev.ok });
-    log("staff", `${who} — Jev structured: allergies=${jev.allergies.length} drugAllergies=${jev.drugAllergies.length} healthIssues=${jev.healthIssues.length}`);
-    if (!jev.ok) throw new Error(`Jev: ${jev.error ?? "falhou"}`);
-    await finishStaffStructure(member._id, { allergies: jev.allergies, drugAllergies: jev.drugAllergies, healthIssues: jev.healthIssues });
-    log("staff", `${who} — structured, cleanup pending`);
-    await notifyBackend("staff", member._id, "structured", 0);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Falha na revisão por IA.";
-    const attempts = await finishStaffStructure(member._id, {}, message);
-    log("staff", `${who} — ERROR: ${message} — ${retryNote(attempts)}`);
-    if (attempts >= AI_REVIEW_MAX_ATTEMPTS) await notifyBackend("staff", member._id, "error", attempts);
-  }
-}
-
-/** phase 2 — slow generative review for a team member (own batch): final health classification + free-text cleanup */
-async function cleanupStaffOne(member: Staff): Promise<void> {
-  const who = `staff "${member.name}" (${member._id})`;
-  try {
-    const cleanup = await cleanupImportObservations({
-      notes: member.healthNotes.trim(),
-      subject: "staff",
-      options: await healthOptions(),
-      structured: { allergies: member.allergies, drugAllergies: member.drugAllergies, healthIssues: member.healthIssues, neurodivergent: false, medications: member.medications },
-      currentFoodRestrictions: member.foodRestrictions,
-      currentHealthNotes: "",
-      current: { email: member.email ?? "" },
-    });
-    void recordAiUsage({ at: new Date(), vendor: cleanup.vendor, model: cleanup.model, kind: "normalize_observations", userId: "worker", ...cleanup.usage, ok: cleanup.ok });
-    if (!cleanup.ok) throw new Error(`Cleanup: ${cleanup.error ?? "falhou"}`);
-    const recovered: Partial<StaffData> = {};
-    if (!member.email && cleanup.recovered.email) recovered.email = cleanup.recovered.email;
-    if (Object.keys(recovered).length) log("staff", `${who} — recovered email`);
-    const health = await applyHealthSelection(cleanup.health, member.importId, who);
-    log("staff", `${who} — final health: allergies=${health.allergies.length} drugAllergies=${health.drugAllergies.length} healthIssues=${health.healthIssues.length}${health.created ? ` (+${health.created} new option(s))` : ""}`);
-    await finishStaffAiReview(member._id, { allergies: health.allergies, drugAllergies: health.drugAllergies, healthIssues: health.healthIssues, medications: cleanup.medications, foodRestrictions: cleanup.foodRestrictions, healthNotes: cleanup.healthNotes, ...recovered });
-    log("staff", `${who} — done`);
-    await notifyBackend("staff", member._id, "reviewed", 0, health.created > 0);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Falha na revisão por IA.";
-    const attempts = await finishStaffAiReview(member._id, {}, message);
-    log("staff", `${who} — ERROR: ${message} — ${retryNote(attempts)}`);
-    if (attempts >= AI_REVIEW_MAX_ATTEMPTS) await notifyBackend("staff", member._id, "error", attempts);
+    const attempts = kind === "camper" ? ((await finishCamperAiReview(row._id, message))?.aiReviewAttempts ?? 1) : await finishStaffAiReview(row._id, message);
+    log(kind, `${who} — ERROR: ${message} — ${retryNote(attempts)}`);
+    if (attempts >= AI_REVIEW_MAX_ATTEMPTS) await notifyBackend(kind, row._id, "error", attempts);
   }
 }
 
@@ -245,48 +198,44 @@ const notifyRemaining = new Map<string, number>();
 async function notifyFinishedImports(importIds: string[]): Promise<void> {
   const db = await getDb();
   for (const importId of [...new Set(importIds.filter(Boolean))]) {
-    const [remainingCampers, remainingStaff, retryCampers, retryStaff] = await Promise.all([
-      db.collection("campers").countDocuments({ importId, aiReviewStatus: { $in: ["pending", "processing", "structured"] } }),
-      db.collection("staff").countDocuments({ importId, aiReviewStatus: { $in: ["pending", "processing", "structured"] } }),
-      db.collection("campers").countDocuments({ importId, ...aiReviewRetryPendingFilter() }),
-      db.collection("staff").countDocuments({ importId, ...aiReviewRetryPendingFilter() }),
+    const [remainingRows, retryRows] = await Promise.all([
+      db.collection("participants").countDocuments({ importId, aiReviewStatus: { $in: ["pending", "processing", "structured"] } }),
+      db.collection("participants").countDocuments({ importId, ...aiReviewRetryPendingFilter() }),
     ]);
-    const remaining = remainingCampers + remainingStaff + retryCampers + retryStaff;
+    const remaining = remainingRows + retryRows;
     if (remaining > 0) {
       // errors with tries left are still working (cooldown) — log only when the count changes
       if (notifyRemaining.get(importId) !== remaining) {
         notifyRemaining.set(importId, remaining);
-        log("notify", `import ${importId} — waiting, ${remaining} review(s) left (${retryCampers + retryStaff} in cooldown)`);
+        log("notify", `import ${importId} — waiting, ${remaining} review(s) left (${retryRows} in cooldown)`);
       }
       continue;
     }
     notifyRemaining.delete(importId);
     const record = await findCamperImport(importId);
     if (!record || record.status !== "completed") continue;
-    const collection = record.subject === "staff" ? "staff" : "campers";
     const [total, errors] = await Promise.all([
-      db.collection(collection).countDocuments({ importId }),
-      db.collection(collection).countDocuments({ importId, ...aiReviewExhaustedFilter() }),
+      db.collection("participants").countDocuments({ importId }),
+      db.collection("participants").countDocuments({ importId, ...aiReviewExhaustedFilter() }),
     ]);
     const errorRate = total ? errors / total : 0;
     const reviewStartedAt = record.reviewStartedAt ?? record.finishedAt ?? record.startedAt;
     const slowReview = Date.now() - reviewStartedAt.getTime() > SLOW_IMPORT_MS;
     let notificationFailed = false;
     const patch: Parameters<typeof updateCamperImport>[1] = {};
-    log("notify", `import "${record.fileName}" (${importId}) — review finished: ${total - errors}/${total} ok, ${errors} error(s)`);
-    if (slowReview && config.imports.adminPhone && !record.finishedSmsSentAt) {
-      const { sms } = await import("./i18n");
-      const subject = record.subject === "staff" ? "membros" : "crianças";
-      const sent = await comteleSendSms(config.imports.adminPhone, sms("pt", "importFinished", { file: record.fileName, ok: total - errors, total, subject }));
-      log("notify", `import "${record.fileName}" — finished SMS ${sent.ok ? "sent" : "FAILED"}`);
-      if (sent.ok) patch.finishedSmsSentAt = new Date();
+    log("notify", `import ${importId} — review finished: ${total - errors}/${total} ok, ${errors} error(s)`);
+    // a slow review → whoever started the import; >10% errors → the deployment owners (templates, by person id)
+    if (slowReview && record.createdByPersonId && !record.finishedSmsSentAt) {
+      const sent = await sendMessage("importFinished", [{ personId: record.createdByPersonId, variables: { count: total - errors } }], "import-finished");
+      log("notify", `import ${importId} — finished message ${sent?.sent ? "sent" : "FAILED"}`);
+      if (sent?.sent) patch.finishedSmsSentAt = new Date();
       else notificationFailed = true;
     }
-    if (errorRate > .1 && config.imports.superAdminPhone && !record.errorSmsSentAt) {
-      const { sms } = await import("./i18n");
-      const sent = await comteleSendSms(config.imports.superAdminPhone, sms("pt", "importErrors", { file: record.fileName, errors, total }));
-      log("notify", `import "${record.fileName}" — error-rate SMS ${sent.ok ? "sent" : "FAILED"}`);
-      if (sent.ok) patch.errorSmsSentAt = new Date();
+    const owners = superAdminIds();
+    if (errorRate > 0.1 && owners.length && !record.errorSmsSentAt) {
+      const sent = await sendMessage("importErrors", owners.map((personId) => ({ personId, variables: { failed: errors, total } })), "import-errors");
+      log("notify", `import ${importId} — error-rate message ${sent?.sent ? "sent" : "FAILED"}`);
+      if (sent?.sent) patch.errorSmsSentAt = new Date();
       else notificationFailed = true;
     }
     if (!notificationFailed) patch.notificationCheckedAt = new Date();
@@ -302,14 +251,14 @@ async function pollOnce(): Promise<boolean> {
     const structure = await Promise.all([claimCampersForAiReview(BATCH), claimStaffForAiReview(BATCH)]);
     if (structure[0].length || structure[1].length) {
       log("jev", `structuring ${structure[0].length} camper(s) + ${structure[1].length} staff review(s)`);
-      await Promise.all([...structure[0].map(structureOne), ...structure[1].map(structureStaffOne)]);
+      await Promise.all([...structure[0].map((row) => structureOne({ kind: "camper", row })), ...structure[1].map((row) => structureOne({ kind: "staff", row }))]);
       log("jev", `structured ${structure[0].length} camper(s) + ${structure[1].length} staff review(s)`);
     }
     // phase 2 — slow generative cleanup: separate batch over the already-structured records
     const cleanupBatch = await Promise.all([claimCampersForCleanup(BATCH), claimStaffForCleanup(BATCH)]);
     if (cleanupBatch[0].length || cleanupBatch[1].length) {
       log("cleanup", `cleaning ${cleanupBatch[0].length} camper(s) + ${cleanupBatch[1].length} staff review(s)`);
-      await Promise.all([...cleanupBatch[0].map(cleanupOne), ...cleanupBatch[1].map(cleanupStaffOne)]);
+      await Promise.all([...cleanupBatch[0].map((row) => cleanupOne({ kind: "camper", row })), ...cleanupBatch[1].map((row) => cleanupOne({ kind: "staff", row }))]);
       log("cleanup", `cleaned ${cleanupBatch[0].length} camper(s) + ${cleanupBatch[1].length} staff review(s)`);
     }
     const touched = [...structure.flat(), ...cleanupBatch.flat()];
@@ -328,7 +277,7 @@ async function loop(): Promise<never> {
   const [requeued, requeuedStaff] = await withCamp(activeCampId(), () => Promise.all([requeueStaleAiReviews(), requeueStaleStaffAiReviews()]));
   if (requeued + requeuedStaff) log("startup", `requeued ${requeued} camper and ${requeuedStaff} staff review(s)`);
   await withCamp(activeCampId(), async () => notifyFinishedImports((await listImportsPendingNotification()).map((r) => r._id)));
-  log("startup", `import worker ready; jev+cleanup batch=${BATCH}, poll=${POLL_MS / 1000}s, SMS=${comteleEnabled() ? "on" : "mock"}`);
+  log("startup", `import worker ready; jev+cleanup batch=${BATCH}, poll=${POLL_MS / 1000}s`);
   let idlePolls = 0;
   while (true) {
     const idle = await pollOnce();

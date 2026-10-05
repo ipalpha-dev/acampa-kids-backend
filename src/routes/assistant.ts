@@ -82,7 +82,7 @@ assistant.use("*", async (c, next) => {
     return next();
   }
   const deny = () => c.json({ error: { code: "FORBIDDEN", message: "Só a administração, a organização e a equipe médica podem usar o assistente." } }, 403);
-  if (role !== "staff" && role !== "health_staff") return deny();
+  if (role !== "staff") return deny();
   const scope = await resolveScope(c.get("user"));
   // organizers (scope.all) and the medical team already read the data the assistant queries
   if (!scope.all && !scope.medical) return deny();

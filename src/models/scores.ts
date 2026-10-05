@@ -13,10 +13,8 @@ function toEntry(doc: Record<string, unknown> | null): ScoreEntry | null {
     kind: (doc.kind as ScoreEntry["kind"]) ?? "add",
     note: (doc.note as string) ?? "",
     camperId: (doc.camperId as string) ?? null,
-    camperName: (doc.camperName as string) ?? "",
     eventId: (doc.eventId as string) ?? null,
-    byUserId: (doc.byUserId as string) ?? "",
-    byName: (doc.byName as string) ?? "",
+    byPersonId: (doc.byPersonId as string) ?? "",
     createdAt: doc.createdAt as Date,
   };
 }

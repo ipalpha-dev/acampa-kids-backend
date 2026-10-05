@@ -38,7 +38,7 @@ export function serializeFile(f: { _id: string; name: string; type: string; size
 files.post("/", requireAuth, async (c) => {
   const role = c.get("activeRole");
   if (role !== "admin") {
-    if (role !== "staff" && role !== "health_staff") {
+    if (role !== "staff") {
       return c.json({ error: { code: "FORBIDDEN", message: "Você não tem permissão para enviar imagens." } }, 403);
     }
     const scope = await resolveScope(c.get("user"));
@@ -53,7 +53,7 @@ files.post("/", requireAuth, async (c) => {
   if (file.size > MAX_BYTES) return fail(c, "FILE_TOO_LARGE", "Imagem muito grande (máx. 2 MB).", 413);
 
   const data = new Uint8Array(await file.arrayBuffer());
-  const stored = await insertFile({ name: file.name.slice(0, 120), type: file.type, data, byUserId: c.get("userId") });
+  const stored = await insertFile({ name: file.name.slice(0, 120), type: file.type, data, byPersonId: c.get("userId") });
   return c.json({ file: serializeFile(stored) }, 201);
 });
 

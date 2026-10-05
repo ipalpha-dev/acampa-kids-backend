@@ -81,8 +81,7 @@ export async function unlinkTeamEverywhere(teamId: string): Promise<void> {
   const db = await getDb();
   const now = new Date();
   await Promise.all([
-    db.collection("campers").updateMany({ team: teamId }, { $set: { team: null, updatedAt: now } }),
-    db.collection("staff").updateMany({ team: teamId }, { $set: { team: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ team: teamId }, { $set: { team: null, updatedAt: now } }),
   ]);
 }
 
@@ -104,8 +103,8 @@ export async function assignCamperGroupsAcrossTeams(teamIds: string[], groups: s
   }
   if (!assignments.size) return 0;
   const now = new Date();
-  await db.collection("campers").bulkWrite([...assignments].map(([id, team]) => ({
-    updateOne: { filter: { _id: new ObjectId(id), draft: { $ne: true } }, update: { $set: { team, updatedAt: now } } },
+  await db.collection("participants").bulkWrite([...assignments].map(([id, team]) => ({
+    updateOne: { filter: { kind: "camper", personId: id, draft: { $ne: true } }, update: { $set: { team, updatedAt: now } } },
   })));
   return assignments.size;
 }

@@ -121,24 +121,30 @@ describe("camper import review delta", () => {
 
   test("an imported camper enters the background review queue", () => {
     const data = camperDataFromPreview({ row: 2, name: "Ana", birthDate: "2017-01-02", blocked: false }, "import-id");
-    expect(data?.importId).toBe("import-id");
-    expect(data?.aiReviewStatus).toBe("pending");
+    expect(data?.ops.importId).toBe("import-id");
+    expect(data?.ops.aiReviewStatus).toBe("pending");
   });
 
   test("camper import keeps an uninformed bed position blank",()=>{
     const data=camperDataFromPreview({row:2,name:"Ana",birthDate:"2017-01-02",blocked:false},"import-id");
-    expect(data?.bed).toBeNull();
+    expect(data?.ops.bed).toBeNull();
   });
 
-  test("camper import preserves the emergency field until background AI review",()=>{
-    const data=camperDataFromPreview({row:2,name:"Ana",birthDate:"2017-01-02",emergencyContact:"Marcela/11999488182",blocked:false},"import-id");
-    expect(data?.emergencyContact).toBe("Marcela/11999488182");
+  test("camper import sends a readable emergency contact to core (kind emergencyContact), never to the camp row",()=>{
+    const data=camperDataFromPreview({row:2,name:"Ana",birthDate:"2017-01-02",emergencyContact:"Marcela (tia) 11999488182",blocked:false},"import-id");
+    expect(data?.kid.data.emergencyContact).toEqual({name:"Marcela",phone:"+5511999488182",relation:"tia"});
+    expect(JSON.stringify(data?.ops)).not.toContain("Marcela");
   });
 
-  test("explicit spreadsheet sex is stored only as probableGender", () => {
-    const data = camperDataFromPreview({ row: 2, name: "Ana", birthDate: "2017-01-02", sex: null, probableGender: "F", blocked: false }, "import-id");
-    expect(data?.sex).toBeNull();
-    expect(data?.probableGender).toBe("F");
+  test("person data and health go to core; the camp row keeps camp ops only", () => {
+    const data = camperDataFromPreview({ row: 2, name: "Ana", birthDate: "2017-01-02", guardianName: "Maria", guardianPhone: "+5511999999999", allergies: ["x"], healthNotes: "asma", generalNotes: "gosta de futebol", probableGender: "F", blocked: false }, "import-id");
+    expect(data?.ops.sex).toBeNull();
+    expect(data?.kid).toMatchObject({ name: "Ana", birthDate: "2017-01-02" });
+    expect(data?.guardian).toMatchObject({ name: "Maria", phone: "+5511999999999" });
+    expect(data?.health).toMatchObject({ allergies: ["x"], healthNotes: "asma" });
+    expect(data?.ops.generalNotes).toBe("gosta de futebol");
+    expect(JSON.stringify(data?.ops)).not.toContain("Ana");
+    expect(JSON.stringify(data?.ops)).not.toContain("asma");
   });
 
   test("uses full name or single name plus birthdate as the deterministic duplicate key",()=>{

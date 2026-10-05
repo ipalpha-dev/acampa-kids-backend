@@ -2,16 +2,16 @@ import { randomUUID } from "node:crypto";
 import { listBedrooms } from "../models/bedrooms";
 import { listCategories } from "../models/categories";
 import { listImportDictionary, type CamperImportColumn, type CamperImportCreatedItem } from "../models/camperImports";
-import { getSettings, updateSettings } from "../models/settings";
-import { insertStaff, listStaff, updateStaff, type StaffData } from "../models/staff";
+import { EMPTY_STAFF, insertStaff, listStaff, updateStaff, type StaffData } from "../models/staff";
 import { listTeams } from "../models/teams";
 import { listTransports } from "../models/transports";
-import { ensureLoginAccount } from "../models/users";
-import { STAFF_CATEGORY_KEYS, type CamperImportDictionaryEntry, type CamperSex, type Staff, type StaffImportReviewItem } from "../types";
+import { STAFF_CATEGORY_KEYS, TEAM_ROLE, type CamperImportDictionaryEntry, type CamperSex, type HealthInfo, type StaffImportReviewItem } from "../types";
 import { titleCaseName } from "../utils";
-import { resolveGender, sexFromBedroomId } from "./camperSex";
-import { classifyImportItems, dedupeImportValues, guessIndividualNamesSex, mapImportColumns, SPLIT_CATEGORY_FIELDS } from "./importAi";
-import { concatOtherColumns, IMPORT_ID_VALUE_RE, importPhone, isEmptyCategoryValue, isIgnoredImportColumn, narrativeOnlyAtoms, normalizeImportValue, parseBuiltInDate, parseImportSex, parseSpreadsheet, resolveBedroom, resolveCategoryValues, resolveTeam, resolveTransport, sourceMap, splitCategoryText, validEmail, valueOf, type ImportLookups } from "./camperImport";
+import { sexFromBedroomId } from "../models/bedrooms";
+import { classifyImportItems, dedupeImportValues, mapImportColumns, SPLIT_CATEGORY_FIELDS } from "./importAi";
+import { concatOtherColumns, IMPORT_ID_VALUE_RE, importPhone, isEmptyCategoryValue, isIgnoredImportColumn, namedStaff, narrativeOnlyAtoms, normalizeImportValue, parseBuiltInDate, parseImportSex, parseSpreadsheet, resolveBedroom, resolveCategoryValues, resolveTeam, resolveTransport, sourceMap, splitCategoryText, validEmail, valueOf, type ImportCoreContext, type ImportLookups, type NamedStaff } from "./camperImport";
+import { documentsOf, registerAdult } from "./coreRegistration";
+import { IpalphaRejected } from "./ipalpha/coreClient";
 
 export const STAFF_IMPORT_FIELDS = [
   { key: "name", label: "Nome", aliases: ["nome completo", "quem vai servir", "voluntario", "voluntário", "tio", "tia"], required: true },
@@ -112,7 +112,7 @@ export async function analyzeStaffImport(input: { data: Uint8Array; fileName: st
   const columns = await mapStaffColumns(parsed.columns, input.mapping, input.signal); const sources = sourceMap(columns);
   report("columns", 20);
   if (!sources.has("name")) return { columns, dictionaries: [], reviews: [], preview: [], skipped: [], createdItems: [], status: "needs_mapping", panicMessage: "Escolha a coluna de Nome." };
-  const [bedrooms, transports, teams, rawCategories, staff, previous] = await Promise.all([listBedrooms(), listTransports(), listTeams(), listCategories(), listStaff({ includeDraft: true }), listImportDictionary()]);
+  const [bedrooms, transports, teams, rawCategories, staff, previous] = await Promise.all([listBedrooms(), listTransports(), listTeams(), listCategories(), namedStaff({ includeDraft: true }), listImportDictionary()]);
   const categories = rawCategories.map((c) => ({ ...c, options: c.options.filter((o) => !o.draft) })); const lookups: ImportLookups = { bedrooms, transports, teams, categories, staff };
   const createdItems: CamperImportCreatedItem[] = [], dictionaries: CamperImportDictionaryEntry[] = [], reviews: StaffImportReviewItem[] = [], preview: Record<string, unknown>[] = [];
   const fields = ["bedroom", "team", "transportation", "allergies", "drugAllergies", "healthIssues"] as const;
@@ -145,8 +145,6 @@ export async function analyzeStaffImport(input: { data: Uint8Array; fileName: st
   for (const v of unique("team")) if (!resolution.has(`team:${v}`)) tasks.push(track("crossing", resolveTeam(v,lookups,createdItems,input.importId,input.signal).then((x)=>void resolution.set(`team:${v}`,x))));
   for (const v of unique("bedroom")) if (!resolution.has(`bedroom:${v}`)) tasks.push(track("crossing", resolveBedroom(v,namesByRoom.get(v)??[],lookups,createdItems,input.importId,input.signal).then((x)=>void resolution.set(`bedroom:${v}`,x))));
   for (const f of ["allergies","drugAllergies","healthIssues"] as const) tasks.push(track("categories", (async()=>{ const values=healthAtoms.filter((atom)=>bucketed.get(atom)===f&&!resolution.has(`${f}:${atom}`)); const resolved=await resolveCategoryValues(f,values,lookups,createdItems,input.importId,input.signal); for(const [value,id] of resolved) resolution.set(`${f}:${value}`,id); })()));
-  const guesses = new Map<string,CamperSex>();
-  tasks.push(track("leaders", (async()=>{ const names=[...new Set(parsed.rows.filter((r)=>!parseStaffImportSex(valueOf(r,sources,"probableGender"))).map((r)=>valueOf(r,sources,"name").split(" ")[0]).filter(Boolean))]; const chunks=Array.from({length:Math.ceil(names.length/50)},(_,i)=>names.slice(i*50,i*50+50)); const answers=await Promise.all(chunks.map((chunk)=>guessIndividualNamesSex(chunk,input.signal))); for(const answer of answers) for(const [name,sex] of Object.entries(answer)) if(sex) guesses.set(normalizeImportValue(name),sex); })()));
   report("crossing", 50);
   await Promise.all(tasks);
   report("preview", 88);
@@ -161,9 +159,10 @@ export async function analyzeStaffImport(input: { data: Uint8Array; fileName: st
   const healthOf=(row:Record<string,string>)=>{ const out:Record<string,string[]>={allergies:[],drugAllergies:[],healthIssues:[]}; for (const f of healthFields) for (const id of getAll(f,valueOf(row,sources,f))) { const target=optionCategory.get(id)??f; if(out[target]&&!out[target].includes(id)) out[target].push(id); } return out; }; const mapped=new Set(columns.filter((c)=>c.target).map((c)=>c.source));
   const phoneRows=new Map<string,number[]>();
   for(let i=0;i<parsed.rows.length;i++){const phone=importPhone(valueOf(parsed.rows[i],sources,"phone"));if(phone)phoneRows.set(phone,[...(phoneRows.get(phone)??[]),i+2]);}
-  for (let i=0;i<parsed.rows.length;i++) { const row=parsed.rows[i], line=i+2, name=titleCaseName(valueOf(row,sources,"name")); if(!name) continue; const rawPhone=valueOf(row,sources,"phone"), phone=importPhone(rawPhone); const phoneMatch=phone?staff.find((s)=>s.phone===phone):null; let existing=phoneMatch??null; const repeatedLines=phone?phoneRows.get(phone)??[]:[]; const ambiguous=repeatedLines.length>1;
+  for (let i=0;i<parsed.rows.length;i++) { const row=parsed.rows[i], line=i+2, name=titleCaseName(valueOf(row,sources,"name")); if(!name) continue; const rawPhone=valueOf(row,sources,"phone"), phone=importPhone(rawPhone); // existing people are matched by core at registration (same phone = same person); no phones are kept here
+    const phoneMatch=null as NamedStaff|null; let existing=phoneMatch??null; const repeatedLines=phone?phoneRows.get(phone)??[]:[]; const ambiguous=repeatedLines.length>1;
     if(!phone) reviews.push(review("phone",line,name,rawPhone,{context:[valueOf(row,sources,"team"),valueOf(row,sources,"bedroom")].filter(Boolean).join(" · ")}));
-    const bedroomRaw=valueOf(row,sources,"bedroom"), bedroom=bedroomRaw&&!isBlankStaffBedroom(bedroomRaw)?get("bedroom",bedroomRaw)??null:null; const room=bedroom?bedrooms.find((b)=>b._id===bedroom):null; const sex:CamperSex|null=room?.group==="girls"?"F":room?.group==="boys"?"M":null, explicitGender=parseStaffImportSex(valueOf(row,sources,"probableGender")), probableGender=explicitGender??guesses.get(normalizeImportValue(name.split(" ")[0]))??null; if(!bedroom&&bedroomRaw&&!isBlankStaffBedroom(bedroomRaw)) reviews.push(review("bedroom",line,name,bedroomRaw,{context:[phone,valueOf(row,sources,"team"),valueOf(row,sources,"transportation")].filter(Boolean).join(" · ")}));
+    const bedroomRaw=valueOf(row,sources,"bedroom"), bedroom=bedroomRaw&&!isBlankStaffBedroom(bedroomRaw)?get("bedroom",bedroomRaw)??null:null; const room=bedroom?bedrooms.find((b)=>b._id===bedroom):null; const sex:CamperSex|null=room?.group==="girls"?"F":room?.group==="boys"?"M":null, probableGender=parseStaffImportSex(valueOf(row,sources,"probableGender")); if(!bedroom&&bedroomRaw&&!isBlankStaffBedroom(bedroomRaw)) reviews.push(review("bedroom",line,name,bedroomRaw,{context:[phone,valueOf(row,sources,"team"),valueOf(row,sources,"transportation")].filter(Boolean).join(" · ")}));
     const hasRoomRole=sources.has("roomRole"), roleRaw=hasRoomRole?valueOf(row,sources,"roomRole"):"", roomRole=parseStaffRoomRole(roleRaw); if(hasRoomRole&&roleRaw&&roomRole==="caretaker") reviews.push(review("roomRole",line,name,roleRaw,{value:roomRole,resolved:true})); const activeRaw=valueOf(row,sources,"active"), active=bool(activeRaw,true); if(activeRaw&&!active) reviews.push(review("inactive",line,name,activeRaw,{value:"false",resolved:true}));
     const health=healthOf(row), categoryNotesById:Record<string,string[]>={};
     const remember=(ids:string[],label:string,raw:string)=>{if(!raw)return;const note=`${label}: ${raw}.`;for(const id of ids){const notes=categoryNotesById[id]??[];if(!notes.includes(note))notes.push(note);categoryNotesById[id]=notes;}};
@@ -173,8 +172,8 @@ export async function analyzeStaffImport(input: { data: Uint8Array; fileName: st
     const notes=normalizeStaffFreeText([normalizeStaffFreeText(valueOf(row,sources,"healthNotes")),dailyMedication&&`Medicação de uso diário: ${dailyMedication}.`,foodRestrictions&&`Restrição alimentar: ${foodRestrictions}.`,categoryNote("allergies","Alergias informadas"),categoryNote("drugAllergies","Alergias a medicamentos informadas"),categoryNote("healthIssues","Condições de saúde informadas"),concatOtherColumns(row,mapped)].filter(Boolean).join(" ").trim());
     const duties=Object.fromEntries(STAFF_DUTY_FIELDS.filter((field)=>sources.has(field)).map((field)=>[field,parseStaffDuty(valueOf(row,sources,field))]));
     const incoming:Record<string,unknown>={row:line,name,phone,email:validEmail(valueOf(row,sources,"email"))||null,document:normalizeStaffFreeText(valueOf(row,sources,"document")),birthDate:parseBuiltInDate(valueOf(row,sources,"birthDate")),active,roomRole,team:valueOf(row,sources,"team")?get("team",valueOf(row,sources,"team"))??null:null,bedroom,transportation:valueOf(row,sources,"transportation")?get("transportation",valueOf(row,sources,"transportation"))??null:null,sex,probableGender,allergies:health.allergies,drugAllergies:health.drugAllergies,healthIssues:health.healthIssues,foodRestrictions,medications:[],healthNotes:notes,categoryNotesById,...duties,existingStaffId:existing?._id??null,blocked:false};
-    if(phoneMatch&&!ambiguous){const existingData:Record<string,unknown>={...phoneMatch};for(const key of ["_id","createdAt","updatedAt","checkin","vest","prepDone","welcomeSentAt","foreignLookupCount","foreignLookupNames","foreignLookupAlertedAt"])delete existingData[key];const effectiveIncoming={...incoming};for(const key of ["bedroom","team","transportation","roomRole"] as const)effectiveIncoming[key]=existingData[key]??null;const has=(v:unknown)=>Array.isArray(v)?v.length>0:v!==null&&v!==undefined&&v!==""&&v!==false,merge=(oldValue:unknown,newValue:unknown)=>Array.isArray(oldValue)||Array.isArray(newValue)?[...new Set([...(Array.isArray(oldValue)?oldValue:[]),...(Array.isArray(newValue)?newValue:[])])]:has(newValue)?newValue:oldValue,mergedData=Object.fromEntries([...new Set([...Object.keys(existingData),...Object.keys(effectiveIncoming)])].map((key)=>[key,merge(existingData[key],effectiveIncoming[key])])),mergeAvailable=JSON.stringify(mergedData)!==JSON.stringify(existingData)&&JSON.stringify(mergedData)!==JSON.stringify(effectiveIncoming);reviews.push(review("duplicate",line,name,rawPhone,{existingId:phoneMatch._id,existingName:phoneMatch.name,existingPhone:phoneMatch.phone,existingData,incomingData:effectiveIncoming,mergedData,mergeAvailable}));incoming.blocked=true;}
-    else if(ambiguous){reviews.push(review("duplicate",line,name,rawPhone,{context:`Celular repetido nas linhas ${repeatedLines.join(", ")}.`,incomingData:incoming,existingId:phoneMatch?._id,existingName:phoneMatch?.name,existingPhone:phoneMatch?.phone}));incoming.existingStaffId=null;}
+    if(phoneMatch&&!ambiguous){const existingData:Record<string,unknown>={...phoneMatch};for(const key of ["_id","createdAt","updatedAt","checkin","vest","prepDone","welcomeSentAt","foreignLookupCount","foreignLookupNames","foreignLookupAlertedAt"])delete existingData[key];const effectiveIncoming={...incoming};for(const key of ["bedroom","team","transportation","roomRole"] as const)effectiveIncoming[key]=existingData[key]??null;const has=(v:unknown)=>Array.isArray(v)?v.length>0:v!==null&&v!==undefined&&v!==""&&v!==false,merge=(oldValue:unknown,newValue:unknown)=>Array.isArray(oldValue)||Array.isArray(newValue)?[...new Set([...(Array.isArray(oldValue)?oldValue:[]),...(Array.isArray(newValue)?newValue:[])])]:has(newValue)?newValue:oldValue,mergedData=Object.fromEntries([...new Set([...Object.keys(existingData),...Object.keys(effectiveIncoming)])].map((key)=>[key,merge(existingData[key],effectiveIncoming[key])])),mergeAvailable=JSON.stringify(mergedData)!==JSON.stringify(existingData)&&JSON.stringify(mergedData)!==JSON.stringify(effectiveIncoming);reviews.push(review("duplicate",line,name,rawPhone,{existingId:phoneMatch._id,existingName:phoneMatch.name,existingPhone:null,existingData,incomingData:effectiveIncoming,mergedData,mergeAvailable}));incoming.blocked=true;}
+    else if(ambiguous){reviews.push(review("duplicate",line,name,rawPhone,{context:`Celular repetido nas linhas ${repeatedLines.join(", ")}.`,incomingData:incoming,existingId:phoneMatch?._id,existingName:phoneMatch?.name,existingPhone:null}));incoming.existingStaffId=null;}
     preview.push(incoming);
   }
   report("preview", 96);
@@ -192,24 +191,89 @@ export function applyStaffDelta(preview: Record<string,unknown>[], reviews: Staf
   return rows;
 }
 
-export function staffDataFromPreview(row:Record<string,unknown>,importId:string,draft=false):StaffData { return {name:String(row.name),phone:(row.phone as string|null)??null,email:typeof row.email==="string"&&row.email?row.email:null,document:normalizeStaffFreeText(String(row.document??"")),birthDate:typeof row.birthDate==="string"&&row.birthDate?row.birthDate:null,active:row.active!==false,roomRole:row.roomRole==="caretaker"?"caretaker":"helper",team:(row.team as string|null)??null,bedroom:(row.bedroom as string|null)??null,transportation:(row.transportation as string|null)??null,sex:(row.sex as CamperSex|null)??null,probableGender:(row.probableGender as CamperSex|null)??null,allergies:(row.allergies as string[])??[],drugAllergies:(row.drugAllergies as string[])??[],healthIssues:(row.healthIssues as string[])??[],foodRestrictions:normalizeStaffFreeText(String(row.foodRestrictions??"")),medications:[],healthNotes:normalizeStaffFreeText(String(row.healthNotes??"")),draft,importId,aiReviewStatus:draft?null:"pending",aiReviewError:"",aiReviewStartedAt:null,aiReviewFinishedAt:null,aiReviewAttempts:0,aiReviewNextRetryAt:null}; }
-const DUTY_SETTING:{[K in StaffDutyField]:"organizers"|"checkinHelpers"|"vestHelpers"|"scoreHelpers"|"gameOrganizers"}={organizer:"organizers",checkinHelper:"checkinHelpers",vestHelper:"vestHelpers",scoreHelper:"scoreHelpers",gameOrganizer:"gameOrganizers"};
-async function applyImportedStaffDuties(rows:Record<string,unknown>[]):Promise<void>{
-  const settings=await getSettings();
-  const patch:Partial<Pick<typeof settings,"organizers"|"checkinHelpers"|"vestHelpers"|"scoreHelpers"|"gameOrganizers">>={};
-  let changed=false;
-  for(const field of STAFF_DUTY_FIELDS){
-    const key=DUTY_SETTING[field];
-    const ids=new Set(settings[key].staffIds);
-    let fieldChanged=false;
-    for(const row of rows){
-      if(row.blocked||!row.name||row[field]!==true)continue;
-      const id=typeof row.existingStaffId==="string"?row.existingStaffId:"";
-      if(!id||ids.has(id))continue;
-      ids.add(id);fieldChanged=true;
-    }
-    if(fieldChanged){patch[key]={staffIds:[...ids]};changed=true;}
-  }
-  if(changed)await updateSettings(patch);
+/** One preview row → camp ops (Acampa), the person (persons-api), health (persons-api `medical`) and the helper roles (projects-api). */
+export function staffDataFromPreview(row: Record<string, unknown>, importId: string, draft = false): { ops: StaffData; person: { name: string; phone: string | null; email: string | null; birthDate: string | null; data: Record<string, unknown> }; health: Partial<HealthInfo>; roles: string[] } {
+  const docs = documentsOf({ text: String(row.document ?? "") });
+  return {
+    ops: {
+      ...EMPTY_STAFF,
+      active: row.active !== false,
+      roomRole: row.roomRole === "caretaker" ? "caretaker" : "helper",
+      team: (row.team as string | null) ?? null,
+      bedroom: (row.bedroom as string | null) ?? null,
+      transportation: (row.transportation as string | null) ?? null,
+      sex: (row.sex as CamperSex | null) ?? null,
+      draft,
+      importId,
+      aiReviewStatus: draft ? null : "pending",
+      aiReviewError: "",
+      aiReviewStartedAt: null,
+      aiReviewFinishedAt: null,
+      aiReviewAttempts: 0,
+      aiReviewNextRetryAt: null,
+    },
+    person: {
+      name: String(row.name),
+      phone: (row.phone as string | null) ?? null,
+      email: typeof row.email === "string" && row.email ? row.email : null,
+      birthDate: typeof row.birthDate === "string" && row.birthDate ? row.birthDate : null,
+      data: docs.length ? { document: docs } : {},
+    },
+    health: {
+      allergies: (row.allergies as string[]) ?? [],
+      drugAllergies: (row.drugAllergies as string[]) ?? [],
+      healthIssues: (row.healthIssues as string[]) ?? [],
+      foodRestrictions: normalizeStaffFreeText(String(row.foodRestrictions ?? "")).slice(0, 300),
+      healthNotes: normalizeStaffFreeText(String(row.healthNotes ?? "")).slice(0, 2000),
+    },
+    roles: [TEAM_ROLE, ...STAFF_DUTY_FIELDS.filter((f) => row[f] === true).map((f) => DUTY_ROLE[f])],
+  };
 }
-export async function insertImportStaff(rows: Record<string,unknown>[], importId:string): Promise<{inserted:number;updated:number;loginsCreated:number;eligiblePhones:number;skipped:Record<string,unknown>[]}> { let inserted=0,updated=0,loginsCreated=0,eligiblePhones=0; const skipped:Record<string,unknown>[]=[], all=await listStaff({includeDraft:true}); const usedPhones=new Set(all.map((s)=>s.phone).filter((phone):phone is string=>!!phone)); for(const row of rows){ if(row.blocked||!row.name){skipped.push({row:row.row,name:row.name,reason:String(row.skipReason??"Revisão ignorada")});continue;} const data=staffDataFromPreview(row,importId); const id=typeof row.existingStaffId==="string"?row.existingStaffId:""; const old=id?all.find((s)=>s._id===id):null; if(data.phone&&usedPhones.has(data.phone)&&old?.phone!==data.phone){skipped.push({row:row.row,name:row.name,reason:"Celular repetido; inserido sem login"});data.phone=null;} data.sex=await sexFromBedroomId(data.bedroom); if(data.probableGender!=="F"&&data.probableGender!=="M"){const inferred=await resolveGender({name:data.name,bedroomId:data.bedroom,requested:null,guessIfMissing:data.sex!=="F"&&data.sex!=="M"});data.probableGender=inferred.probableGender;} if(id){await updateStaff(id,data);updated++;row.existingStaffId=id;} else {const created=await insertStaff(data);inserted++;row.existingStaffId=created._id;} if(data.phone){usedPhones.add(data.phone);eligiblePhones++;const x=await ensureLoginAccount(data.name,data.phone,"staff");if(x.created)loginsCreated++;} } await applyImportedStaffDuties(rows); return {inserted,updated,loginsCreated,eligiblePhones,skipped}; }
+
+/** spreadsheet duty columns → the §10 project roles they grant in the camp's edition */
+const DUTY_ROLE: { [K in StaffDutyField]: string } = { organizer: "organizacao", checkinHelper: "checkin", vestHelper: "coletes", scoreHelper: "pontuacao", gameOrganizer: "organizacao-jogos" };
+
+/**
+ * Applies the reviewed rows: each person is registered in core with the
+ * coordenação tokens (registration answers the existing person for a known
+ * phone) and gets `equipe` + the duty roles of the spreadsheet in the camp's
+ * edition; then the camp-ops row is written. Rows without a phone cannot sign
+ * in and are skipped (core identifies adults by phone).
+ */
+export async function insertImportStaff(rows: Record<string, unknown>[], importId: string, ctx: ImportCoreContext): Promise<{ inserted: number; updated: number; loginsCreated: number; eligiblePhones: number; skipped: Record<string, unknown>[] }> {
+  let inserted = 0;
+  let updated = 0;
+  let loginsCreated = 0;
+  let eligiblePhones = 0;
+  const skipped: Record<string, unknown>[] = [];
+  for (const row of rows) {
+    if (row.blocked || !row.name) {
+      skipped.push({ row: row.row, name: row.name, reason: String(row.skipReason ?? "Revisão ignorada") });
+      continue;
+    }
+    const data = staffDataFromPreview(row, importId);
+    if (!data.person.phone) {
+      skipped.push({ row: row.row, name: row.name, reason: "Sem celular: cadastre a pessoa no IPAlpha antes" });
+      continue;
+    }
+    data.ops.sex = await sexFromBedroomId(data.ops.bedroom);
+    try {
+      const { personId, created } = await registerAdult(ctx.tokens, { name: data.person.name, phone: data.person.phone, email: data.person.email, birthDate: data.person.birthDate, roles: data.roles, editionId: ctx.editionId, data: data.person.data, health: data.health });
+      eligiblePhones++;
+      if (created) loginsCreated++;
+      const existing = (await listStaff({ includeDraft: true, personIds: [personId] }))[0];
+      if (existing) {
+        await updateStaff(personId, { ...data.ops, draft: false });
+        updated++;
+      } else {
+        await insertStaff(personId, data.ops);
+        inserted++;
+      }
+      row.existingStaffId = personId;
+    } catch (err) {
+      if (!(err instanceof IpalphaRejected)) throw err;
+      skipped.push({ row: row.row, name: row.name, reason: `O IPAlpha recusou o cadastro (${err.reason})` });
+    }
+  }
+  return { inserted, updated, loginsCreated, eligiblePhones, skipped };
+}

@@ -1,16 +1,15 @@
 import { Hono, type Context } from "hono";
 import { createHash } from "node:crypto";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, type AuthVariables } from "../middleware/auth";
+import { coordinationContext } from "../services/acting";
 import { requireManager } from "../middleware/roles";
 import { claimCamperImport, findCamperImport, insertCamperImport, markImportDictionaryPublished, updateCamperImport, upsertImportDictionary } from "../models/camperImports";
 import { analyzeCamperImport, applyCategoryChoices, applyImportDelta, createLeaderFromReview, discardImportCategoryOptions, IMPORT_FILE_MAX_BYTES, IMPORT_FIELDS, insertImportCampers, publishImportDrafts } from "../services/camperImport";
 import { getImportProgress, setImportProgress } from "../services/importProgress";
 import { publish } from "../services/realtime";
-import type { CamperImportReviewItem, Role, SessionUser } from "../types";
+import type { CamperImportReviewItem } from "../types";
 
-interface Env {
-  Variables: { userId: string; sessionId: string; activeRole: Role; user: SessionUser };
-}
+type Env = { Variables: AuthVariables };
 
 const imports = new Hono<Env>();
 const normalized = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -72,7 +71,7 @@ imports.post("/analyze", async (c) => {
     dryRun: true,
     columns: [], rows: [], dictionaries: [], reviews: [], preview: [], skipped: [], createdItems: [], dateFunction: "",
     startedAt, reviewStartedAt: null, finishedAt: null, finishedSmsSentAt: null, errorSmsSentAt: null, notificationCheckedAt: null,
-    createdByUserId: user.id, createdByName: user.name,
+    createdByPersonId: user.id,
     error: "",
   });
   try {
@@ -117,17 +116,20 @@ imports.post("/:id/leaders", async (c) => {
   const body = await c.req.json<{ reviewId?: string; phone?: string }>().catch(() => null);
   const item = record.reviews.find((r) => r.id === body?.reviewId && r.kind === "leader");
   if (!item) return fail(c, "REVIEW_NOT_FOUND", "Líder não encontrado nesta revisão.", 404);
+  const ctx = await coordinationContext(c.get("session"));
+  if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status);
   try {
-    const staff = await createLeaderFromReview(item.original, body?.phone ?? "", record._id);
+    const staff = await createLeaderFromReview(item.original, body?.phone ?? "", record._id, ctx);
     const canonical = record.dictionaries.find((d) => d.field === "leader" && d.normalized === normalized(item.original))?.label ?? item.original;
     const reviews = record.reviews.map((r) => r.kind === "leader" && normalized(r.original) === normalized(item.original) ? { ...r, value: staff._id, resolved: true } : r);
     const dictionaries = record.dictionaries.map((d) => d.field === "leader" && normalized(d.label) === normalized(canonical) ? { ...d, value: staff._id, label: staff.name } : d);
     const updated = (await updateCamperImport(record._id, { reviews, dictionaries, createdItems: [...record.createdItems, { kind: "staff", id: staff._id, label: staff.name, draft: true }] }))!;
     await upsertImportDictionary(dictionaries, record._id);
     publish("staff");
-    return c.json({ staff: { id: staff._id, name: staff.name, phone: staff.phone }, import: serialize(updated) });
+    return c.json({ staff: { id: staff._id, name: staff.name }, import: serialize(updated) });
   } catch (err) {
-    return fail(c, "LEADER_INVALID", err instanceof Error ? err.message : "Não foi possível criar o líder.");
+    if (!(err instanceof Error) || err.constructor.name !== "Error") throw err;
+    return fail(c, "LEADER_INVALID", err.message || "Não foi possível criar o líder.");
   }
 });
 
@@ -159,9 +161,11 @@ imports.post("/:id/apply", async (c) => {
   if(duplicateChoice)for(const review of camperReviews)if(review.kind==="duplicate"&&!delta[review.id]?.value)delta[review.id]={...delta[review.id],value:duplicateChoice};
   const chosenPreview = applyCategoryChoices(record.preview, declinedCategoryIds);
   const { rows, skipped: reviewSkipped } = applyImportDelta(chosenPreview, camperReviews, delta);
+  const ctx = await coordinationContext(c.get("session"));
+  if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status);
   if (!(await claimCamperImport(record._id))) return fail(c, "IMPORT_ALREADY_APPLIED", "Esta importação já está em andamento ou foi aplicada.", 409);
   try {
-    const result = await insertImportCampers(rows, record._id);
+    const result = await insertImportCampers(rows, record._id, ctx);
     const finishedAt = new Date();
     // insertImportCampers is the final authority; reviewSkipped is useful only
     // when it adds context that the final validation did not already report.
@@ -169,7 +173,8 @@ imports.post("/:id/apply", async (c) => {
     for (const item of [...reviewSkipped, ...result.skipped]) skippedByRow.set(Number(item.row), item);
     const skipped = [...skippedByRow.values()];
     const reviews: CamperImportReviewItem[] = camperReviews.map((r) => ({ ...r, value: delta[r.id]?.value ?? r.value, skip: delta[r.id]?.skip ?? r.skip, resolved: true }));
-    const updated = (await updateCamperImport(record._id, { status: "completed", dryRun: false, reviews, skipped, finishedAt, error: "" }))!;
+    // the spreadsheet's person data is not kept once applied (it lives in core now): rows / preview are dropped
+    const updated = (await updateCamperImport(record._id, { status: "completed", dryRun: false, reviews: reviews.map((r) => ({ ...r, existingData: undefined, incomingData: undefined, mergedData: undefined })), skipped, finishedAt, error: "", rows: [], preview: [] }))!;
     await discardImportCategoryOptions(record._id, declinedCategoryIds);
     await Promise.all([markImportDictionaryPublished(record._id), publishImportDrafts(record._id)]);
     publish("campers", "bedrooms", "staff", "teams", "transports", "categories");

@@ -5,7 +5,22 @@ import { wipeGallery } from "../models/cleanup";
 import { deleteFile } from "../models/files";
 import { withCamp } from "./campContext";
 import { SCOPED } from "./campScope";
-import { verifyLocalCode } from "./otp";
+import { createHash, randomInt, timingSafeEqual } from "node:crypto";
+
+/** A 6-digit confirmation code (sent through the `acampa-camp-delete-code` template; only its hash is stored). */
+export function generateDeleteCode(): string {
+  return String(randomInt(0, 1_000_000)).padStart(6, "0");
+}
+
+export function hashDeleteCode(code: string): string {
+  return createHash("sha256").update(code).digest("hex");
+}
+
+function verifyDeleteCode(code: string, hash: string): boolean {
+  const a = Buffer.from(hashDeleteCode(code), "hex");
+  const b = Buffer.from(hash, "hex");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 export const DELETE_CODE_MAX_ATTEMPTS = 3;
 
@@ -26,13 +41,13 @@ export type CampDeleteCodeResult =
  * counter, or run the deletion). `now` is injectable for tests.
  */
 export function evaluateCampDeleteCode(otp: CampDeleteOtp | null, requesterId: string, code: string, now: Date = new Date()): CampDeleteCodeResult {
-  if (!otp || otp.requestedByUserId !== requesterId) {
+  if (!otp || otp.requestedByPersonId !== requesterId) {
     return { ok: false, clear: false, error: { code: "CODE_EXPIRED", status: 410, message: "Peça um novo código." } };
   }
   if (otp.expiresAt <= now) {
     return { ok: false, clear: true, error: { code: "CODE_EXPIRED", status: 410, message: "O código expirou. Peça um novo código." } };
   }
-  if (!code || !verifyLocalCode(code, otp.codeHash)) {
+  if (!code || !verifyDeleteCode(code, otp.codeHash)) {
     const attempts = otp.attempts + 1;
     if (attempts >= DELETE_CODE_MAX_ATTEMPTS) {
       return { ok: false, clear: true, error: { code: "TOO_MANY_ATTEMPTS", status: 429, message: "Muitas tentativas. Peça um novo código." } };

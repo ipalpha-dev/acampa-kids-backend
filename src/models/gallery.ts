@@ -41,8 +41,7 @@ function toPhoto(doc: Record<string, unknown> | null): GalleryPhoto | null {
     order: typeof doc.order === "number" ? doc.order : new Date((doc.createdAt as Date) ?? 0).getTime(),
     caption: typeof doc.caption === "string" ? doc.caption : "",
     eventId: (doc.eventId as string | null) ?? null,
-    byUserId: (doc.byUserId as string) ?? "",
-    byName: (doc.byName as string) ?? "",
+    byPersonId: (doc.byPersonId as string) ?? "",
     createdAt: (doc.createdAt as Date) ?? new Date(),
     updatedAt: (doc.updatedAt as Date) ?? new Date(),
   };
@@ -54,8 +53,7 @@ export interface GalleryPhotoData {
   thumbType: string;
   caption: string;
   eventId: string | null;
-  byUserId: string;
-  byName: string;
+  byPersonId: string;
 }
 
 export async function insertGalleryPhoto(data: GalleryPhotoData): Promise<GalleryPhoto> {
@@ -71,8 +69,7 @@ export async function insertGalleryPhoto(data: GalleryPhotoData): Promise<Galler
     thumbType: data.thumbType,
     caption: data.caption,
     eventId: data.eventId,
-    byUserId: data.byUserId,
-    byName: data.byName,
+    byPersonId: data.byPersonId,
     createdAt: now,
     updatedAt: now,
   };

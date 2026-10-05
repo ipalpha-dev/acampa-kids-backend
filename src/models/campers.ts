@@ -1,92 +1,41 @@
-import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import type { Camper, CamperAiReviewStatus, CamperChangeLog, CamperCheckin, CamperSex, CheckinKind, CheckinLog, Medication } from "../types";
-import { formatCpf } from "../utils";
+import type { Camper, CamperChangeLog, CamperCheckin, CheckinKind, CheckinLog } from "../types";
 import { AI_REVIEW_MAX_ATTEMPTS, aiReviewDueFilter, aiReviewRetryAt } from "./aiReviewRetry";
+import { baseOf, PARTICIPANTS, toCheckin } from "./participants";
 
+export { toCheckin } from "./participants";
+
+/**
+ * The kids of a camp: `participants` rows with `kind: "camper"` (camp ops
+ * only). `Camper._id` IS the IPAlpha person id. Name / health / guardian are
+ * read from core at use (services/people.ts).
+ */
 const LOG_COLLECTION = "checkinLog";
-/** every edit a PARENT made to their kid (append-only) */
+/** which fields of a kid changed and who did it (no values — those live in persons-api) */
 const CHANGE_LOG_COLLECTION = "camperChangeLog";
-
-const COLLECTION = "campers";
+const KIND = { kind: "camper" } as const;
 
 function toCamper(doc: Record<string, unknown> | null): Camper | null {
   if (!doc) return null;
-  const s = (k: string) => (doc[k] as string) ?? "";
   return {
-    _id: (doc._id as ObjectId).toString(),
-    name: doc.name as string,
-    birthDate: (doc.birthDate as string) ?? null,
-    sex: doc.sex === "F" || doc.sex === "M" ? (doc.sex as CamperSex) : null,
-    probableGender: doc.probableGender === "F" || doc.probableGender === "M" ? (doc.probableGender as CamperSex) : null,
-    cpf: formatCpf(s("cpf")),
-    rg: s("rg"),
-    school: s("school"),
-    schoolGrade: s("schoolGrade"),
-    church: s("church"),
-    invitedBy: s("invitedBy"),
+    ...baseOf(doc),
+    kind: "camper",
+    invitedBy: (doc.invitedBy as string) ?? "",
     caretakerId: (doc.caretakerId as string) ?? null,
-    qrToken: s("qrToken"),
-    externalId: s("externalId"),
-    team: (doc.team as string) ?? null,
-    transportation: (doc.transportation as string) ?? null,
+    qrToken: (doc.qrToken as string) ?? "",
     bed: (doc.bed as string) ?? null,
-    bedroom: (doc.bedroom as string) ?? null,
-    weightKg: typeof doc.weightKg === "number" ? doc.weightKg : null,
-    allergies: (doc.allergies as string[]) ?? [],
-    drugAllergies: (doc.drugAllergies as string[]) ?? [],
-    healthIssues: (doc.healthIssues as string[]) ?? [],
-    neurodivergent: doc.neurodivergent === true,
-    medications: toMedications(doc.medications),
-    foodRestrictions: s("foodRestrictions"),
-    healthNotes: s("healthNotes"),
-    generalNotes: s("generalNotes"),
-    bedroomPreference: s("bedroomPreference"),
-    insurance: s("insurance"),
-    insuranceCard: s("insuranceCard"),
-    emergencyContact: s("emergencyContact"),
-    guardianName: s("guardianName"),
-    guardianPhone: (doc.guardianPhone as string) ?? null,
-    guardianCpf: formatCpf(s("guardianCpf")),
-    guardianEmail: s("guardianEmail"),
-    checkin: toCheckin(doc.checkin),
+    bedroomPreference: (doc.bedroomPreference as string) ?? "",
     busCheckin: toCheckin(doc.busCheckin),
     busReturnCheckin: toCheckin(doc.busReturnCheckin),
     parentEditedAt: (doc.parentEditedAt as Date) ?? null,
-    importId: (doc.importId as string) ?? null,
-    aiReviewStatus: (["pending", "processing", "structured", "reviewed", "error"] as CamperAiReviewStatus[]).includes(doc.aiReviewStatus as CamperAiReviewStatus) ? (doc.aiReviewStatus as CamperAiReviewStatus) : null,
-    aiReviewError: s("aiReviewError"),
-    aiReviewStartedAt: (doc.aiReviewStartedAt as Date) ?? null,
-    aiReviewFinishedAt: (doc.aiReviewFinishedAt as Date) ?? null,
-    aiReviewAttempts: typeof doc.aiReviewAttempts === "number" ? doc.aiReviewAttempts : 0,
-    aiReviewNextRetryAt: (doc.aiReviewNextRetryAt as Date) ?? null,
-    createdAt: doc.createdAt as Date,
-    updatedAt: doc.updatedAt as Date,
   };
 }
 
-export function toMedications(v: unknown): Medication[] {
-  if (!Array.isArray(v)) return [];
-  return v
-    .filter((m): m is Record<string, unknown> => !!m && typeof m === "object")
-    .map((m) => ({
-      name: (m.name as string) ?? "",
-      dose: (m.dose as string) ?? "",
-      times: Array.isArray(m.times) ? (m.times as string[]) : [],
-      asNeeded: m.asNeeded === true,
-      notes: (m.notes as string) ?? "",
-    }))
-    .filter((m) => m.name);
-}
+/** Writable camp-ops fields of a kid. */
+export type CamperData = Pick<Camper, "sex" | "team" | "transportation" | "bedroom" | "bed" | "caretakerId" | "qrToken" | "invitedBy" | "generalNotes" | "bedroomPreference" | "importId"> &
+  Partial<Pick<Camper, "draft" | "aiReviewStatus" | "aiReviewError" | "aiReviewStartedAt" | "aiReviewFinishedAt" | "aiReviewAttempts" | "aiReviewNextRetryAt" | "aiReviewStructured">>;
 
-export function toCheckin(v: unknown): CamperCheckin | null {
-  if (!v || typeof v !== "object") return null;
-  const o = v as Record<string, unknown>;
-  if (!(o.at instanceof Date)) return null;
-  return { at: o.at, byUserId: (o.byUserId as string) ?? "", byName: (o.byName as string) ?? "", byRole: (o.byRole as CamperCheckin["byRole"]) ?? "staff", ...(typeof o.note === "string" && o.note ? { note: o.note } : {}) };
-}
-
-export type CamperData = Omit<Camper, "_id" | "createdAt" | "updatedAt" | "checkin" | "busCheckin" | "busReturnCheckin" | "parentEditedAt">;
+export const EMPTY_CAMPER: CamperData = { sex: null, team: null, transportation: null, bedroom: null, bed: null, caretakerId: null, qrToken: "", invitedBy: "", generalNotes: "", bedroomPreference: "", importId: null };
 
 /** which document field holds each kind of check-in */
 export const CHECKIN_FIELD: Record<CheckinKind, "checkin" | "busCheckin" | "busReturnCheckin"> = {
@@ -95,72 +44,64 @@ export const CHECKIN_FIELD: Record<CheckinKind, "checkin" | "busCheckin" | "busR
   bus_return: "busReturnCheckin",
 };
 
-export async function listCampers(filter: { bedroom?: string; caretakerId?: string } = {}): Promise<Camper[]> {
+export async function listCampers(filter: { bedroom?: string; caretakerId?: string; personIds?: string[]; includeDraft?: boolean } = {}): Promise<Camper[]> {
   const db = await getDb();
-  const query: Record<string, unknown> = {};
+  const query: Record<string, unknown> = { ...KIND };
+  if (!filter.includeDraft) query.draft = { $ne: true };
   if (filter.bedroom) query.bedroom = filter.bedroom;
   if (filter.caretakerId) query.caretakerId = filter.caretakerId;
-  const docs = await db.collection(COLLECTION).find(query).collation({ locale: "pt", strength: 1 }).sort({ name: 1 }).toArray();
+  if (filter.personIds) query.personId = { $in: filter.personIds };
+  const docs = await db.collection(PARTICIPANTS).find(query).sort({ createdAt: 1, personId: 1 }).toArray();
   return docs.map((d) => toCamper(d as Record<string, unknown>)!);
 }
 
-export async function findCamperById(id: string): Promise<Camper | null> {
-  if (!ObjectId.isValid(id)) return null;
+export async function findCamperById(personId: string): Promise<Camper | null> {
+  if (!personId) return null;
   const db = await getDb();
-  return toCamper(await db.collection(COLLECTION).findOne({ _id: new ObjectId(id) }));
-}
-
-export async function findCamperByExternalId(externalId: string): Promise<Camper | null> {
-  const db = await getDb();
-  return toCamper(await db.collection(COLLECTION).findOne({ externalId }));
+  return toCamper(await db.collection(PARTICIPANTS).findOne({ ...KIND, personId }));
 }
 
 export async function findCamperByQrToken(qrToken: string): Promise<Camper | null> {
+  if (!qrToken) return null;
   const db = await getDb();
-  return toCamper(await db.collection(COLLECTION).findOne({ qrToken }));
+  return toCamper(await db.collection(PARTICIPANTS).findOne({ ...KIND, qrToken }));
 }
 
-export async function findCamperByName(name: string): Promise<Camper | null> {
-  const db = await getDb();
-  return toCamper(await db.collection(COLLECTION).findOne({ name }, { collation: { locale: "pt", strength: 1 } }));
-}
-
-export async function insertCamper(data: CamperData): Promise<Camper> {
+/** Adds a kid (an existing IPAlpha person) to this camp. Throws on a duplicate person (unique index). */
+export async function insertCamper(personId: string, data: CamperData): Promise<Camper> {
   const db = await getDb();
   const now = new Date();
-  const { insertedId } = await db.collection(COLLECTION).insertOne({ ...data, createdAt: now, updatedAt: now });
-  return { ...data, checkin: null, busCheckin: null, busReturnCheckin: null, parentEditedAt: null, _id: insertedId.toString(), createdAt: now, updatedAt: now };
+  const doc = { ...data, ...KIND, personId, checkin: null, busCheckin: null, busReturnCheckin: null, parentEditedAt: null, createdAt: now, updatedAt: now };
+  await db.collection(PARTICIPANTS).insertOne(doc);
+  return toCamper(doc)!;
 }
 
-export async function updateCamper(id: string, patch: Partial<CamperData>): Promise<Camper | null> {
+export async function updateCamper(personId: string, patch: Partial<CamperData>): Promise<Camper | null> {
   const db = await getDb();
-  const res = await db
-    .collection(COLLECTION)
-    .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: { ...patch, updatedAt: new Date() } }, { returnDocument: "after" });
+  const res = await db.collection(PARTICIPANTS).findOneAndUpdate({ ...KIND, personId }, { $set: { ...patch, updatedAt: new Date() } }, { returnDocument: "after" });
   return toCamper(res as Record<string, unknown> | null);
 }
 
 /** Every kid of caretaker `from` goes to caretaker `to` (null = orphans). Returns how many moved. */
 export async function reassignCampers(from: string, to: string | null, extra: Partial<CamperData> = {}): Promise<number> {
   const db = await getDb();
-  const res = await db.collection(COLLECTION).updateMany({ caretakerId: from }, { $set: { ...extra, caretakerId: to, updatedAt: new Date() } });
+  const res = await db.collection(PARTICIPANTS).updateMany({ ...KIND, caretakerId: from }, { $set: { ...extra, caretakerId: to, updatedAt: new Date() } });
   return res.modifiedCount;
 }
 
-/** The given kids (by id) get caretaker `to` (null = orphans). */
+/** The given kids (person ids) get caretaker `to` (null = orphans). */
 export async function setCaretakerOf(ids: string[], to: string | null): Promise<void> {
   if (ids.length === 0) return;
   const db = await getDb();
-  await db.collection(COLLECTION).updateMany({ _id: { $in: ids.map((id) => new ObjectId(id)) } }, { $set: { caretakerId: to, updatedAt: new Date() } });
+  await db.collection(PARTICIPANTS).updateMany({ ...KIND, personId: { $in: ids } }, { $set: { caretakerId: to, updatedAt: new Date() } });
 }
 
 /** Marks the kid as arrived (church) or boarded (bus); `null` undoes it. */
-export async function setCamperCheckin(id: string, kind: CheckinKind, checkin: CamperCheckin | null): Promise<Camper | null> {
-  if (!ObjectId.isValid(id)) return null;
+export async function setCamperCheckin(personId: string, kind: CheckinKind, checkin: CamperCheckin | null): Promise<Camper | null> {
   const db = await getDb();
   const res = await db
-    .collection(COLLECTION)
-    .findOneAndUpdate({ _id: new ObjectId(id) }, { $set: { [CHECKIN_FIELD[kind]]: checkin, updatedAt: new Date() } }, { returnDocument: "after" });
+    .collection(PARTICIPANTS)
+    .findOneAndUpdate({ ...KIND, personId }, { $set: { [CHECKIN_FIELD[kind]]: checkin, updatedAt: new Date() } }, { returnDocument: "after" });
   return toCamper(res as Record<string, unknown> | null);
 }
 
@@ -168,9 +109,9 @@ export async function setCamperCheckin(id: string, kind: CheckinKind, checkin: C
 export async function resetCamperCheckins(): Promise<number> {
   const db = await getDb();
   const res = await db
-    .collection(COLLECTION)
+    .collection(PARTICIPANTS)
     .updateMany(
-      { $or: [{ checkin: { $ne: null } }, { busCheckin: { $ne: null } }, { busReturnCheckin: { $ne: null } }] },
+      { ...KIND, $or: [{ checkin: { $ne: null } }, { busCheckin: { $ne: null } }, { busReturnCheckin: { $ne: null } }] },
       { $set: { checkin: null, busCheckin: null, busReturnCheckin: null, updatedAt: new Date() } },
     );
   return res.modifiedCount;
@@ -182,84 +123,53 @@ export async function clearCheckinLog(): Promise<void> {
   await db.collection(LOG_COLLECTION).deleteMany({});
 }
 
-/** Append-only audit line: who did (or undid) a check-in and when. */
+/** Append-only audit line: who did (or undid) a check-in and when (person ids only). */
 export async function logCheckin(entry: Omit<CheckinLog, "_id">): Promise<void> {
   const db = await getDb();
-  await db.collection(LOG_COLLECTION).insertOne(entry);
+  await db.collection(LOG_COLLECTION).insertOne({ ...entry });
 }
 
-/** Audit trail, newest first (optionally for one kid). */
-export async function listCheckinLog(camperId?: string): Promise<CheckinLog[]> {
+/** Audit trail, newest first (optionally for one person). */
+export async function listCheckinLog(personId?: string): Promise<CheckinLog[]> {
   const db = await getDb();
-  const docs = await db
-    .collection(LOG_COLLECTION)
-    .find(camperId ? { camperId } : {})
-    .sort({ at: -1 })
-    .toArray();
-  return docs.map((d) => ({ ...(d as unknown as CheckinLog), _id: (d._id as ObjectId).toString() }));
+  const docs = await db.collection(LOG_COLLECTION).find(personId ? { personId } : {}).sort({ at: -1 }).toArray();
+  return docs.map((d) => ({ ...(d as unknown as CheckinLog), _id: String(d._id) }));
 }
 
 /**
- * Append-only: one line per edit to a kid (parent or medical team), with the
- * fields that changed. Parent edits also stamp the kid's `parentEditedAt`
- * (it drives the 🕓 history button); medical edits leave it alone.
+ * Append-only: one line per edit to a kid (parent or medical team) with the
+ * FIELDS that changed. Parent edits also stamp `parentEditedAt`.
  */
 export async function logCamperChange(entry: Omit<CamperChangeLog, "_id">, stampParentEditedAt = true): Promise<void> {
   const db = await getDb();
-  await db.collection(CHANGE_LOG_COLLECTION).insertOne(entry);
-  if (stampParentEditedAt) await db.collection(COLLECTION).updateOne({ _id: new ObjectId(entry.camperId) }, { $set: { parentEditedAt: entry.at } });
+  await db.collection(CHANGE_LOG_COLLECTION).insertOne({ ...entry });
+  if (stampParentEditedAt) await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId: entry.personId }, { $set: { parentEditedAt: entry.at } });
 }
 
-/** Boot: kids edited by a parent BEFORE `parentEditedAt` existed get the stamp from their newest log line. */
-export async function backfillParentEditedAt(): Promise<number> {
+/** The edit history of one kid, newest first. */
+export async function listCamperChanges(personId: string): Promise<CamperChangeLog[]> {
   const db = await getDb();
-  const latest = await db.collection(CHANGE_LOG_COLLECTION).aggregate<{ _id: string; at: Date }>([{ $group: { _id: "$camperId", at: { $max: "$at" } } }]).toArray();
-  let n = 0;
-  for (const { _id, at } of latest) {
-    if (!ObjectId.isValid(_id)) continue;
-    const res = await db.collection(COLLECTION).updateOne({ _id: new ObjectId(_id), parentEditedAt: { $exists: false } }, { $set: { parentEditedAt: at } });
-    n += res.modifiedCount;
-  }
-  return n;
+  const docs = await db.collection(CHANGE_LOG_COLLECTION).find({ personId }).sort({ at: -1 }).toArray();
+  return docs.map((d) => ({ ...(d as unknown as CamperChangeLog), _id: String(d._id) }));
 }
 
-/** The parent-edit history of one kid, newest first. */
-export async function listCamperChanges(camperId: string): Promise<CamperChangeLog[]> {
-  const db = await getDb();
-  const docs = await db.collection(CHANGE_LOG_COLLECTION).find({ camperId }).sort({ at: -1 }).toArray();
-  return docs.map((d) => ({ ...(d as unknown as CamperChangeLog), _id: (d._id as ObjectId).toString() }));
-}
-
-/**
- * Phase 1 claim — the fast Jev structuring pass: fresh pendings plus error
- * retries whose cooldown expired. Records whose structure pass already
- * succeeded are skipped (the cleanup claim takes those).
- */
+/** Phase 1 claim — the fast structuring pass: fresh pendings plus due error retries (not yet structured). */
 export async function claimCampersForAiReview(limit = 15): Promise<Camper[]> {
-  const db = await getDb();
-  const out: Camper[] = [];
-  const now = new Date();
-  for (let i = 0; i < limit; i++) {
-    const doc = await db.collection(COLLECTION).findOneAndUpdate(
-      { $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(now)], aiReviewStructured: { $ne: true } },
-      { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: now } },
-      { sort: { createdAt: 1 }, returnDocument: "after" },
-    );
-    const camper = toCamper(doc as Record<string, unknown> | null);
-    if (!camper) break;
-    out.push(camper);
-  }
-  return out;
+  return claim({ $or: [{ aiReviewStatus: "pending" }, aiReviewDueFilter(new Date())], aiReviewStructured: { $ne: true } }, limit);
 }
 
-/** Phase 2 claim — the slow generative cleanup: records the Jev pass already structured (fresh, requeued or due retries). */
+/** Phase 2 claim — the slow generative cleanup: rows the structuring pass already handled. */
 export async function claimCampersForCleanup(limit = 15): Promise<Camper[]> {
+  return claim({ aiReviewStructured: true, $or: [{ aiReviewStatus: { $in: ["pending", "structured"] } }, aiReviewDueFilter(new Date())] }, limit);
+}
+
+async function claim(filter: Record<string, unknown>, limit: number): Promise<Camper[]> {
   const db = await getDb();
   const out: Camper[] = [];
   const now = new Date();
   for (let i = 0; i < limit; i++) {
-    const doc = await db.collection(COLLECTION).findOneAndUpdate(
-      { aiReviewStructured: true, $or: [{ aiReviewStatus: { $in: ["pending", "structured"] } }, aiReviewDueFilter(now)] },
+    const doc = await db.collection(PARTICIPANTS).findOneAndUpdate(
+      { ...KIND, ...filter },
       { $set: { aiReviewStatus: "processing", aiReviewStartedAt: now, aiReviewError: "", aiReviewNextRetryAt: null, updatedAt: now } },
       { sort: { createdAt: 1 }, returnDocument: "after" },
     );
@@ -273,78 +183,42 @@ export async function claimCampersForCleanup(limit = 15): Promise<Camper[]> {
 /** Requeues jobs left processing after a worker crash / rollout. */
 export async function requeueStaleAiReviews(staleMs = 10 * 60_000): Promise<number> {
   const db = await getDb();
-  const res = await db.collection(COLLECTION).updateMany(
-    { aiReviewStatus: "processing", aiReviewStartedAt: { $lt: new Date(Date.now() - staleMs) } },
+  const res = await db.collection(PARTICIPANTS).updateMany(
+    { ...KIND, aiReviewStatus: "processing", aiReviewStartedAt: { $lt: new Date(Date.now() - staleMs) } },
     { $set: { aiReviewStatus: "pending", aiReviewStartedAt: null, aiReviewError: "", updatedAt: new Date() } },
   );
   return res.modifiedCount;
 }
 
-/**
- * Finishes phase 1 (Jev structuring): writes the structured health fields
- * right away and marks the record "structured" so the UI can already show
- * them while the slow cleanup pass is still pending. Never sets aiReviewFinishedAt.
- */
-export async function finishCamperStructure(id: string, patch: Partial<CamperData>, error = ""): Promise<Camper | null> {
-  if (!error) {
-    return updateCamper(id, {
-      ...patch,
-      aiReviewStatus: "structured",
-      aiReviewStructured: true,
-      aiReviewError: "",
-      aiReviewNextRetryAt: null,
-    });
-  }
-  return failCamperReview(id, patch, error);
+/** Finishes phase 1: marks the row "structured" (the health result went to the health queue). */
+export async function finishCamperStructure(personId: string, error = ""): Promise<Camper | null> {
+  if (!error) return updateCamper(personId, { aiReviewStatus: "structured", aiReviewStructured: true, aiReviewError: "", aiReviewNextRetryAt: null });
+  return failCamperReview(personId, error);
 }
 
-async function failCamperReview(id: string, patch: Partial<CamperData>, error: string): Promise<Camper | null> {
+async function failCamperReview(personId: string, error: string): Promise<Camper | null> {
   const db = await getDb();
   const now = new Date();
-  const after = await db.collection(COLLECTION).findOneAndUpdate(
-    { _id: new ObjectId(id) },
-    { $set: { ...patch, aiReviewStatus: "error", aiReviewError: error, aiReviewFinishedAt: now, updatedAt: now }, $inc: { aiReviewAttempts: 1 } },
+  const after = await db.collection(PARTICIPANTS).findOneAndUpdate(
+    { ...KIND, personId },
+    { $set: { aiReviewStatus: "error", aiReviewError: error, aiReviewFinishedAt: now, updatedAt: now }, $inc: { aiReviewAttempts: 1 } },
     { returnDocument: "after" },
   );
-  const attempts = typeof (after as Record<string, unknown> | null)?.aiReviewAttempts === "number"
-    ? (after as Record<string, unknown>).aiReviewAttempts as number
-    : 1;
-  // each failure waits twice as long as the previous one; past 5 tries the record stays in error for a human
-  await db.collection(COLLECTION).updateOne(
-    { _id: new ObjectId(id) },
-    { $set: { aiReviewNextRetryAt: attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null, updatedAt: new Date() } },
-  );
-  return toCamper({ ...((after as unknown as Record<string, unknown>) ?? {}), aiReviewNextRetryAt: attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null });
+  const attempts = typeof (after as Record<string, unknown> | null)?.aiReviewAttempts === "number" ? ((after as Record<string, unknown>).aiReviewAttempts as number) : 1;
+  const next = attempts < AI_REVIEW_MAX_ATTEMPTS ? aiReviewRetryAt(attempts, now) : null;
+  await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId }, { $set: { aiReviewNextRetryAt: next, updatedAt: new Date() } });
+  return toCamper(after ? { ...(after as Record<string, unknown>), aiReviewNextRetryAt: next } : null);
 }
 
-/**
- * Finishes phase 2 (generative cleanup): the terminal "reviewed" state —
- * medications, texts and recovered registration fields are all written.
- * Errors keep `aiReviewStructured` set so the retry skips the Jev pass.
- */
-export async function finishCamperAiReview(id: string, patch: Partial<CamperData>, error = ""): Promise<Camper | null> {
-  if (!error) {
-    return updateCamper(id, {
-      ...patch,
-      aiReviewStatus: "reviewed",
-      aiReviewError: "",
-      aiReviewFinishedAt: new Date(),
-      aiReviewNextRetryAt: null,
-    });
-  }
-  return failCamperReview(id, patch, error);
+/** Finishes phase 2: the terminal "reviewed" state (or an error with retry). */
+export async function finishCamperAiReview(personId: string, error = ""): Promise<Camper | null> {
+  if (!error) return updateCamper(personId, { aiReviewStatus: "reviewed", aiReviewError: "", aiReviewFinishedAt: new Date(), aiReviewNextRetryAt: null });
+  return failCamperReview(personId, error);
 }
 
-/** Every kid whose guardian phone is `phone` (a parent may have several kids enrolled). */
-export async function listCampersOfGuardian(phone: string): Promise<Camper[]> {
+export async function deleteCamper(personId: string): Promise<boolean> {
   const db = await getDb();
-  const docs = await db.collection(COLLECTION).find({ guardianPhone: phone }).collation({ locale: "pt", strength: 1 }).sort({ name: 1 }).toArray();
-  return docs.map((d) => toCamper(d as Record<string, unknown>)!);
-}
-
-export async function deleteCamper(id: string): Promise<boolean> {
-  const db = await getDb();
-  const res = await db.collection(COLLECTION).deleteOne({ _id: new ObjectId(id) });
+  const res = await db.collection(PARTICIPANTS).deleteOne({ ...KIND, personId });
   return res.deletedCount === 1;
 }
 
@@ -352,36 +226,25 @@ export async function deleteCamper(id: string): Promise<boolean> {
 export async function countCampersPerBedroom(): Promise<Map<string, number>> {
   const db = await getDb();
   const rows = await db
-    .collection(COLLECTION)
-    .aggregate<{ _id: string; n: number }>([{ $match: { bedroom: { $type: "string" } } }, { $group: { _id: "$bedroom", n: { $sum: 1 } } }])
+    .collection(PARTICIPANTS)
+    .aggregate<{ _id: string; n: number }>([{ $match: { ...KIND, draft: { $ne: true }, bedroom: { $type: "string" } } }, { $group: { _id: "$bedroom", n: { $sum: 1 } } }])
     .toArray();
   return new Map(rows.map((r) => [r._id, r.n]));
 }
 
 /**
- * Marks the birthday SMS for `day` ("YYYY-MM-DD") as sent — atomically, only
- * if it was NOT sent for that day yet. Returns true when this call won (so the
- * caller may text the room). A different day (next year's camp) re-arms it.
+ * Marks the birthday message for `day` as sent — atomically, only if it was
+ * NOT sent for that day yet. True when this call won.
  */
-export async function claimBirthdayNotice(id: string, day: string): Promise<boolean> {
-  if (!ObjectId.isValid(id)) return false;
+export async function claimBirthdayNotice(personId: string, day: string): Promise<boolean> {
   const db = await getDb();
-  const res = await db.collection(COLLECTION).updateOne({ _id: new ObjectId(id), birthdayNoticeDay: { $ne: day } }, { $set: { birthdayNoticeDay: day } });
+  const res = await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId, birthdayNoticeDay: { $ne: day } }, { $set: { birthdayNoticeDay: day } });
   return res.modifiedCount === 1;
 }
 
 export async function ensureCamperIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ name: 1 }, { collation: { locale: "pt", strength: 1 } });
-  await db.collection(COLLECTION).createIndex({ bedroom: 1 });
-  await db.collection(COLLECTION).createIndex({ team: 1 });
-  await db.collection(COLLECTION).createIndex({ externalId: 1 }, { sparse: true });
-  await db.collection(COLLECTION).createIndex({ caretakerId: 1 });
-  await db.collection(COLLECTION).createIndex({ qrToken: 1 }, { sparse: true });
-  await db.collection(LOG_COLLECTION).createIndex({ camperId: 1, at: -1 });
+  await db.collection(LOG_COLLECTION).createIndex({ personId: 1, at: -1 });
   await db.collection(LOG_COLLECTION).createIndex({ at: -1 });
-  await db.collection(COLLECTION).createIndex({ guardianPhone: 1 }, { sparse: true });
-  await db.collection(COLLECTION).createIndex({ aiReviewStatus: 1, createdAt: 1 });
-  await db.collection(COLLECTION).createIndex({ importId: 1, aiReviewStatus: 1 });
-  await db.collection(CHANGE_LOG_COLLECTION).createIndex({ camperId: 1, at: -1 });
+  await db.collection(CHANGE_LOG_COLLECTION).createIndex({ personId: 1, at: -1 });
 }

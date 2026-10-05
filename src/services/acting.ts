@@ -1,0 +1,66 @@
+import type { Context } from "hono";
+import { findCamp, setCampEditionId } from "../models/camps";
+import { coreClient } from "./ipalpha";
+import { IpalphaTokenRevoked, PERSONS_RESOURCE, PROJECTS_RESOURCE } from "./ipalpha/coreClient";
+import { openRoleTokens } from "./session";
+import { currentCampId } from "./campContext";
+import { COORDINATION_ROLE, type CoreRole, type Session } from "../types";
+
+/**
+ * The per-role IPAlpha token a request ACTS with (CONTRACTS §15: "health /
+ * contact / details via the acting role token"). Opened from the session on
+ * demand and handed to the core client — never kept anywhere else.
+ *
+ * A missing or expired token throws `IpalphaTokenRevoked`: the error handler
+ * (services/coreErrors.ts) ends the session and the client returns to login.
+ */
+export type Audience = typeof PERSONS_RESOURCE | typeof PROJECTS_RESOURCE;
+
+export function roleToken(session: Session, audience: Audience, role: CoreRole = session.activeRole): string {
+  const grant = openRoleTokens(session)[role];
+  const token = grant?.tokens[audience];
+  if (!grant || !token) throw new IpalphaTokenRevoked(`no ${audience} token for ${role}`);
+  if (grant.expiresAt <= Date.now()) throw new IpalphaTokenRevoked(`${role} token expired`);
+  return token;
+}
+
+/** Same, for the request's own session (set by requireAuth). */
+export function actingToken(c: Context, audience: Audience): string {
+  const session = c.get("session") as Session | undefined;
+  if (!session) throw new IpalphaTokenRevoked("no session");
+  return roleToken(session, audience);
+}
+
+/** The coordenação token of this session (imports, registrations) — null when the person is not coordenação. */
+export function coordinationToken(session: Session, audience: Audience): string | null {
+  if (!session.roles.includes(COORDINATION_ROLE)) return null;
+  return roleToken(session, audience, COORDINATION_ROLE);
+}
+
+/**
+ * The projects-api edition of a camp (camps are yearly editions of the one
+ * Acampa project). Stored on the camp the first time it is resolved (camp-ops
+ * metadata, not person data); looked up by year in the editions list.
+ */
+export async function campEditionId(campId: string = currentCampId()): Promise<string | null> {
+  const camp = await findCamp(campId);
+  if (!camp) return null;
+  if (camp.editionId) return camp.editionId;
+  try {
+    const edition = (await coreClient().listEditions()).find((e) => e.year === camp.year) ?? null;
+    if (edition) await setCampEditionId(camp._id, edition.id);
+    return edition?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The coordenação tokens + the camp's edition an import / registration needs, or the error to answer. */
+export async function coordinationContext(session: Session): Promise<{ ok: true; tokens: { persons: string; projects: string }; editionId: string } | { ok: false; status: 403 | 409; error: { code: string; message: string } }> {
+  const persons = coordinationToken(session, PERSONS_RESOURCE);
+  const projects = coordinationToken(session, PROJECTS_RESOURCE);
+  if (!persons || !projects) return { ok: false, status: 403, error: { code: "COORDINATION_REQUIRED", message: "Só a coordenação cadastra pessoas no IPAlpha." } };
+  const editionId = await campEditionId(session.campId);
+  if (!editionId) return { ok: false, status: 409, error: { code: "EDITION_UNKNOWN", message: "A edição deste acampamento ainda não existe no IPAlpha." } };
+  return { ok: true, tokens: { persons, projects }, editionId };
+}
