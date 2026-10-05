@@ -22,17 +22,16 @@ committed YAML or frontend `VITE_*` variables.
 | `MONGODB_DB` | `camping` |
 | `MONGO_USERNAME`, `MONGO_PASSWORD` | Deployment-only expansion variables from Secret `mongo-credentials`, keys `username`, `password`; credentials must be URI-safe |
 | `FILES_DIR` | `/app/data/files`, mounted from `acampa-2025-pictures-pvc` |
-| `SESSION_TOKEN_KEY` | Secret `acampa-2025-secrets`, key `session-token-key` — 32 bytes (`openssl rand -hex 32`); seals the per-role IPAlpha tokens kept in each session and the importer's token kept on a running import job (AES-256-GCM). **API and worker** (the worker opens the job token to write AI health to persons-api — decision 50). Rotating it ends every session and pauses every running import (`needsSignIn`) |
+| `SESSION_TOKEN_KEY` | Secret `acampa-2025-secrets`, key `session-token-key` — 32 bytes (`openssl rand -hex 32`); seals the per-role IPAlpha tokens kept in each session (AES-256-GCM). Rotating it ends every session |
 | `SESSION_HOURS` | `96` (fallback only; auth-api's `sessionIdleHours` wins) |
 | `SUPER_ADMIN_PERSON_IDS` | comma list of IPAlpha person ids of the deployment owners |
 | `TRUST_PROXY_HOPS` | `1` (Traefik appends the real peer as the last `X-Forwarded-For` entry). Set to the number of appending proxies; `0` ignores the header |
 | `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (the `{link}` of the message templates) |
 | `NOTIFY_COALESCE_SECONDS` | `20` |
-| `WORKER_SECRET` | Secret `acampa-2025-secrets`, key `worker-secret`; shared by the API and the import worker for `POST /api/worker/reviewed` (websocket event per reviewed record) and `POST /api/worker/import-paused` (the importer's event when a job waits for a new sign-in). **Required (not optional): pods fail to start without the key — patch the Secret before rolling out** |
-| `BACKEND_URL` | Worker only: `http://acampa-2025-backend:3000` (cluster-internal API address for the callback) |
+| `IPALPHA_ENV` | `prod` in production; `preview` / `dev` enable the wizard's synthetic sample camp (decision 71 — anything else answers 403 `SAMPLE_DISABLED`) |
 | `AI_BASE_URL` | `https://ai-models.kevyn.com.br/v1` |
 | `AI_API_KEY` | Secret `acampa-2025-secrets`, key `ai-api-key`; optional, empty disables AI |
-| `OPENROUTER_API_KEY` | Secret `acampa-2025-secrets`, key `openrouter-api-key`; optional. Empty disables Jev (icon suggestions + every closed import decision: column mapping, health bucketing, option/transport/team/leader matching, neurodivergent yes/no, name sex) — the generative fallback then does all of it, slower. Worker also needs it for health structuring |
+| `OPENROUTER_API_KEY` | Secret `acampa-2025-secrets`, key `openrouter-api-key`; optional. Empty disables the editor's icon suggestions (imports no longer use AI in Acampa — persons-api runs them through ai-api, cost on the project) |
 | `AI_TRANSCRIBE_URL` | `https://whisper.kevyn.com.br/v1`; empty hides voice input |
 | `AI_TRANSCRIBE_MODEL` | `whisper-large-v3-turbo` |
 | `AI_TRANSCRIBE_KEY` | Optional Secret key `ai-transcribe-key`; leave absent if the speech endpoint needs no authentication |
@@ -51,10 +50,12 @@ committed YAML or frontend `VITE_*` variables.
 | `IPALPHA_TOKEN_ISSUER` | auth-api `iss` |
 | `IPALPHA_CLIENT_ID`, `IPALPHA_ENTRY_POINT`, `IPALPHA_REDIRECT_URI` | Acampa's confidential external entry point in auth-api |
 | `IPALPHA_CLIENT_SECRET` | Secret ref only — the entry point's client secret |
-| `IPALPHA_SYSTEM_CLIENT_ID` | Acampa's app-bound system client: `login:relay`, `projects:editions`, `projects:app-members`, `projects:templates`, `persons:app-names`, `notifications:send-template` (CONTRACTS §14) |
+| `IPALPHA_SYSTEM_CLIENT_ID` | Acampa's app-bound system client: `login:relay`, `projects:editions`, `projects:app-members`, `projects:templates`, `persons:app-names`, `notifications:send-template`, `dispatch:app-channel` (CONTRACTS §14, §22) |
 | `IPALPHA_SYSTEM_CLIENT_SECRET` | Secret ref only |
 | `IPALPHA_PROJECT_ID` | the yearly Acampa project (camps = its editions; roles = its memberships) |
 | `IPALPHA_PROJECTS_API_URL` | projects-api base URL (editions, memberships, message templates) |
+| `IPALPHA_DISPATCH_URL` | optional — dispatch-api origin for the ONE app-channel socket (`/api/dispatch/socket.io`, namespace `/apps`). Empty = no socket: import batches arrive by webhook and by reconciliation when the importer reads the import |
+| `IPALPHA_WEBHOOK_SECRET` | Secret ref only — the app webhook signing secret (Mordomia / Developers portal → app → webhook, shown once). Webhook URL to register: `https://<acampa host>/api/dispatch/webhook`. Empty = the webhook answers 503 |
 
 MongoDB uses `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`
 from `mongo-credentials`, and `MONGO_INITDB_DATABASE=camping`. These initialize
@@ -117,13 +118,18 @@ kubectl -n ipalpha-kids rollout restart deploy/acampa-2025-backend
 - Keep one backend replica with `Recreate`: realtime sockets and notification
   timers are process-local. A rollout causes a brief API interruption; clients
   reconnect. MongoDB also uses `Recreate` to avoid two writers on its data files.
-- Run a separate worker Deployment from the same backend image with command
-  `bun run src/worker.ts`. Keep one replica: it claims 15 imported campers at a
-  time, reviews them in parallel, requeues stale claims on startup and sleeps
-  for 10 seconds only when the queue is empty. **Since decision 50 the worker
-  needs the same `SESSION_TOKEN_KEY` and `IPALPHA_*` env as the API** (it opens
-  the importer's sealed token and writes health to persons-api); without them
-  every import pauses as `needsSignIn` and its health is never written.
+- There is **no worker Deployment any more** (decision 58): spreadsheet imports
+  run in persons-api. Delete the old worker Deployment and the `worker-secret`
+  key when rolling this version out. Old `camperImports` /
+  `camperImportDictionary` collections are no longer read (POC data: drop them
+  by hand; nothing migrates them).
+- Probes: `GET /live` (always 200) for liveness, `GET /ready` (200 only when
+  boot finished and MongoDB answers; 503 `{ready, checks, info}` otherwise —
+  `info.dispatch` shows the app-channel socket state and never gates) for
+  readiness/startup. The server listens before MongoDB connects; `/api/*`
+  answers 503 `STARTING` until boot finished.
+- Keep ONE backend replica: dispatch keeps exactly one app-channel socket per
+  app (a second instance would replace the first; the replaced one stops).
 - The old `healthQueue` collection is no longer used (decision 50). Nothing
   migrates it: its TTL index empties it within 7 days; backups never dump it.
 - Startup creates indexes and performs one-off migrations (including transports,

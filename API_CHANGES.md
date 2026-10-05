@@ -35,7 +35,7 @@ fotografia, checkin, checkin-onibus, equipe, responsavel` (+ future helper keys 
 
 Record: `{id, personId, invitedBy, caretakerId, qrToken, team, transportation, bed,
 bedroom, generalNotes, bedroomPreference, checkin, busCheckin, busReturnCheckin,
-parentEditedAt, importId, aiReview*, createdAt, updatedAt}` (+ `contactsHidden` / `redacted`
+parentEditedAt, importId, createdAt, updatedAt}` (+ `contactsHidden` / `redacted`
 views). **Removed:** `name, sex (now from core with the name), birthDate, probableGender, cpf, rg, school, schoolGrade, church,
 externalId, weightKg, allergies, drugAllergies, healthIssues, neurodivergent, medications,
 foodRestrictions, healthNotes, insurance, insuranceCard, emergencyContact, guardian*`.
@@ -60,7 +60,7 @@ Check-in stamps: `{at, byPersonId, byRole: CoreRole, note?}`.
 ## Staff `/api/staff` (camp ops only)
 
 Record: `{id, personId, active, team, bedroom, roomRole, transportation, generalNotes,
-aiReview*, checkin, vest, prepDone, foreignLookupCount, foreignLookupCamperIds, createdAt,
+importId, checkin, vest, prepDone, foreignLookupCount, foreignLookupCamperIds, createdAt,
 updatedAt}`. **Removed:** `name, sex (from core), phone, email, document, birthDate, admin, probableGender,
 allergies…, medications, healthNotes, foreignLookupNames`. Contact views carry no phone —
 read it with `GET /api/people/:personId/data/phone` (core's role rules decide).
@@ -90,31 +90,58 @@ import worker writes AI health to persons-api itself; drop the flush call after 
 - Settings: removed `checkinHelpers, organizers, gameOrganizers, scoreHelpers, medicalStaff, vestHelpers, photographers, smsRedirect, smsEnabled, mailEnabled` (helper roles are managed in Mordomia); `busHelpers {helpers:[{personId, vehicleId}]}`, `parentContacts [{id, title, personId}]`, `foreignLookupOffenders [{personId, count, camperIds, blocked}]`, `superAdmin`. Removed `GET|POST /sample-emails`. `GET /welcome-preview` → `personIds` instead of names.
 - **NEW** templates (coordenação): `GET /api/settings/message-templates` → `{templates:[{slug, name, channel, variables, subject, body (5 langs), live, version, customized, defaults}]}` · `POST /message-templates/seed` · `PATCH /message-templates/:slug {name?, body?, subject?}` (400 `TEMPLATE_INVALID`) · `POST /message-templates/:slug/reset`.
 - Admins: `GET /api/admins` → `{admins:[{personId, name, superAdmin}], appUrl}`; `POST /api/admins` and `/handover` removed (roles are granted in Mordomia).
-- Camps: `POST /:id/delete/request` → `{success, expiresAt, delivery:"sms"}` (no phone); `/:id/campers` rows `{id, name, sex (core), bedroom, team, matched}`; `/:id/staff` rows `{id, name, roomRole, bedroom, team, matched}`; import results may carry `membershipsFailed`.
-- Imports: an existing person's health is merged, never replaced (same rule as `POST /register`); a refusal is a `skipped` note on an imported row ("Importado; o IPAlpha não deixou gravar a saúde…"). Camper import fields gain the optional `guardian2Name` ("Nome do 2º responsável") and `guardian2Phone` ("Telefone do 2º responsável"): on apply the second responsável is registered / found by phone and linked to the SAME kid (persons `POST /links`, involved + `responsavel` — decision 38); a bad celular or a refusal is a note, the kid is still imported. `/camper-imports/:id/leaders` and `/staff-imports/:id/members` → `{staff:{id, name}}`; `apply` needs the coordenação role; after apply `rows`/`preview` are emptied.
+- Camps: `POST /:id/delete/request` → `{success, expiresAt, delivery:"sms"}` (no phone); `/:id/campers` rows `{id, name, sex (core), bedroom, team, matched}`; `/:id/staff` rows `{id, name, roomRole, bedroom, team, matched}`; cross-year import results may carry `membershipsFailed`.
 
-## Imports — AI health with the importer's token (decision 50)
+## Imports run in persons-api (CONTRACTS §20–§24, decisions 58–67)
 
-At Apply the backend seals the importer's coordenação token on the job; the background
-worker writes the AI-structured health straight to persons-api with it (merged, never
-erasing) and the token is deleted when the job ends. Nothing about health is kept in Acampa.
+**REMOVED:** `/api/camper-imports/*`, `/api/staff-imports/*` (analyze, progress, fields,
+leaders/members, apply, needs-sign-in, resume), `/api/worker/*`, `/api/super/import-cache*`,
+realtime `ai-review-done` and `import-needs-sign-in`, every `aiReview*` field of camper /
+staff records. No AI, staging, dictionary or worker in Acampa any more.
 
-- Import record (`GET /api/camper-imports/:id`, every import answer of both routers) gains
-  `needsSignIn: boolean` and `pausedAt: string | null`.
-- Job statuses: `needs_mapping | analyzing | panic | review | ready | importing | completed |
-  error` + **NEW `needsSignIn`** — the importer's IPAlpha sign-in was revoked / expired while
-  the AI health pass was running; it is paused (nothing lost, rows wait). After Apply, a job
-  may be `needsSignIn` instead of `completed`.
-- **NEW** `GET /api/camper-imports/needs-sign-in` · `GET /api/staff-imports/needs-sign-in` →
-  `{imports:[{id, fileName, pausedAt}]}` — the paused jobs **I** started (show "Entre de novo
-  para continuar a importação" after login).
-- **NEW** `POST /api/camper-imports/:id/resume` · `POST /api/staff-imports/:id/resume` (empty
-  body; only the person who started the import, signed in as coordenação) → 200 `{import}`
-  (status `completed` again; the worker continues). Errors: 404 `IMPORT_NOT_FOUND` (also the
-  other router's id), 409 `IMPORT_NOT_PAUSED`, 403 `IMPORT_NOT_YOURS` \| `COORDINATION_REQUIRED`.
-- **NEW realtime event** (only to the importer's sockets): `{type:"import-needs-sign-in",
-  at, data:{importId, subject:"camper"|"staff"}}`. Typical flow: event / list → the importer
-  signs in again (new session) → `POST …/:id/resume`.
+**NEW `/api/imports`** (coordenação / organização reach it; only a session holding
+`coordenacao` gets past `403 COORDINATION_REQUIRED` — the importer's coordenação token
+calls persons-api, never stored):
+
+| Route | Answer |
+|---|---|
+| `GET /app-fields?subject=camper\|team` | `{subject, appFields:[{key, description, kind:"text"\|"category", categories?:[{key,label}], required}]}` — camper: `transportation` (required; buses + "Carona: …" cars), `bedroom`, `team`, `bedroomPreference`, `invitedBy`, `generalNotes` (never health); team: `roomRole` (required: caretaker / helper), `transportation`, `bedroom`, `team`, `generalNotes`. Category keys = Acampa ids |
+| `POST /` multipart `file` (.csv/.xlsx ≤ 5 MB) + `subject` | 201 `{import}`. 400 `FILE_REQUIRED` \| `FILE_TOO_LARGE` \| `FILE_TYPE_INVALID` \| `SUBJECT_INVALID`; 409 `EDITION_UNKNOWN` |
+| `GET /:id` | `{import}` (also applies batches a lost message left behind) |
+| `PATCH /:id` `{mapping?, reviews?:{id:{choice:"match"\|"new"\|"skip", personId?}}, categories?:{field:{sheetValue:categoryKey\|null}}, required?:{field:{mode:"default", value}\|{mode:"skip"}}}` | `{import}`; 400 `DECISIONS_INVALID` (unknown field / category) |
+| `POST /:id/apply` | `{import}`; core's `409 decisionsPending` arrives as 409 `CORE_REJECTED` + `reason` |
+| `DELETE /:id` | `{success:true}` (cancel; rows wiped in core) |
+| `GET /:id/results?cursor` | `{items:[{batch, rows:[{rowRef, personId, status:"created"\|"updated"\|"skipped"\|"failed", reason, appFields, unfilled}]}], nextCursor}` — ids + app field values only |
+
+`import` = `{id, subject, status:"analysing"|"review"|"applying"|"done"|"failed"|"cancelled",
+steps:[{name, done, total}], file:{name,size,sheet}|null, mapping, fields:[{key,label}],
+reviews:[{id, rowRef, kind, message, candidates:[{personId}], choice, personId}],
+appFields:[AppField + {categoryMapping, emptyRows, decision}], pendingRequired:[key],
+counts:{rows, created, updated, skipped, failed}, applied:{batches, rows}, createdAt, expiresAt}`.
+Apply stays blocked while `pendingRequired` is not empty.
+
+Realtime (importer's sockets only): `import-progress {importId, step, done, total, status, batch?}`
+and `import-batch {importId, batch, rows, applied, skipped, unfilled}`.
+
+**NEW `POST /api/dispatch/webhook`** (dispatch-api only — no session): HMAC-SHA256 of the raw body
+with `IPALPHA_WEBHOOK_SECRET` in `X-IPAlpha-Signature: sha256=<hex>` (401 `SIGNATURE_INVALID`, 503
+`WEBHOOK_DISABLED` when unset), idempotent by `X-IPAlpha-Delivery` (→ `{ok, duplicate:true}`); 202.
+
+## Review fixes (2026-10-05)
+
+- `GET /live` (always 200) and `GET /ready` (`{ready, checks:{boot, mongo}, info:{dispatch}}`, 503
+  until boot finished / Mongo answers); `/api/*` → 503 `STARTING` before boot finished.
+- `GET /api/auth/me` answers `tokenExpiresAt` (sliding expiry) — store ONLY the opaque token.
+- Lists: `hasHealth` comes from persons health-flags (no medical read); `health-counts` counts the
+  edition's role members (no ids sent).
+- `POST /api/campers {personId}` needs a live `participante` membership of the camp's edition, `POST
+  /api/staff {personId}` a live staff role of it → else 409 `NOT_IN_EDITION`.
+- `GET /api/wizard/sample` → `{enabled}`; `POST` → 403 `SAMPLE_DISABLED` unless `IPALPHA_ENV` is
+  `preview` / `dev`. The sample's observations go to core health notes, never to `generalNotes`.
+- An unknown role key behaves exactly as `equipe` (staff access window included).
+- Realtime: logout / revocation / a core 401 close the session's sockets (`error SESSION_ENDED`, 4401);
+  a role / camp switch re-keys them and sends a fresh `snapshot`.
+- Label "Neurodivergência".
 
 ## Birthday messages (decision 51)
 

@@ -22,7 +22,10 @@ docker compose up -d
 bun run dev
 ```
 
-The API listens on `http://localhost:3000` by default.
+The API listens on `http://localhost:3000` by default — at once, before
+MongoDB connects. Probes: `GET /live` (always 200) and `GET /ready` (200 only
+when boot finished and MongoDB answers; `info.dispatch` shows the app-channel
+socket, never gating). `/api/*` answers 503 `STARTING` until boot finished.
 
 ## Environment
 
@@ -34,7 +37,9 @@ Copy `.env.example` to `.env` for local development. Production configuration an
 | `FILES_DIR` | folder holding the uploaded image bytes (Mongo keeps only the metadata). Default `data/files`. **Mount a volume here in production** |
 | `IPALPHA_*` (+ `SESSION_TOKEN_KEY`) | IPAlpha core — identity, people, roles, messages. **All required**: without them nobody can sign in (the API still boots). See [Identity, people and roles](#identity-people-and-roles-ipalpha-core-) |
 | `SESSION_HOURS` | fallback session idle length (default `96`) when auth-api answers no `sessionIdleHours` |
-| `SUPER_ADMIN_PERSON_IDS` | comma list of IPAlpha person ids — the deployment owners (seeds, import caches, archived-year writes) |
+| `SUPER_ADMIN_PERSON_IDS` | comma list of IPAlpha person ids — the deployment owners (seeds, archived-year writes) |
+| `IPALPHA_DISPATCH_URL`, `IPALPHA_WEBHOOK_SECRET` | optional — the dispatch app channel (socket) and the signed webhook secret for import results (§21/§22) |
+| `IPALPHA_ENV` | `preview` / `dev` enable the wizard's synthetic sample camp; anything else (prod) refuses it |
 | `TRUST_PROXY_HOPS` | proxies in front of the API that append to `X-Forwarded-For` (default `1` = Traefik ingress); `0` = socket address only |
 | `APP_URL` | public URL of the frontend — the `{link}` of the message templates |
 | `NOTIFY_COALESCE_SECONDS` | messages to the same person with the same template inside this window collapse into one (default `20`) |
@@ -110,21 +115,31 @@ decide; logged for the person), health-tag chips through the anonymized count
 endpoint. Lists never show health details (neutral ♥ only) unless filtered by a
 health tag or narrowed by name to ≤ 6 people (decision 31).
 
-**Imports** (spreadsheets, wizard, manual registration — `services/coreRegistration.ts`):
+**Registrations** (wizard sample, manual registration — `services/coreRegistration.ts`):
 people go to core through persons `POST /registrations` with everything its DTO
-takes — `sex` (only when the sheet / form said it, never guessed), `homeChurch`
-(the sheet's church column) and `data` blocks `document`, `school`,
-`emergencyContact`, `medical` (core writes the kinds the role collects) — then
-the memberships of the camp's edition. **AI health of imports** (decision 50,
-`services/importHealth.ts` + `src/worker.ts`): at Apply the importer's
-coordenação persons token is sealed on the job (`camperImports.jobToken`,
-AES-256-GCM with `SESSION_TOKEN_KEY`, never answered or backed up) and deleted
-when the job ends; the worker reads each person's block, merges the AI result
-over it (lists unioned, texts appended, nothing erased; a role that may not read
-the block never writes blind) and writes it back. A 401 / expired token pauses
-the job (`needsSignIn`, rows put back without counting an attempt, the importer
-told over the websocket); the importer signs in again and calls `POST
-/api/{camper,staff}-imports/:id/resume`. No health rests in Acampa.
+takes — `sex` (only when the form said it, never guessed), `homeChurch` and
+`data` blocks `document`, `school`, `emergencyContact` — then the memberships of
+the camp's edition; health is merged afterwards (never erased).
+
+**Spreadsheet imports run in persons-api** (CONTRACTS §20/§24, decisions
+58–67 — `routes/imports.ts`, `services/personImports.ts`). Acampa hands
+persons-api the whole file with the importer's coordenação role token, the
+`targets` (kids → `participante` + `responsavel`; team → `equipe`) and its
+`appFields` (camp ops: `transportation` — required for kids, buses and
+caronas —, `bedroom`, `team`, `bedroomPreference`, `invitedBy`, `generalNotes`
+— never health —, `roomRole` — required for the team; categories keyed by
+Acampa ids). persons-api runs every step (mapping, matching, observation
+extraction into core's health notes, duplicates, category mapping, AI via
+ai-api billed to the project) and the importer decides in Acampa's screens.
+Results come back batch by batch — ids + app field values only — over the ONE
+dispatch app-channel socket (`services/dispatchChannel.ts`) or the signed
+webhook (`POST /api/dispatch/webhook`), and are written into `participants`
+by personId. Idempotent: a row already stamped with the import's id is not
+touched again, webhook deliveries are de-duplicated by `X-IPAlpha-Delivery`
+(`dispatchDeliveries`, ids only, TTL 7 days). Missed batches are reconciled
+from persons-api (`GET /imports/:id/batches`) when the channel reconnects and
+when the importer reads the import. No AI, no staging, no worker, no health
+in Acampa.
 
 **Messages** (`services/messages.ts`, `src/messages/templates.ts`): every SMS /
 e-mail is a project template sent by notifications-api to a person id
@@ -154,6 +169,12 @@ Messages (server → client, JSON):
 | `snapshot` | right after connect, or after the client sends `"refresh"` | `data: { campers, staff, bedrooms, categories, roles, events, … }` — only what the session's role may read. `campers` / `staff` are **camp-ops records keyed by person id: no names, no health** (names come from the paged REST lists / `POST /api/people/names`) |
 | `update` | after **any** write (debounced 25 ms) | `data` with just the collections that changed, whole lists |
 | `ping` | every 30 s | keep-alive; client answers `"pong"` |
+| `import-progress` | a persons-api import moved (importer's sockets only) | `data: { importId, step, done, total, status, batch? }` |
+| `import-batch` | Acampa applied an import batch (importer's sockets only) | `data: { importId, batch, rows, applied, skipped, unfilled }` (counts) |
+| `error` `SESSION_ENDED` | logout, revocation, a core 401 | then close **4401** |
+
+A role or camp switch re-keys the session's open sockets to the new scope and
+sends a fresh `snapshot`; a session that ends closes them (4401).
 
 Every route handler that writes calls `publish("campers", "bedrooms", …)`
 (`services/realtime.ts`); `services/snapshot.ts` re-reads and serializes the
@@ -162,7 +183,7 @@ shapes never drift. Payloads are whole collections on purpose — the dataset is
 small (≈150 kids / 70 staff / 40 rooms / 50 events, ~300 KB) and "replace the
 list" keeps the client trivial and always consistent.
 
-Bun serves the socket natively (`export default { fetch, websocket }` in
+Bun serves the socket natively (`Bun.serve({ fetch, websocket })` in
 `index.ts`, via `hono/bun`).
 
 ## Categories (admin-managed enumerations)
@@ -551,7 +572,8 @@ carries a `campId`; the `camps` collection is the registry, with exactly one
 |---|---|
 | `sessions` | one person (IPAlpha person id), their role list and sealed role tokens; carries `campId` as a plain field |
 | `camps` | the registry itself |
-| `seeds`, `camperImportDictionary` | the wizard's templates and the AI/import column-matching cache — reused every year |
+| `seeds` | the wizard's templates — reused every year |
+| `dispatchDeliveries` | ids of webhook deliveries already accepted (TTL 7 days, no payload) |
 | `files` | image bytes on disk under a global, unguessable id, served by the public sessionless `GET /api/files/:id`; staying global means content imported from another year keeps its pictures without copying bytes. Deleting a camp still removes only that camp's gallery files |
 | `userCampState` | per-year marks of people who are not participant rows (families) — `prepDone`, `welcomeSentAt`, `photosSmsSentAt` — one row per `{ personId, campId }` |
 
@@ -559,7 +581,7 @@ Everything else is **SCOPED** (`services/campScope.ts#SCOPED`): `participants,
 bedrooms, categories, transports, teams, scores, schedule_roles,
 schedule_events, prep_sections, instructions, occurrences, medicationDoses,
 gallery, settings, checkinLog, camperChangeLog, camperLookups,
-camperImports, ai_usage, sms_usage`.
+ai_usage, sms_usage`.
 
 **The scoped `Db` proxy** (`db.ts`) is what keeps the ~300 existing
 `.collection(name)` call sites untouched. `getDb()` returns a `Proxy` whose
@@ -615,7 +637,7 @@ camp other than the active one.
   `canSwitchCamps` says the caller may switch — parents, ordinary team and
   medical never get the field, so they never see a year switcher.
 
-### `/api/camps` and `/api/super`
+### `/api/camps`
 
 `GET /active` is public (the login screen); everything else needs a session.
 "manager" below is `requireManager` (coordenação or `organizacao`); "admin" is
@@ -635,13 +657,6 @@ the coordenação acting as it, or a `SUPER_ADMIN_PERSON_IDS` owner
 | GET | `/api/camps/:id/staff?q=` | manager | same, for the team |
 | POST | `/api/camps/:id/import` `{ blocks?, camperIds?, staffIds?, withRoles?, withAssignments?, onMatch? }` | manager, only from the **active** camp (`403 CAMP_ARCHIVED` otherwise) | runs the copy engine → `{ result: { <block>: { created, updated, skipped } } }` |
 
-| Method | Path | Who | Does |
-|---|---|---|---|
-| GET | `/api/super/import-cache` | super admin | `{ count, staff, campers }` — remembered spreadsheet-column mappings |
-| POST | `/api/super/import-cache/staff` | super admin | wipes the staff-import column cache → `{ removed }` |
-| POST | `/api/super/import-cache` | super admin | wipes the whole staff + camper import dictionary → `{ removed }` |
-
-(`routes/cleanup.ts`'s former import-cache endpoints live here now.)
 
 ### Cross-year import (`services/campImport.ts`)
 
@@ -659,7 +674,7 @@ Settings: `checkinLocations`, `notifications`, `busHelpers` / `parentContacts`
 of people on this year's team; never windows, drafts, the reminder, the album
 flag or the wizard lock. Not importable: `gallery`, `occurrences`, `scores`,
 `medicationDoses`, `checkinLog`, `camperChangeLog`, `camperLookups`,
-`camperImports`, `ai_usage`, `sms_usage`.
+`ai_usage`, `sms_usage`.
 
 ### Camp deletion
 
@@ -686,6 +701,6 @@ CAMP_ACTIVE`).
 `BACKUP_VERSION` is `3` (people in IPAlpha: `participants`, no `users`).
 `bun run backup [--camp <id>]` dumps the database except `sessions`,
 `ipalphaLoginStates` (and a leftover `healthQueue` of older versions), and
-strips `camperImports.jobToken`; `--camp` filters SCOPED collections
+strips a leftover `camperImports.jobToken` of older versions; `--camp` filters SCOPED collections
 to that camp. Files older than v3 hold person data Acampa no longer keeps and
 are refused on restore.

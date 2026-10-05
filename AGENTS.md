@@ -11,13 +11,14 @@ Acampa owns CAMP OPERATIONS only — `participants` rows (room, bed, caretaker, 
 vehicle, check-ins, vest, notes) keyed by the IPAlpha `personId`, plus the windows,
 programme, documents, scores, photos. Details: README → "Identity, people and roles".
 
+- `GET /live` + `GET /ready` (services/readiness.ts); the server listens before Mongo connects.
 - All core HTTP goes through `src/services/ipalpha/coreClient.ts` (inject fakes in tests via
   `src/testing/ipalphaHarness.ts`; no network in tests).
 - Roles are §10 project role keys; `services/scope.ts#ROLE_FLAGS` maps them onto scopes. A new
   helper role = a new key in core + (optionally) a flag here — never a settings list.
 - Person data at use only: names via `services/people.ts#namesOf` (app client, ≤ 200 per call,
-  page the lists), health / contacts with the ACTING role token (`services/acting.ts`), counts
-  via the anonymized count endpoint. Writes of people go through `services/coreRegistration.ts`
+  page the lists), health / contacts with the ACTING role token (`services/acting.ts`), the list
+  ♥ via persons health-flags (never a full medical read), counts by project role (no ids). Writes of people go through `services/coreRegistration.ts`
   with the coordenação tokens.
 - Messages only through `services/messages.ts` + `src/messages/templates.ts` (5 languages,
   SMS ≤ 160 chars rendered — decision 45). A new message = a new catalog entry + test.
@@ -26,9 +27,15 @@ programme, documents, scores, photos. Details: README → "Identity, people and 
 Do NOT:
 
 - store, cache or log tokens, codes, phones, e-mails, names, birth dates, documents or health
-  (logs carry ids and counts only). The only stored tokens are SEALED (`SESSION_TOKEN_KEY`):
-  the session's role tokens and a running import job's importer token (decision 50, deleted
-  when the job ends). AI health goes straight to persons-api — never a health queue;
+  (logs carry ids and counts only). The only stored tokens are the session's role tokens,
+  SEALED (`SESSION_TOKEN_KEY`). Id relations are fine (decision 70: personId ↔ personId /
+  project, e.g. the 20 s responsável → kids memo in `services/members.ts`); names never;
+- rebuild an import pipeline: spreadsheets go to persons-api (`routes/imports.ts`, §20) with
+  Acampa's `appFields`; results come back as ids + app field values over the ONE dispatch
+  app-channel socket (`services/dispatchChannel.ts` — never open a second one) or the HMAC
+  webhook, and are applied to `participants` idempotently (`services/personImports.ts`).
+  Raw observation / health text never goes into `generalNotes`;
+- check a peer (core, dispatch) in `/ready` — only Mongo + boot; peers fail at call time;
 - send a role token, a phone or health to the browser outside the role's own reads;
 - put person data in the realtime snapshot (camp-ops records only);
 - add a local SMS / e-mail / OTP path — answer `503 IPALPHA_UNAVAILABLE` when core is down;
