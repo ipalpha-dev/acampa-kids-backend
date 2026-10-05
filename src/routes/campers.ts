@@ -11,7 +11,7 @@ import { participantKind } from "../models/participants";
 import { CAMPER_CATEGORY_KEYS, MEDICAL_EDITABLE_FIELDS, PARENT_EDITABLE_FIELDS, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, type Camper, type CamperChangeField, type CamperChangeLog, type CheckinKind, type HealthInfo, type MedicalEditableField, type ParentEditableField } from "../types";
 import { isInvalid, parseBedroom, parseMedications, parseSingle, parseTeam, parseText, parseTransport, bedroomFullMessage } from "./_validate";
 import { serializeStaffList } from "./staff";
-import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
+import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, isParent, resolveScope, type Scope } from "../services/scope";
 import { campInProgress, campPeriod } from "../services/camp";
 import { actingToken, campEditionId, coordinationToken } from "../services/acting";
 import { healthToCore, mergeHealthInto, registrationData, registrationExtras, registrationProfile } from "../services/coreRegistration";
@@ -72,6 +72,7 @@ export function serializeCamper(k: Camper) {
  * The kid's camp-ops record according to the viewer's scope, or null when
  * invisible. "name" visibility (bus / score helpers) drops notes, preferences
  * and the bed; "care" drops the invitedBy / qrToken / import bookkeeping.
+ * Health travels apart and is cut by `healthFor` (care = `CARE_HEALTH_FIELDS`).
  */
 export function serializeCamperFor(k: Camper, scope: Scope) {
   const vis = camperVisibility(scope, k);
@@ -87,7 +88,35 @@ export function serializeCamperList(list: Camper[], scope: Scope) {
   return list.map((k) => serializeCamperFor(k, scope)).filter((x): x is NonNullable<typeof x> => x !== null);
 }
 
-/** May the acting role see health at all (the person page / filters)? Core still decides per read. */
+/**
+ * The health a CARE reader gets — a room caretaker / helper, a check-in helper
+ * and a badge scan out of the scanner's room: what they need to look after the
+ * kid today, nothing more (the old app's "care" record).
+ */
+export const CARE_HEALTH_FIELDS = ["allergies", "drugAllergies", "healthIssues", "foodRestrictions", "medications"] as const;
+export type CareHealth = Pick<HealthInfo, (typeof CARE_HEALTH_FIELDS)[number]>;
+
+export function careHealth(h: HealthInfo): CareHealth {
+  return { allergies: h.allergies, drugAllergies: h.drugAllergies, healthIssues: h.healthIssues, foodRestrictions: h.foodRestrictions, medications: h.medications };
+}
+
+/**
+ * Whole health block (incl. neurodivergence — a diagnosis — and the insurance +
+ * card — a document): only the coordenação (`scope.all`) and saúde, plus a
+ * responsável for their OWN kid (the family's own data, which they edit).
+ * Everyone else gets `careHealth`.
+ */
+export function wholeHealthAllowed(scope: Scope, k: Pick<Camper, "_id">): boolean {
+  return scope.all || scope.medical || canParentEdit(scope, k);
+}
+
+/** `h` cut down to what the acting role may see of `k`. */
+export function healthFor(h: HealthInfo | null, scope: Scope, k: Pick<Camper, "_id">): HealthInfo | CareHealth | null {
+  if (!h) return null;
+  return wholeHealthAllowed(scope, k) ? h : careHealth(h);
+}
+
+/** May the acting role see health at all (the person page / filters)? Core still decides per read; `healthFor` cuts what is shown. */
 export function healthAllowed(scope: Scope, k?: Pick<Camper, "_id" | "bedroom" | "transportation" | "caretakerId">): boolean {
   if (scope.all || scope.medical || scope.checkinHelper) return true;
   if (!k) return false;
@@ -215,6 +244,8 @@ campers.get("/", requireRole("admin", "staff", "parent"), async (c) => {
   let health = new Map<string, HealthInfo>();
   if (tag) {
     if (!tagFilter(tag)) return fail(c, "TAG_INVALID", "Filtro de saúde inválido.");
+    // filtering by neurodivergence would reveal it: only the roles that see the whole block (a family filters only their own kids)
+    if (tag.split(":", 1)[0] === "neurodivergent" && !(scope.all || scope.medical || isParent(scope))) return fail(c, "FORBIDDEN", "Este filtro não está disponível para o seu perfil.", 403);
     const allowed = visible.filter(mayHealth);
     health = await readHealthMany(actingToken(c, PERSONS_RESOURCE), allowed.map((k) => k._id));
     visible = allowed.filter((k) => health.has(k._id) && matchesHealthTag(health.get(k._id)!, tag));
@@ -240,7 +271,7 @@ campers.get("/", requireRole("admin", "staff", "parent"), async (c) => {
       nickname: names.get(k._id)?.nickname ?? null,
       sex: names.get(k._id)?.sex ?? null,
       ...(mayHealth(k) ? { hasHealth } : {}),
-      ...(detail && h ? { health: h } : {}),
+      ...(detail && h ? { health: healthFor(h, scope, k) } : {}),
     };
   });
   return c.json({ items, nextCursor: page.nextCursor, total: visible.length });
@@ -265,8 +296,8 @@ campers.get("/health-counts", requireRole("admin", "staff"), async (c) => {
 
 /**
  * GET /api/campers/lookup/:id — emergency QR lookup (only while the camp is
- * happening). In-scope → the record (`belonged: true`); otherwise a CARE view,
- * the scan is logged (person ids only) and counted: ≥3 alerts the
+ * happening). In-scope → the record (`belonged: true`, health per `healthFor`);
+ * otherwise a CARE view (health = `CARE_HEALTH_FIELDS` only), the scan is logged (person ids only) and counted: ≥3 alerts the
  * coordenação, ≥5 blocks.
  */
 campers.get("/lookup/:id", requireRole("admin", "staff"), async (c) => {
@@ -280,7 +311,7 @@ campers.get("/lookup/:id", requireRole("admin", "staff"), async (c) => {
   const token = actingToken(c, PERSONS_RESOURCE);
   const name = (await namesOf([k._id])).get(k._id)?.name ?? "";
   if (belonged) {
-    return c.json({ camper: { ...(serializeCamperFor(k, scope) ?? serializeCamper(k)), name, health: await readHealth(token, k._id) }, belonged: true, foreignLookupCount: 0, foreignLookupBlocked: false });
+    return c.json({ camper: { ...(serializeCamperFor(k, scope) ?? serializeCamper(k)), name, health: healthFor(await readHealth(token, k._id), scope, k) }, belonged: true, foreignLookupCount: 0, foreignLookupBlocked: false });
   }
   const me = scope.staffId ? await findStaffById(scope.staffId) : null;
   if (!me || !me.active) return fail(c, "STAFF_NOT_LINKED", "Você não está na equipe deste acampamento.", 403);
@@ -297,8 +328,10 @@ campers.get("/lookup/:id", requireRole("admin", "staff"), async (c) => {
   if (updated.foreignLookupCount >= FOREIGN_LOOKUP_ALERT_AT) publish("staff", "settings");
   else publish("staff");
   const caretakerName = caretaker ? ((await namesOf([caretaker._id])).get(caretaker._id)?.name ?? "") : "";
+  // out of the scanner's room: the CARE health only — never neurodivergence or the insurance
+  const scanned = await readHealth(token, k._id);
   return c.json({
-    camper: { ...serializeCamper(k), invitedBy: "", qrToken: "", contactsHidden: true, name, health: await readHealth(token, k._id) },
+    camper: { ...serializeCamper(k), invitedBy: "", qrToken: "", contactsHidden: true, name, health: scanned ? careHealth(scanned) : null },
     bedroom: bedroom ? { id: bedroom._id, name: bedroom.name, group: bedroom.group } : null,
     caretaker: caretaker ? { id: caretaker._id, name: caretakerName } : null,
     belonged: false,
@@ -341,7 +374,7 @@ campers.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
       name: names.get(k._id)?.name ?? "",
       nickname: names.get(k._id)?.nickname ?? null,
       sex: names.get(k._id)?.sex ?? null,
-      ...(healthState ? { health: healthState.health, ...(healthState.forbidden ? { healthForbidden: true } : {}) } : {}),
+      ...(healthState ? { health: healthFor(healthState.health, scope, k), ...(healthState.forbidden ? { healthForbidden: true } : {}) } : {}),
       responsibles: responsibles.map((id) => ({ personId: id, name: rNames.get(id)?.name ?? "" })),
     },
   });
