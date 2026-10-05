@@ -97,6 +97,10 @@ export interface FakeWorld {
   birthdays: Set<string>;
   /** persons whose `medical` the role token may not read (403) */
   medicalForbidden: Set<string>;
+  /** E.164 phone → person id (registration answers the existing person for a known phone, like core) */
+  phones: Map<string, string>;
+  /** person id → birth date (registration finds a responsável's existing kid by name + birth date) */
+  births: Map<string, string>;
   nextId: number;
 }
 
@@ -262,20 +266,36 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   });
   core.on("POST /registrations", (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
-    type Entry = { name: string; sex?: string; data?: { medical?: Record<string, unknown> } };
+    type Entry = { name: string; birthDate?: string; phone?: string; sex?: string; data?: { medical?: Record<string, unknown> } };
     const body = call.json as { responsible?: Entry & { phone: string }; children?: Entry[]; people?: (Entry & { phone: string })[] };
     const id = () => `person-${++world.nextId}`;
-    // like core: profile fields + the `medical` block are written with the person (the role collects medical)
-    const make = (entry: Entry) => {
-      const personId = id();
+    // like core (persons-api registrations.service): a known phone / the same kid of the same responsável is
+    // REUSED (`created: false`) and every data block sent is written over it — `medical` included
+    const writeKinds = (personId: string, entry: Entry) => {
+      if (entry.data?.medical) world.health.set(personId, entry.data.medical);
+    };
+    const upsertAdult = (entry: Entry & { phone: string }) => {
+      const known = world.phones.get(entry.phone);
+      const personId = known ?? id();
       world.names.set(personId, entry.name);
       if (entry.sex) world.sex.set(personId, entry.sex);
-      if (entry.data?.medical) world.health.set(personId, entry.data.medical);
-      return personId;
+      if (!known) world.phones.set(entry.phone, personId);
+      writeKinds(personId, entry);
+      return { personId, created: !known };
     };
-    if (body.people) return json({ people: body.people.map((p) => ({ personId: make(p), created: true })) }, 201);
-    const responsible = make(body.responsible!);
-    return json({ responsible: { personId: responsible, created: true }, children: (body.children ?? []).map((c) => ({ personId: make(c), created: true, linkId: `link-${world.nextId}` })) }, 201);
+    if (body.people) return json({ people: body.people.map(upsertAdult) }, 201);
+    const responsible = upsertAdult(body.responsible!);
+    const children = (body.children ?? []).map((c) => {
+      const sibling = world.links.filter((l) => l.agentId === responsible.personId).map((l) => l.subjectId).find((kid) => world.births.get(kid) === c.birthDate && world.names.get(kid)?.toLowerCase() === c.name.toLowerCase());
+      const personId = sibling ?? id();
+      world.names.set(personId, c.name);
+      if (c.birthDate) world.births.set(personId, c.birthDate);
+      if (c.sex) world.sex.set(personId, c.sex);
+      if (!sibling) world.links.push({ subjectId: personId, agentId: responsible.personId });
+      writeKinds(personId, c);
+      return { personId, created: !sibling, linkId: `link-${world.nextId}` };
+    });
+    return json({ responsible, children }, 201);
   });
   core.on("POST /links", (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
@@ -348,7 +368,7 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
 }
 
 export function emptyWorld(): FakeWorld {
-  return { links: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], templates: new Map(), messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), nextId: 0 };
+  return { links: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], templates: new Map(), messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), phones: new Map(), births: new Map(), nextId: 0 };
 }
 
 /** Opens an Acampa session for `personId` holding `roles` (tokens signed like auth-api's) and returns the browser token. */

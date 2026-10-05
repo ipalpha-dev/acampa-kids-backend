@@ -2,8 +2,8 @@ import { listCategories } from "../models/categories";
 import { openImportJobToken, pauseImportForSignIn } from "../models/camperImports";
 import { coreClient } from "./ipalpha";
 import { IpalphaRejected, type HealthList } from "./ipalpha/coreClient";
-import { healthToCore } from "./coreRegistration";
-import { MEDICAL_KIND, mergeHealth, toHealth, writeHealth } from "./people";
+import { healthToCore, mergeHealthInto, type HealthWrite } from "./coreRegistration";
+import { MEDICAL_KIND, toHealth } from "./people";
 import { EMPTY_HEALTH, STAFF_CATEGORY_KEYS, type HealthInfo } from "../types";
 
 /**
@@ -52,28 +52,17 @@ export async function currentHealth(token: string, personId: string): Promise<He
   }
 }
 
-export type HealthWrite = "written" | "unchanged" | "refused";
+export type { HealthWrite } from "./coreRegistration";
 
 /**
  * Merges an AI health patch (Acampa import option ids or church ids) over the
- * person's current block and writes it with the importer's token. `refused` =
- * core's role rules refused the read or the write for this person (logged by
- * the caller with ids only). A 401 throws `IpalphaTokenRevoked`.
+ * person's current block and writes it with the importer's token
+ * (`mergeHealthInto`: nothing erased, a block we cannot read is never written).
+ * `refused` = core's role rules refused the read or the write for this person
+ * (logged by the caller with ids only). A 401 throws `IpalphaTokenRevoked`.
  */
-export async function writeImportHealth(token: string, personId: string, patch: Partial<HealthInfo>, lists?: HealthList[]): Promise<HealthWrite> {
-  const current = await currentHealth(token, personId);
-  if (!current) return "refused";
-  const merged = mergeHealth(current, await healthToCore(token, patch, lists));
-  // only what really changes is written (a repeated AI pass is a no-op)
-  for (const key of Object.keys(merged) as (keyof HealthInfo)[]) if (JSON.stringify(merged[key]) === JSON.stringify(current[key])) delete merged[key];
-  if (Object.keys(merged).length === 0) return "unchanged";
-  try {
-    await writeHealth(token, personId, merged, current);
-    return "written";
-  } catch (err) {
-    if (err instanceof IpalphaRejected && err.status !== 401) return "refused";
-    throw err;
-  }
+export function writeImportHealth(token: string, personId: string, patch: Partial<HealthInfo>, lists?: HealthList[]): Promise<HealthWrite> {
+  return mergeHealthInto(token, personId, patch, { lists });
 }
 
 const norm = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLocaleLowerCase("pt-BR").replace(/\s+/g, " ").trim();

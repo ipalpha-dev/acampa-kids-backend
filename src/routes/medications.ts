@@ -20,7 +20,7 @@ type Env = { Variables: AuthVariables };
  * here the team only ticks what was actually given.
  *
  *   GET    /api/medications                every tick (coordenação / organização / saúde)
- *   GET    /api/medications/prescriptions  the kids of this camp with medicines (name + medications), live from core
+ *   GET    /api/medications/prescriptions  the kids of this camp with medicines (name + medications + allergies), live from core
  *   POST   /api/medications                tick one dose { personId, medName, day?, slot, note? }
  *   DELETE /api/medications/:id      untick (a mistake)
  *
@@ -71,8 +71,13 @@ medications.get("/", async (c) => {
 
 /**
  * GET /api/medications/prescriptions?cursor — one page (≤ 200) of the camp's
- * kids who take medicines: `{items: [{personId, name, medications}], nextCursor}`.
- * Read from persons-api with the acting role token (role rules decide).
+ * kids who take medicines: `{items: [{personId, name, medications,
+ * drugAllergies, allergies, healthIssues}], nextCursor}`. The allergy lists
+ * travel WITH the prescription (option ids of the church health lists) so the
+ * checklist flags a kid who must not take some medicine and the popup shows
+ * the care team what to watch — read live from persons-api with the acting
+ * role token (saúde / coordenação; role rules decide, core logs the read),
+ * never stored here.
  */
 medications.get("/prescriptions", async (c) => {
   if (!(await medicationAccess(c))) return fail(c, "FORBIDDEN", "Só a equipe médica e a organização veem as medicações.", 403);
@@ -80,7 +85,10 @@ medications.get("/prescriptions", async (c) => {
   const page = await coreClient().listPeople(actingToken(c, PERSONS_RESOURCE), { role: PARTICIPANT_ROLE, kinds: [MEDICAL_KIND], cursor: c.req.query("cursor") || undefined, limit: 200 });
   const items = page.items
     .filter((p) => kids.has(p.personId))
-    .map((p) => ({ personId: p.personId, name: p.name, medications: toHealth(p.data.health).medications }))
+    .map((p) => {
+      const h = toHealth(p.data.health);
+      return { personId: p.personId, name: p.name, medications: h.medications, drugAllergies: h.drugAllergies, allergies: h.allergies, healthIssues: h.healthIssues };
+    })
     .filter((p) => p.medications.length > 0);
   return c.json({ items, nextCursor: page.nextCursor });
 });

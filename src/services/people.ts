@@ -99,6 +99,35 @@ export async function readHealth(token: string, personId: string): Promise<Healt
   }
 }
 
+/**
+ * Health of one person + whether the role was refused (403). `health` is null
+ * when there is none (404) or the role may not read it — the caller tells a
+ * family "não disponível para o seu perfil" apart from "nada informado".
+ */
+export async function readHealthState(token: string, personId: string): Promise<{ health: HealthInfo | null; forbidden: boolean }> {
+  try {
+    return { health: toHealth(await coreClient().readData(token, personId, MEDICAL_KIND)), forbidden: false };
+  } catch (err) {
+    if (err instanceof IpalphaRejected && err.status === 403) return { health: null, forbidden: true };
+    if (err instanceof IpalphaRejected && err.status === 404) return { health: null, forbidden: false };
+    throw err;
+  }
+}
+
+/**
+ * The current block BEFORE a write: empty when the person has none yet (404);
+ * a refusal (403) is thrown — a block we could not read is never overwritten
+ * (writing `patch` over an empty base would erase what the family told us).
+ */
+export async function readHealthForWrite(token: string, personId: string): Promise<HealthInfo> {
+  try {
+    return toHealth(await coreClient().readData(token, personId, MEDICAL_KIND));
+  } catch (err) {
+    if (err instanceof IpalphaRejected && err.status === 404) return { ...EMPTY_HEALTH };
+    throw err;
+  }
+}
+
 /** Health of many people, a few calls at a time (each read is logged by persons-api for its owner). */
 export async function readHealthMany(token: string, personIds: string[], concurrency = 8): Promise<Map<string, HealthInfo>> {
   const out = new Map<string, HealthInfo>();
@@ -111,7 +140,7 @@ export async function readHealthMany(token: string, personIds: string[], concurr
 
 /** Writes a health patch (merged over the current block) with the acting role token. */
 export async function writeHealth(token: string, personId: string, patch: Partial<HealthInfo>, current?: HealthInfo | null): Promise<HealthInfo> {
-  const base = current ?? (await readHealth(token, personId)) ?? { ...EMPTY_HEALTH };
+  const base = current ?? (await readHealthForWrite(token, personId));
   const next: HealthBlock = { ...base, ...patch };
   return toHealth(await coreClient().writeData(token, personId, MEDICAL_KIND, next));
 }

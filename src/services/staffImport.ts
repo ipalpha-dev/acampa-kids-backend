@@ -257,7 +257,9 @@ export async function insertImportStaff(rows: Record<string, unknown>[], importI
       continue;
     }
     try {
-      const { personId, created } = await registerAdult(ctx.tokens, { name: data.person.name, phone: data.person.phone, email: data.person.email, birthDate: data.person.birthDate, sex: data.person.sex, roles: data.roles, editionId: ctx.editionId, data: data.person.data, health: data.health });
+      const { personId, created, medical } = await registerAdult(ctx.tokens, { name: data.person.name, phone: data.person.phone, email: data.person.email, birthDate: data.person.birthDate, sex: data.person.sex, roles: data.roles, editionId: ctx.editionId, data: data.person.data, health: data.health });
+      // health is merged over what core holds (never replaced); a refusal changed nothing
+      if (medical === "refused") skipped.push({ row: row.row, name: row.name, reason: "Importado; o IPAlpha não deixou gravar a saúde — nada do que já existia foi alterado" });
       eligiblePhones++;
       if (created) loginsCreated++;
       const existing = (await listStaff({ includeDraft: true, personIds: [personId] }))[0];

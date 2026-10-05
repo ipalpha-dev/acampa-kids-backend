@@ -45,13 +45,13 @@ Check-in stamps: `{at, byPersonId, byRole: CoreRole, note?}`.
 |---|---|
 | `GET /?cursor&limit≤200&bedroom&q&tag` | **paged** → `{items, nextCursor, total}`; item = record + `name, nickname, sex ("F"\|"M"\|null, from core — decision 39)` (+ `hasHealth` for roles allowed health; + `health` only with `tag=allergies:<optionId>\|drugAllergies:<id>\|healthIssues:<id>\|medications\|neurodivergent\|foodRestrictions` or a `q` with ≤ 6 matches). |
 | **NEW** `GET /health-counts?tags=a,b` | `{total, byTag}` (anonymized chips). |
-| `GET /:id` | `{camper: record + name, nickname, sex, health? , responsibles:[{personId, name}]}`. |
+| `GET /:id` | `{camper: record + name, nickname, sex, health? , healthForbidden?, responsibles:[{personId, name}]}`. Health is read with the ACTING role token — for a family, their `responsavel` token (core's own-kids rule, §19). `healthForbidden: true` (+ `health: null`) = core refused this role: show "não disponível para o seu perfil", never "nada informado". |
 | `GET /lookup/:id` | camper adds `name`, `health`; `caretaker {id, name}`. |
 | `GET /:id/detail` | records only (names via `/api/people/names`). |
 | `GET /checkin/log`, `/:id/checkin/log` | `{log:[{id, who, personId, kind, action, at, byPersonId, byRole, note}]}`. |
 | `GET /:id/changes` | `{changes:[{id, personId, at, byPersonId, byRole, medical, fields}]}` (no before/after values). |
-| `PUT /:id/parent`, `PUT /:id/health` | same field names; health written to persons-api; answer `{camper: record + health, changed}`. Option ids = `GET /api/people/health-lists`. |
-| **NEW** `POST /register` | coordenação: `{name, birthDate, responsible:{name, phone}, sex? ("F"\|"M", only when the family said it), homeChurch? (≤ 120), school? {name, grade}, emergencyContact? ({name, phone, relation?} or the free text "Maria (mãe) 11 9…"), health?, …ops}` → 201 `{camper, responsible:{personId, created}}`. All person fields travel in core's registration (`sex`, `homeChurch`, `data.school/emergencyContact/medical`). 400 `SEX_INVALID` \| `HOME_CHURCH_INVALID` \| `EMERGENCY_CONTACT_INVALID`. |
+| `PUT /:id/parent`, `PUT /:id/health` | same field names; health written to persons-api with the acting role token (parents: `responsavel`); answer `{camper: record + health, changed}`. Option ids = `GET /api/people/health-lists`. When core refuses to READ the block: 403 `{code:"CORE_FORBIDDEN", reason:"medicalForbidden"}` and nothing is saved (notes included) — a block we cannot read is never written over. |
+| **NEW** `POST /register` | coordenação: `{name, birthDate, responsible:{name, phone}, sex? ("F"\|"M", only when the family said it), homeChurch? (≤ 120), school? {name, grade}, emergencyContact? ({name, phone, relation?} or the free text "Maria (mãe) 11 9…"), health?, …ops}` → 201 `{camper, responsible:{personId, created}, medical: "written"|"unchanged"|"refused"}`. Person fields travel in core's registration (`sex`, `homeChurch`, `data.school/emergencyContact`); **health never does** — core answers a person it knows with `created:false` and would REPLACE their block. Health is merged afterwards (read with the coordenação token, lists unioned, texts kept/appended, never blanked); `refused` = core refused the read/write, nothing was changed. 400 `SEX_INVALID` \| `HOME_CHURCH_INVALID` \| `EMERGENCY_CONTACT_INVALID`. |
 | **NEW** `POST /:id/responsibles` | coordenação: `{name, phone, email?}` → 201 `{responsible:{personId, name}, linked}` — a second responsável for the SAME kid (persons `/links`, decision 38). |
 | `POST /` | `{personId, …ops}` (an existing IPAlpha person). |
 | `PUT /:id` | ops only: `team, transportation, bed, bedroom, caretakerId, invitedBy, qrToken, generalNotes, bedroomPreference`. |
@@ -83,7 +83,7 @@ import worker writes AI health to persons-api itself; drop the flush call after 
 
 ## Other routes
 
-- Medications: **NEW** `GET /prescriptions?cursor` → `{items:[{personId, name, medications}], nextCursor}`; `POST` body `{personId, medName, slot, day?, note?}` (was `camperId`); dose `{id, personId, medKey, medName, dose, day, slot, givenAt, byPersonId, note}`.
+- Medications: **NEW** `GET /prescriptions?cursor` → `{items:[{personId, name, medications, drugAllergies, allergies, healthIssues}], nextCursor}` (allergy lists = church option ids, read live with the acting saúde / coordenação token, never stored — the checklist flags 🚫💊 and the popup shows them); `POST` body `{personId, medName, slot, day?, note?}` (was `camperId`); dose `{id, personId, medKey, medName, dose, day, slot, givenAt, byPersonId, note}`.
 - Occurrences: record `{id, campers: personId[], staff: personId[], description, createdBy:{personId, role, group}, createdAt}`.
 - Scores: `{…, camperId (personId), byPersonId}` (no `camperName`, `by`); scan answer adds `camperName` (first name).
 - Gallery photo: `byPersonId` (was `byName`). Files: `byPersonId`.
@@ -91,7 +91,7 @@ import worker writes AI health to persons-api itself; drop the flush call after 
 - **NEW** templates (coordenação): `GET /api/settings/message-templates` → `{templates:[{slug, name, channel, variables, subject, body (5 langs), live, version, customized, defaults}]}` · `POST /message-templates/seed` · `PATCH /message-templates/:slug {name?, body?, subject?}` (400 `TEMPLATE_INVALID`) · `POST /message-templates/:slug/reset`.
 - Admins: `GET /api/admins` → `{admins:[{personId, name, superAdmin}], appUrl}`; `POST /api/admins` and `/handover` removed (roles are granted in Mordomia).
 - Camps: `POST /:id/delete/request` → `{success, expiresAt, delivery:"sms"}` (no phone); `/:id/campers` rows `{id, name, sex (core), bedroom, team, matched}`; `/:id/staff` rows `{id, name, roomRole, bedroom, team, matched}`; import results may carry `membershipsFailed`.
-- Imports: `/camper-imports/:id/leaders` and `/staff-imports/:id/members` → `{staff:{id, name}}`; `apply` needs the coordenação role; after apply `rows`/`preview` are emptied.
+- Imports: an existing person's health is merged, never replaced (same rule as `POST /register`); a refusal is a `skipped` note on an imported row ("Importado; o IPAlpha não deixou gravar a saúde…"). Camper import fields gain the optional `guardian2Name` ("Nome do 2º responsável") and `guardian2Phone` ("Telefone do 2º responsável"): on apply the second responsável is registered / found by phone and linked to the SAME kid (persons `POST /links`, involved + `responsavel` — decision 38); a bad celular or a refusal is a note, the kid is still imported. `/camper-imports/:id/leaders` and `/staff-imports/:id/members` → `{staff:{id, name}}`; `apply` needs the coordenação role; after apply `rows`/`preview` are emptied.
 
 ## Imports — AI health with the importer's token (decision 50)
 

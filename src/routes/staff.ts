@@ -460,7 +460,7 @@ staff.post("/register", async (c) => {
   if (!editionId) return fail(c, "EDITION_UNKNOWN", "A edição deste acampamento ainda não existe no IPAlpha.", 409);
   const full = await bedroomFullMessage(result.patch.bedroom ?? null, null);
   if (full) return fail(c, "BEDROOM_FULL", full, 409);
-  const data = await registrationData(personsToken, extras.data, undefined);
+  const data = registrationData(extras.data);
   const reg = await coreClient().register(personsToken, { role: TEAM_ROLE, people: [{ name, phone, ...registrationProfile(extras), ...(data ? { data } : {}) }] });
   const person = reg.people[0];
   if (!person) return fail(c, "REGISTRATION_FAILED", "O IPAlpha não confirmou o cadastro.", 502);

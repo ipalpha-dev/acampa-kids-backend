@@ -1,7 +1,7 @@
 import { listCategories } from "../models/categories";
 import { coreClient } from "./ipalpha";
 import { IpalphaRejected, toCoreSex, type HealthList, type RegistrationPerson } from "./ipalpha/coreClient";
-import { hasHealthInfo } from "./people";
+import { mergeHealth, readHealthForWrite, writeHealth } from "./people";
 import { EMPTY_HEALTH, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, STAFF_CATEGORY_KEYS, type CamperSex, type HealthInfo } from "../types";
 import { normalizeBrazilPhone } from "../utils";
 
@@ -12,12 +12,17 @@ import { normalizeBrazilPhone } from "../utils";
  * memberships in the camp's edition with `onBehalf` / `involved`, all with
  * the COORDENAÇÃO role tokens of the acting session.
  *
- * The registration body carries everything core's `RegistrationPersonDto`
- * takes (persons-api src/registrations/registration.dto.ts): the profile
- * fields `sex` (only when the spreadsheet / form said it — never guessed) and
- * `homeChurch`, and `data` blocks per kind — `document`, `school`,
- * `emergencyContact` and `medical` (health mapped onto the church health
- * lists). Core writes only the kinds the target role collects.
+ * The registration body carries the profile fields `sex` (only when the
+ * spreadsheet / form said it — never guessed) and `homeChurch`, and `data`
+ * blocks per kind — `document`, `school`, `emergencyContact`. Core writes only
+ * the kinds the target role collects.
+ *
+ * HEALTH NEVER TRAVELS IN THE REGISTRATION: core answers an existing person
+ * (same phone / same kid of the same responsável) with `created: false` and
+ * REPLACES every block it was sent — a spreadsheet would erase the allergies
+ * and medicines the family or the care team already told us. Health is
+ * written afterwards by `mergeHealthInto`: read the current block with the
+ * coordenação token, union / append, write only what changes, never blank.
  */
 export interface CoordinationTokens {
   persons: string;
@@ -40,22 +45,50 @@ function profileOf(input: { sex?: CamperSex | null; homeChurch?: string | null }
   return { ...(sex ? { sex } : {}), ...(homeChurch ? { homeChurch } : {}) };
 }
 
-/**
- * The persons `medical` block of a registration: the health mapped onto the
- * church lists over an empty block, or undefined when there is nothing to say.
- */
-export async function medicalBlock(token: string, health: Partial<HealthInfo> | undefined): Promise<HealthInfo | undefined> {
-  if (!health || Object.keys(health).length === 0) return undefined;
-  const block: HealthInfo = { ...EMPTY_HEALTH, ...(await healthToCore(token, health)) };
-  const hasExtras = block.weightKg != null || !!block.insurance.trim() || !!block.insuranceCard.trim();
-  return hasHealthInfo(block) || hasExtras ? block : undefined;
+/** `data` without any `medical` block (health is merged afterwards — see the header), or undefined when empty. */
+function withoutMedical(data: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  const { medical: _medical, ...rest } = data ?? {};
+  return Object.keys(rest).length ? rest : undefined;
 }
 
-/** `data` with the `medical` block added when there is one. */
-async function withMedical(token: string, data: Record<string, unknown> | undefined, health: Partial<HealthInfo> | undefined): Promise<Record<string, unknown> | undefined> {
-  const medical = await medicalBlock(token, health);
-  const out: Record<string, unknown> = { ...(data ?? {}), ...(medical ? { medical } : {}) };
-  return Object.keys(out).length ? out : undefined;
+export type HealthWrite = "written" | "unchanged" | "refused";
+
+/**
+ * Health from an import / registration / AI pass written OVER the person's
+ * current block — never erasing it:
+ *
+ *   lists (allergies, drug allergies, conditions, medicines)  unioned
+ *   texts (food, notes, insurance)   kept; a new value is appended, never blanked
+ *   neurodivergent / weight          only ever filled in
+ *
+ * The current block is read first with the same (coordenação) role token,
+ * logged by persons-api. `refused` = core's role rules refused the read or
+ * the write — a block we could not read is never written blind. `isNew`
+ * (core just created the person) skips the read: there is nothing to keep.
+ * Only what really changes is written (a repeated import is a no-op).
+ */
+export async function mergeHealthInto(token: string, personId: string, patch: Partial<HealthInfo> | undefined, opts: { isNew?: boolean; lists?: HealthList[] } = {}): Promise<HealthWrite> {
+  if (!patch || Object.keys(patch).length === 0) return "unchanged";
+  let current: HealthInfo;
+  if (opts.isNew) current = { ...EMPTY_HEALTH };
+  else {
+    try {
+      current = await readHealthForWrite(token, personId);
+    } catch (err) {
+      if (err instanceof IpalphaRejected && err.status === 403) return "refused";
+      throw err;
+    }
+  }
+  const merged = mergeHealth(current, await healthToCore(token, patch, opts.lists));
+  for (const key of Object.keys(merged) as (keyof HealthInfo)[]) if (JSON.stringify(merged[key]) === JSON.stringify(current[key])) delete merged[key];
+  if (Object.keys(merged).length === 0) return "unchanged";
+  try {
+    await writeHealth(token, personId, merged, current);
+    return "written";
+  } catch (err) {
+    if (err instanceof IpalphaRejected && err.status !== 401) return "refused";
+    throw err;
+  }
 }
 
 export interface GuardianInput {
@@ -121,12 +154,12 @@ async function addMembership(token: string, input: Parameters<ReturnType<typeof 
  * (on behalf of the responsável, who is involved) and `responsavel`
  * memberships in the edition.
  */
-export async function registerKid(tokens: CoordinationTokens, input: { kid: KidInput; guardian: GuardianInput; editionId: string; health?: Partial<HealthInfo> }): Promise<{ kidId: string; guardianId: string; created: boolean }> {
+export async function registerKid(tokens: CoordinationTokens, input: { kid: KidInput; guardian: GuardianInput; editionId: string; health?: Partial<HealthInfo> }): Promise<{ kidId: string; guardianId: string; created: boolean; medical: HealthWrite }> {
   const phone = normalizeBrazilPhone(input.guardian.phone);
   if (!phone) throw new IpalphaRejected(400, "missingResponsiblePhone", {});
   const guardianData: Record<string, unknown> = { ...(input.guardian.data ?? {}) };
   if (input.guardian.email) guardianData.email = [{ address: input.guardian.email }];
-  const kidData = await withMedical(tokens.persons, input.kid.data, input.health);
+  const kidData = withoutMedical(input.kid.data);
   const reg = await coreClient().register(tokens.persons, {
     role: PARTICIPANT_ROLE,
     responsible: { name: input.guardian.name, phone, ...(Object.keys(guardianData).length ? { data: guardianData } : {}) },
@@ -142,16 +175,18 @@ export async function registerKid(tokens: CoordinationTokens, input: { kid: KidI
     involved: [{ personId: reg.responsible.personId, purpose: "responsible", kinds: [] }],
   });
   await addMembership(tokens.projects, { personId: reg.responsible.personId, role: RESPONSIBLE_ROLE, editionId: input.editionId });
-  return { kidId: child.personId, guardianId: reg.responsible.personId, created: child.created };
+  // after the membership: core's role rules reach the kid as `participante` now
+  const medical = await mergeHealthInto(tokens.persons, child.personId, input.health, { isNew: child.created });
+  return { kidId: child.personId, guardianId: reg.responsible.personId, created: child.created, medical };
 }
 
-/** An adult (team): registration (profile fields + data blocks incl. `medical`), then one membership per role in the edition. */
-export async function registerAdult(tokens: CoordinationTokens, input: { name: string; phone: string; email?: string | null; birthDate?: string | null; sex?: CamperSex | null; homeChurch?: string | null; roles: string[]; editionId: string; data?: Record<string, unknown>; health?: Partial<HealthInfo> }): Promise<{ personId: string; created: boolean }> {
+/** An adult (team): registration (profile fields + data blocks), one membership per role in the edition, then the health merged over theirs. */
+export async function registerAdult(tokens: CoordinationTokens, input: { name: string; phone: string; email?: string | null; birthDate?: string | null; sex?: CamperSex | null; homeChurch?: string | null; roles: string[]; editionId: string; data?: Record<string, unknown>; health?: Partial<HealthInfo> }): Promise<{ personId: string; created: boolean; medical: HealthWrite }> {
   const phone = normalizeBrazilPhone(input.phone);
   if (!phone) throw new IpalphaRejected(400, "missingPhone", {});
   const base: Record<string, unknown> = { ...(input.data ?? {}) };
   if (input.email) base.email = [{ address: input.email }];
-  const data = await withMedical(tokens.persons, base, input.health);
+  const data = withoutMedical(base);
   const reg = await coreClient().register(tokens.persons, {
     role: input.roles[0],
     people: [{ name: input.name, phone, ...(input.birthDate ? { birthDate: input.birthDate } : {}), ...profileOf(input), ...(data ? { data } : {}) }],
@@ -159,7 +194,8 @@ export async function registerAdult(tokens: CoordinationTokens, input: { name: s
   const person = reg.people[0];
   if (!person) throw new IpalphaRejected(502, "registrationIncomplete", {});
   for (const role of input.roles) await addMembership(tokens.projects, { personId: person.personId, role, editionId: input.editionId });
-  return { personId: person.personId, created: person.created };
+  const medical = await mergeHealthInto(tokens.persons, person.personId, input.health, { isNew: person.created });
+  return { personId: person.personId, created: person.created, medical };
 }
 
 /**
@@ -259,7 +295,7 @@ export function registrationProfile(input: { sex?: CamperSex | null; homeChurch?
   return profileOf(input);
 }
 
-/** `data` blocks + the `medical` block (exported for the manual registration routes). */
-export function registrationData(token: string, data: Record<string, unknown> | undefined, health: Partial<HealthInfo> | undefined): Promise<Record<string, unknown> | undefined> {
-  return withMedical(token, data, health);
+/** `data` blocks of a manual registration — never `medical` (exported for the manual registration routes; health goes through `mergeHealthInto`). */
+export function registrationData(data: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  return withoutMedical(data);
 }

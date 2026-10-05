@@ -32,6 +32,9 @@ Do NOT:
 - send a role token, a phone or health to the browser outside the role's own reads;
 - put person data in the realtime snapshot (camp-ops records only);
 - add a local SMS / e-mail / OTP path — answer `503 IPALPHA_UNAVAILABLE` when core is down;
+- send `medical` in a persons registration: core reuses a known person (`created: false`) and REPLACES the
+  block — health goes through `coreRegistration#mergeHealthInto` (read, union / append, never blank; a block
+  the role cannot read is never written);
 - make camp activation wait on projects-api (edition rollover is best effort);
 - guess sex or any person attribute with AI — sex comes from core with the name (decision 39);
   registrations send `sex` only when the sheet / form said it;

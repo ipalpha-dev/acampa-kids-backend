@@ -7,7 +7,7 @@ import { appendCategoryOption, listCategories, newOptionId } from "../models/cat
 import { EMPTY_STAFF, insertStaff, listStaff } from "../models/staff";
 import { insertTeam, listTeams, TEAM_PALETTE } from "../models/teams";
 import { insertTransport, listTransports, nextTransportOrder } from "../models/transports";
-import { busColorName, BUS_COLORS, CAMPER_CATEGORY_KEYS, bedroomCapacity, EMPTY_HEALTH, TEAM_ROLE, type BedroomGroup, type CamperImportDictionaryEntry, type CamperImportReviewItem, type CamperSex, type Category, type HealthInfo, type Staff } from "../types";
+import { busColorName, BUS_COLORS, CAMPER_CATEGORY_KEYS, bedroomCapacity, TEAM_ROLE, type BedroomGroup, type CamperImportDictionaryEntry, type CamperImportReviewItem, type CamperSex, type Category, type HealthInfo, type Staff } from "../types";
 import { formatBrazilPhone, formatCpf, normalizeBrazilPhone, titleCaseName } from "../utils";
 import { transportLabel } from "../routes/transports";
 import { bestImportMatch, bestImportMatches, classifyImportItems, dedupeImportValues, mapImportColumns, matchLeaderWithAi, askDateParser, SPLIT_CATEGORY_FIELDS } from "./importAi";
@@ -15,8 +15,7 @@ import { getDb } from "../db";
 import { listImportDictionary, type CamperImportColumn, type CamperImportCreatedItem } from "../models/camperImports";
 import { namesOf } from "./people";
 import { IpalphaRejected } from "./ipalpha/coreClient";
-import { addResponsible, documentsOf, emergencyContactOf, healthToCore, registerAdult, registerKid, type CoordinationTokens } from "./coreRegistration";
-import { mergeHealth, readHealth, writeHealth } from "./people";
+import { addResponsible, documentsOf, emergencyContactOf, mergeHealthInto, registerAdult, registerKid, type CoordinationTokens } from "./coreRegistration";
 
 /** A team member with the name read live from core (imports match leaders by name). */
 export type NamedStaff = Staff & { name: string };
@@ -57,6 +56,9 @@ export const IMPORT_FIELDS = [
   { key: "guardianName", label: "Nome do responsável", aliases: ["responsável", "responsavel", "nome pai", "nome mãe", "nome mae"] },
   { key: "guardianPhone", label: "Telefone do responsável", aliases: ["telefone", "celular", "whatsapp", "fone responsável"] },
   { key: "guardianEmail", label: "E-mail", aliases: ["email", "e-mail responsável", "e-mail do responsável", "email do responsável"] },
+  // optional second responsável of the SAME kid — linked through persons POST /links on apply (decision 38)
+  { key: "guardian2Name", label: "Nome do 2º responsável", aliases: ["2º responsável", "2o responsável", "segundo responsável", "segundo responsavel", "responsável 2", "responsavel 2", "nome do responsável 2", "nome do segundo responsável", "outro responsável", "outro responsavel"] },
+  { key: "guardian2Phone", label: "Telefone do 2º responsável", aliases: ["telefone 2", "celular 2", "whatsapp 2", "telefone do responsável 2", "celular do responsável 2", "telefone do segundo responsável", "celular do segundo responsável", "whatsapp do segundo responsável", "telefone do outro responsável"] },
   { key: "emergencyContact", label: "Contato de emergência", aliases: ["emergência", "emergencia", "contato emergencia", "contato de emergência nome e telefone"] },
   { key: "insurance", label: "Convênio médico", aliases: ["convenio", "plano de saúde", "plano saude"] },
   { key: "insuranceCard", label: "Carteirinha", aliases: ["número carteirinha", "numero carteirinha", "número da carteirinha", "numero da carteirinha", "carteirinha do convênio", "carteirinha do convenio"] },
@@ -895,6 +897,9 @@ export async function analyzeCamperImport(input: { data: Uint8Array; fileName: s
       guardianPhone,
       guardianCpf: validCpf(guardianCpfRaw),
       guardianEmail: email,
+      guardian2Name: titleCaseName(valueOf(row, sources, "guardian2Name")),
+      // null = a number was written but is not a valid celular (reported on apply, never blocking the kid)
+      guardian2Phone: valueOf(row, sources, "guardian2Phone") ? importPhone(valueOf(row, sources, "guardian2Phone")) : "",
       dailyMedicationText: valueOf(row, sources, "dailyMedication"),
       foodRestrictionText: valueOf(row, sources, "foodRestrictions"),
       categoryNotesById,
@@ -1014,8 +1019,23 @@ export async function createLeaderFromReview(name: string, phone: string, import
   return { ...staff, name: clean };
 }
 
+/**
+ * The optional second responsável of a row: `null` = the sheet said nothing;
+ * `invalid` = a name without a valid celular (or a celular without a name) —
+ * reported on apply, the kid is still imported with the first responsável.
+ */
+export type SecondGuardian = { name: string; phone: string } | { invalid: true } | null;
+
+export function secondGuardianOf(row: Record<string, unknown>): SecondGuardian {
+  const name = String(row.guardian2Name ?? "").trim();
+  const phone = typeof row.guardian2Phone === "string" ? row.guardian2Phone : row.guardian2Phone === null ? null : "";
+  if (!name && !phone && phone !== null) return null;
+  if (!name || !phone) return { invalid: true };
+  return { name, phone };
+}
+
 /** One preview row → what goes where: camp ops (Acampa), the kid + guardian (persons-api), health (persons-api `medical`). */
-export function camperDataFromPreview(row: Record<string, unknown>, importId: string): { ops: CamperData; kid: { name: string; birthDate: string; sex: CamperSex | null; homeChurch: string; data: Record<string, unknown> }; guardian: { name: string; phone: string | null; email: string; data: Record<string, unknown> }; health: Partial<HealthInfo> } | null {
+export function camperDataFromPreview(row: Record<string, unknown>, importId: string): { ops: CamperData; kid: { name: string; birthDate: string; sex: CamperSex | null; homeChurch: string; data: Record<string, unknown> }; guardian: { name: string; phone: string | null; email: string; data: Record<string, unknown> }; guardian2: SecondGuardian; health: Partial<HealthInfo> } | null {
   if (row.blocked === true || !row.name || !row.birthDate) return null;
   const kidData: Record<string, unknown> = {};
   const docs = documentsOf({ cpf: String(row.cpf ?? ""), rg: String(row.rg ?? "") });
@@ -1047,6 +1067,7 @@ export function camperDataFromPreview(row: Record<string, unknown>, importId: st
     // sex only when the sheet said it explicitly (never guessed); the church column → core `homeChurch`
     kid: { name: String(row.name), birthDate: String(row.birthDate), sex: row.probableGender === "F" || row.probableGender === "M" ? row.probableGender : null, homeChurch: String(row.church ?? "").trim(), data: kidData },
     guardian: { name: String(row.guardianName ?? ""), phone: (row.guardianPhone as string | null) ?? null, email: String(row.guardianEmail ?? ""), data: guardianDocs.length ? { document: guardianDocs } : {} },
+    guardian2: secondGuardianOf(row),
     health: {
       allergies: (row.allergies as string[]) ?? [],
       drugAllergies: (row.drugAllergies as string[]) ?? [],
@@ -1098,6 +1119,31 @@ export async function publishImportDrafts(importId: string): Promise<void> {
  * the worker, which writes health straight to persons-api with the importer's
  * token sealed on the import job (decision 50).
  */
+/** A kid imported whose health core refused (read or write) — nothing was overwritten; the care team completes it. */
+function healthNote(row: Record<string, unknown>): Record<string, unknown> {
+  return { row: row.row, name: row.name, reason: "Importado; o IPAlpha não deixou gravar a saúde — nada do que já existia foi alterado" };
+}
+
+/**
+ * The row's second responsável joins the SAME kid (persons `POST /links` +
+ * involved + `responsavel` role — decision 38). A refusal / bad celular is a
+ * note on the row; the kid stays imported. Same celular as the first = skipped.
+ */
+async function linkSecondGuardian(ctx: ImportCoreContext, kidId: string, firstPhone: string | null, second: SecondGuardian, row: Record<string, unknown>, notes: Record<string, unknown>[]): Promise<void> {
+  if (!second) return;
+  if ("invalid" in second) {
+    notes.push({ row: row.row, name: row.name, reason: "Importado; o 2º responsável não foi ligado (nome ou celular ausente/inválido)" });
+    return;
+  }
+  if (second.phone === firstPhone) return;
+  try {
+    await addResponsible(ctx.tokens, { kidId, guardian: { name: second.name, phone: second.phone }, editionId: ctx.editionId });
+  } catch (err) {
+    if (!(err instanceof IpalphaRejected)) throw err;
+    notes.push({ row: row.row, name: row.name, reason: `Importado; o IPAlpha recusou o 2º responsável (${err.reason})` });
+  }
+}
+
 export async function insertImportCampers(rows: Record<string, unknown>[], importId: string, ctx: ImportCoreContext): Promise<{ inserted: number; updated: number; skipped: Record<string, unknown>[] }> {
   let inserted = 0;
   let updated = 0;
@@ -1129,13 +1175,13 @@ export async function insertImportCampers(rows: Record<string, unknown>[], impor
       try {
         // the sheet's responsável joins the SAME kid (link, decision 38) — never a second copy of the kid
         if (data.guardian.phone && data.guardian.name) await addResponsible(ctx.tokens, { kidId: existingId, guardian: { name: data.guardian.name, phone: data.guardian.phone, email: data.guardian.email || undefined, data: data.guardian.data }, editionId: ctx.editionId });
-        const current = (await readHealth(ctx.tokens.persons, existingId)) ?? { ...EMPTY_HEALTH };
-        const patch = mergeHealth(current, await healthToCore(ctx.tokens.persons, data.health));
-        if (Object.keys(patch).length) await writeHealth(ctx.tokens.persons, existingId, patch, current);
+        // the sheet's health is merged over what core holds — never replacing it
+        if ((await mergeHealthInto(ctx.tokens.persons, existingId, data.health)) === "refused") skipped.push(healthNote(row));
       } catch (err) {
         if (!(err instanceof IpalphaRejected)) throw err;
         skipped.push({ row: row.row, name: row.name, reason: `Atualizado no acampamento; o IPAlpha recusou parte dos dados (${err.reason})` });
       }
+      await linkSecondGuardian(ctx, existingId, data.guardian.phone, data.guardian2, row, skipped);
       updated++;
       continue;
     }
@@ -1144,7 +1190,7 @@ export async function insertImportCampers(rows: Record<string, unknown>[], impor
       continue;
     }
     try {
-      const { kidId } = await registerKid(ctx.tokens, { kid: data.kid, guardian: { name: data.guardian.name, phone: data.guardian.phone, email: data.guardian.email || undefined, data: data.guardian.data }, editionId: ctx.editionId, health: data.health });
+      const { kidId, medical } = await registerKid(ctx.tokens, { kid: data.kid, guardian: { name: data.guardian.name, phone: data.guardian.phone, email: data.guardian.email || undefined, data: data.guardian.data }, editionId: ctx.editionId, health: data.health });
       if (await findCamperById(kidId)) {
         await updateCamper(kidId, data.ops);
         updated++;
@@ -1152,6 +1198,8 @@ export async function insertImportCampers(rows: Record<string, unknown>[], impor
         await insertCamper(kidId, data.ops);
         inserted++;
       }
+      if (medical === "refused") skipped.push(healthNote(row));
+      await linkSecondGuardian(ctx, kidId, data.guardian.phone, data.guardian2, row, skipped);
     } catch (err) {
       // a refusal for THIS row is reported; a revoked token / outage stops the apply (the caller answers it)
       if (!(err instanceof IpalphaRejected)) throw err;

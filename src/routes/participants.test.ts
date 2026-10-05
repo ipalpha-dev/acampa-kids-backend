@@ -124,6 +124,47 @@ describe("campers: camp ops + names live, health only with the acting role token
     expect(sent?.recipients[0].variables).toMatchObject({ kid: "Ana" });
   });
 
+  test("a responsável reads / edits their kid's health with THEIR responsavel role token (core's onlyInvolved rule, §19)", async () => {
+    const token = await sessionFor(keys, PARENT, ["responsavel"]);
+    const role = (call: { headers: Headers }) => JSON.parse(atob(call.headers.get("authorization")!.split(".")[1])).projectRole;
+    const page = await call("GET", `/api/campers/${KID_A}`, undefined, token);
+    expect(page.body.camper.health).toMatchObject({ healthNotes: "asma leve" });
+    expect(page.body.camper.healthForbidden).toBeUndefined();
+    expect(core.callsTo(`GET /persons/${KID_A}/data/medical`).map(role)).toEqual(["responsavel"]);
+    expect((await call("PUT", `/api/campers/${KID_A}/parent`, { foodRestrictions: "sem glúten" }, token)).status).toBe(200);
+    expect(core.callsTo(`PATCH /persons/${KID_A}/data/medical`).map(role)).toEqual(["responsavel"]);
+    // never the app client / a system token for a family's health
+    expect(core.calls.filter((c) => c.path.startsWith("/persons/") && (c.headers.get("authorization") ?? "").startsWith("Bearer system:"))).toEqual([]);
+  });
+
+  test("core refusing a responsável's health (403) is told apart from 'nothing informed' and nothing is written", async () => {
+    world.medicalForbidden.add(KID_A);
+    const token = await sessionFor(keys, PARENT, ["responsavel"]);
+    const page = await call("GET", `/api/campers/${KID_A}`, undefined, token);
+    expect(page.status).toBe(200);
+    expect(page.body.camper).toMatchObject({ health: null, healthForbidden: true, name: "Ana Pequena" });
+    const res = await call("PUT", `/api/campers/${KID_A}/parent`, { foodRestrictions: "sem glúten", generalNotes: "dorme cedo" }, token);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatchObject({ code: "CORE_FORBIDDEN", reason: "medicalForbidden" });
+    expect(core.callsTo(`PATCH /persons/${KID_A}/data/medical`)).toHaveLength(0);
+    expect(world.health.get(KID_A)).toMatchObject({ healthNotes: "asma leve", allergies: ["amendoim"] });
+    expect(await (await rawDb()).collection("participants").findOne({ personId: KID_A })).toMatchObject({ generalNotes: "gosta de pintar" });
+  });
+
+  test("prescriptions carry each kid's drug allergies (+ allergies / conditions), read live with the acting saúde token", async () => {
+    world.health.set(KID_A, { ...world.health.get(KID_A)!, drugAllergies: ["dipirona"], healthIssues: ["asma"] });
+    const token = await sessionFor(keys, MEDIC, ["saude"]);
+    const res = await call("GET", "/api/medications/prescriptions", undefined, token);
+    expect(res.status).toBe(200);
+    expect(res.body.items).toEqual([{ personId: KID_A, name: "Ana Pequena", medications: [expect.objectContaining({ name: "Ritalina" })], drugAllergies: ["dipirona"], allergies: ["amendoim"], healthIssues: ["asma"] }]);
+    const read = core.callsTo("GET /projects/project-test-1/people");
+    expect(JSON.parse(atob(read[0].headers.get("authorization")!.split(".")[1]))).toMatchObject({ projectRole: "saude" });
+    expect(read[0].query.get("kinds") ?? read[0].query.getAll("kind").join(",")).toContain("medical");
+    // nothing about health rests in Acampa
+    const db = await rawDb();
+    for (const name of ["participants", "medicationDoses", "camperChangeLog"]) expect(JSON.stringify(await db.collection(name).find({}).toArray())).not.toContain("dipirona");
+  });
+
   test("bus check-in: the responsáveis are told by person id (template), never a phone", async () => {
     await updateSettings({ notifications: { ...(await import("../models/settings")).DEFAULT_SETTINGS.notifications, busCheckin: true } });
     const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
@@ -148,15 +189,18 @@ describe("campers: camp ops + names live, health only with the acting role token
     expect(world.memberships).toContainEqual(expect.objectContaining({ personId: kidId, role: "participante", editionId: TEST_EDITION, involved: [expect.objectContaining({ personId: res.body.responsible.personId })] }));
     expect(world.memberships).toContainEqual(expect.objectContaining({ personId: res.body.responsible.personId, role: "responsavel", editionId: TEST_EDITION }));
     expect(world.health.get(kidId)).toMatchObject({ healthNotes: "nenhuma" });
-    // health travels IN the registration (core RegistrationPersonDto `data.medical`), no separate write
-    expect(reg.children[0].data.medical).toMatchObject({ healthNotes: "nenhuma", allergies: [] });
-    expect(core.callsTo(`PATCH /persons/${kidId}/data/medical`)).toHaveLength(0);
+    // health NEVER travels in the registration (core would replace an existing kid's block): written after it
+    expect(reg.children?.[0]?.data?.medical).toBeUndefined();
+    expect(core.callsTo(`PATCH /persons/${kidId}/data/medical`)).toHaveLength(1);
+    // a kid core just created has nothing to keep: no read before the write
+    expect(core.callsTo(`GET /persons/${kidId}/data/medical`)).toHaveLength(0);
+    expect(res.body.medical).toBe("written");
     const row = await (await rawDb()).collection("participants").findOne({ personId: kidId });
     expect(JSON.stringify(row)).not.toContain("Carla");
     expect(JSON.stringify(row)).not.toContain("98888");
   });
 
-  test("register sends core what it takes: sex, homeChurch and data {school, emergencyContact, medical}", async () => {
+  test("register sends core what it takes: sex, homeChurch and data {school, emergencyContact}; health merged after", async () => {
     const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
     const res = await call(
       "POST",
@@ -169,12 +213,52 @@ describe("campers: camp ops + names live, health only with the acting role token
     );
     expect(res.status).toBe(201);
     const child = (core.callsTo("POST /registrations")[0].json as Record<string, any>).children[0];
-    expect(child).toMatchObject({ name: "Lia Nova", sex: "female", homeChurch: "IP Alphaville", data: { school: { name: "Escola Sol", grade: "3º ano" }, emergencyContact: { name: "Vó Lu", phone: "+5511966665555", relation: "avó" }, medical: { allergies: ["amendoim"] } } });
+    expect(child).toMatchObject({ name: "Lia Nova", sex: "female", homeChurch: "IP Alphaville", data: { school: { name: "Escola Sol", grade: "3º ano" }, emergencyContact: { name: "Vó Lu", phone: "+5511966665555", relation: "avó" } } });
+    expect(child.data.medical).toBeUndefined();
+    expect(world.health.get(res.body.camper.id)).toMatchObject({ allergies: ["amendoim"] });
     expect(world.sex.get(res.body.camper.id)).toBe("female");
     // nothing that was not said is sent (sex is never guessed)
     await call("POST", "/api/campers/register", { name: "teo novo", birthDate: "2017-05-07", responsible: { name: "rui novo", phone: "11977771111" } }, token);
     const plain = (core.callsTo("POST /registrations")[1].json as Record<string, any>).children[0];
     expect(plain).toEqual({ name: "Teo Novo", birthDate: "2017-05-07" });
+  });
+
+  test("register of a kid core already knows NEVER erases their health: lists unioned, texts kept, read with the coordenação token", async () => {
+    const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    // the family registered Mia last year: core knows the responsável's phone and the kid (linked)
+    world.names.set("person-mia", "Mia Antiga");
+    world.births.set("person-mia", "2016-01-10");
+    world.names.set("person-rosa", "Rosa Antiga");
+    world.phones.set("+5511933332222", "person-rosa");
+    world.links.push({ subjectId: "person-mia", agentId: "person-rosa" });
+    world.health.set("person-mia", { allergies: ["amendoim"], drugAllergies: ["dipirona"], healthIssues: [], neurodivergent: true, medications: [{ name: "Ritalina", dose: "10mg", times: ["08:00"], asNeeded: false, notes: "" }], foodRestrictions: "sem lactose", healthNotes: "asma leve", weightKg: 28, insurance: "Unimed", insuranceCard: "123" });
+    const res = await call("POST", "/api/campers/register", { name: "mia antiga", birthDate: "2016-01-10", responsible: { name: "rosa antiga", phone: "(11) 93333-2222" }, health: { allergies: ["amendoim"], healthNotes: "usa óculos", insurance: "" } }, token);
+    expect(res.status).toBe(201);
+    expect(res.body.camper.id).toBe("person-mia");
+    expect(res.body.medical).toBe("written");
+    const h = world.health.get("person-mia")!;
+    expect(h).toMatchObject({ allergies: ["amendoim"], drugAllergies: ["dipirona"], neurodivergent: true, foodRestrictions: "sem lactose", weightKg: 28, insurance: "Unimed", insuranceCard: "123" });
+    expect(h.medications).toHaveLength(1);
+    expect(h.healthNotes).toBe("asma leve usa óculos");
+    // read first, with the acting coordenação token (logged by core), then one merged write
+    const read = core.callsTo("GET /persons/person-mia/data/medical");
+    expect(read).toHaveLength(1);
+    expect(JSON.parse(atob(read[0].headers.get("authorization")!.split(".")[1]))).toMatchObject({ projectRole: "coordenacao" });
+  });
+
+  test("register of a kid whose health core will not let the coordenação read writes nothing over it", async () => {
+    const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    world.names.set("person-mia", "Mia Antiga");
+    world.births.set("person-mia", "2016-01-10");
+    world.phones.set("+5511933332222", "person-rosa");
+    world.links.push({ subjectId: "person-mia", agentId: "person-rosa" });
+    world.health.set("person-mia", { allergies: ["amendoim"], healthNotes: "asma leve" });
+    world.medicalForbidden.add("person-mia");
+    const res = await call("POST", "/api/campers/register", { name: "mia antiga", birthDate: "2016-01-10", responsible: { name: "rosa", phone: "11933332222" }, health: { healthNotes: "outra coisa" } }, token);
+    expect(res.status).toBe(201);
+    expect(res.body.medical).toBe("refused");
+    expect(core.callsTo("PATCH /persons/person-mia/data/medical")).toHaveLength(0);
+    expect(world.health.get("person-mia")).toEqual({ allergies: ["amendoim"], healthNotes: "asma leve" });
   });
 
   test("register refuses an unknown sex or an unreadable emergency contact before calling core", async () => {

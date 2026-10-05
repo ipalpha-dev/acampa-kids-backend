@@ -14,10 +14,10 @@ import { serializeStaffList } from "./staff";
 import { camperVisibility, canParentEdit, canRunBusCheckin, canRunCheckin, resolveScope, type Scope } from "../services/scope";
 import { campInProgress, campPeriod } from "../services/camp";
 import { actingToken, campEditionId, coordinationContext, coordinationToken } from "../services/acting";
-import { addResponsible, healthToCore, registrationData, registrationExtras, registrationProfile } from "../services/coreRegistration";
+import { addResponsible, healthToCore, mergeHealthInto, registrationData, registrationExtras, registrationProfile } from "../services/coreRegistration";
 import { coreClient } from "../services/ipalpha";
 import { PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
-import { hasHealthInfo, healthCounts, matchesHealthTag, nameMatches, namesOf, pageOf, readHealth, readHealthMany, tagFilter, writeHealth } from "../services/people";
+import { hasHealthInfo, healthCounts, matchesHealthTag, nameMatches, namesOf, pageOf, readHealth, readHealthMany, readHealthState, tagFilter, writeHealth } from "../services/people";
 import { responsiblesOf } from "../services/members";
 import { normalizeBrazilPhone, titleCaseName } from "../utils";
 
@@ -312,6 +312,11 @@ campers.get("/checkin/log", requireManager, async (c) => c.json({ log: (await li
 /**
  * GET /api/campers/:id — the kid's page: camp ops + name + (when the role may)
  * health and the responsáveis (ids + names). Out of scope = 404 (no probing).
+ * Health is read with the ACTING role token — for a family that is the
+ * `responsavel` token, and core lets it reach only their own kids (§19
+ * `onlyInvolved`). When core refuses, `healthForbidden: true` (and `health:
+ * null`) so the screen says "not available for your profile" instead of
+ * "nothing informed".
  */
 campers.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
   const k = await findCamperById(c.req.param("id"));
@@ -321,8 +326,8 @@ campers.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
   const names = await namesOf([k._id]);
   const withHealth = healthAllowed(scope, k);
   const vis = camperVisibility(scope, k);
-  const [health, responsibles] = await Promise.all([
-    withHealth ? readHealth(actingToken(c, PERSONS_RESOURCE), k._id) : null,
+  const [healthState, responsibles] = await Promise.all([
+    withHealth ? readHealthState(actingToken(c, PERSONS_RESOURCE), k._id) : null,
     vis === "full" || vis === "care" ? responsiblesOf([k._id]).then((m) => m.get(k._id) ?? []) : Promise.resolve([] as string[]),
   ]);
   const rNames = await namesOf(responsibles);
@@ -332,7 +337,7 @@ campers.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
       name: names.get(k._id)?.name ?? "",
       nickname: names.get(k._id)?.nickname ?? null,
       sex: names.get(k._id)?.sex ?? null,
-      ...(withHealth ? { health } : {}),
+      ...(healthState ? { health: healthState.health, ...(healthState.forbidden ? { healthForbidden: true } : {}) } : {}),
       responsibles: responsibles.map((id) => ({ personId: id, name: rNames.get(id)?.name ?? "" })),
     },
   });
@@ -424,7 +429,10 @@ async function applyKidEdit(c: Context<{ Variables: AuthVariables }>, k: Camper,
   const token = actingToken(c, PERSONS_RESOURCE);
   // option ids may be the church health lists' (preferred) or Acampa's import categories — mapped by label
   if (["allergies", "drugAllergies", "healthIssues"].some((f) => f in health.patch)) health.patch = await healthToCore(token, health.patch);
-  const current = Object.keys(health.patch).length ? await readHealth(token, k._id) : null;
+  const state = Object.keys(health.patch).length ? await readHealthState(token, k._id) : null;
+  // a block the role may not read is never written over (it would erase what is there) — nothing is saved
+  if (state?.forbidden) return c.json({ error: { code: "CORE_FORBIDDEN", reason: "medicalForbidden", message: "O IPAlpha não permitiu esta operação para o seu perfil." } }, 403);
+  const current = state?.health ?? null;
   const changed: CamperChangeField[] = [];
   for (const f of Object.keys(health.patch) as (keyof HealthInfo)[]) if (!current || !same(current[f], health.patch[f])) changed.push(f as CamperChangeField);
   let notes: string | undefined;
@@ -471,8 +479,11 @@ campers.use("/*", requireManager);
  * the coordenação token (§12): persons registration (responsible + child +
  * link), memberships `participante` (involved responsável) + `responsavel`
  * in the camp's edition, then the participant row. The kid's optional `sex`
- * ("F" | "M"), `homeChurch`, `school {name, grade}`, `emergencyContact` and
- * `health` travel IN the registration (core `RegistrationPersonDto`).
+ * ("F" | "M"), `homeChurch`, `school {name, grade}` and `emergencyContact`
+ * travel IN the registration (core `RegistrationPersonDto`); `health` is
+ * merged afterwards over what core already holds (a kid core knows keeps
+ * every allergy / medicine — `mergeHealthInto`). Answer `medical`:
+ * "written" | "unchanged" | "refused".
  * Body: `{ name, birthDate, responsible: { name, phone }, sex?, homeChurch?, school?, emergencyContact?, health?, ...camp ops }`.
  */
 campers.post("/register", async (c) => {
@@ -505,7 +516,7 @@ campers.post("/register", async (c) => {
   if (bad) return fail(c, "CARETAKER_INVALID", bad, 409);
 
   const client = coreClient();
-  const kidData = await registrationData(personsToken, extras.data, health.patch);
+  const kidData = registrationData(extras.data);
   const reg = await client.register(personsToken, { role: PARTICIPANT_ROLE, responsible: { name: respName, phone: respPhone }, children: [{ name, birthDate, ...registrationProfile(extras), ...(kidData ? { data: kidData } : {}) }] });
   const child = reg.children[0];
   if (!reg.responsible || !child) return fail(c, "REGISTRATION_FAILED", "O IPAlpha não confirmou o cadastro.", 502);
@@ -518,10 +529,11 @@ campers.post("/register", async (c) => {
     involved: [{ personId: reg.responsible.personId, purpose: "responsible", kinds: [] }],
   });
   await client.addMembership(projectsToken, { personId: reg.responsible.personId, role: RESPONSIBLE_ROLE, editionId });
+  const medical = await mergeHealthInto(personsToken, child.personId, health.patch, { isNew: child.created });
   const created = await insertCamper(child.personId, { ...EMPTY_CAMPER, ...data });
   publish("campers", "bedrooms");
   void notifyCamperChange(null, created);
-  return c.json({ camper: { ...serializeCamper(created), name }, responsible: { personId: reg.responsible.personId, created: reg.responsible.created } }, 201);
+  return c.json({ camper: { ...serializeCamper(created), name }, responsible: { personId: reg.responsible.personId, created: reg.responsible.created }, medical }, 201);
 });
 
 /**
