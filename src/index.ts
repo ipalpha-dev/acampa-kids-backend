@@ -29,7 +29,7 @@ import { backfillGalleryFaces } from "./services/galleryFaces";
 import { ensureFirstCamp } from "./services/campMigration";
 import { ensureCampsCollection } from "./models/camps";
 import { activeCamp, activeCampId, withCamp } from "./services/campContext";
-import { markBootError, markBooted, registerInfo } from "./services/readiness";
+import { clearIndexFailures, markBootError, markBooted, registerInfo } from "./services/readiness";
 import { dispatchState, startDispatchChannel } from "./services/dispatchChannel";
 import { ensureDispatchDeliveryIndexes } from "./models/dispatchDeliveries";
 import { ensureImportJobIndexes, pruneImportJobs } from "./models/importJobs";
@@ -52,8 +52,13 @@ Bun.serve({
 });
 console.log(`🏕️  Camping backend listening on http://localhost:${port} (booting…)`);
 
-/** Mongo + indexes + the active camp; retried with backoff until it works (the pod stays live, not ready). */
+/**
+ * Mongo + indexes + the active camp; retried with backoff until Mongo answers (the pod stays live, not ready).
+ * Indexes never block it (decision 91): an index Mongo refuses is logged by name + code, `/ready` reports
+ * `indexes: "degraded"` (still 200) and the app serves without it — see services/indexes.ts.
+ */
 async function boot(): Promise<void> {
+  clearIndexFailures();
   console.log("Connecting to MongoDB…");
   await getDb();
   await ensureCampsCollection();
@@ -79,7 +84,7 @@ async function boot(): Promise<void> {
   await ensureMedicationIndexes();
   await ensureFileIndexes();
   await ensureSmsUsageIndex(); // the SMS cost counter on the "Sobre" page
-  await ensureTeamIndexes(); // also migrates the legacy "equipe" category into teams
+  await ensureTeamIndexes();
   await ensureScoreIndexes();
   await ensureGalleryIndexes();
   console.log(`MongoDB connected → ${config.dbName}`);

@@ -2,21 +2,17 @@ import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { CampEvent, EventAssignment, RoomRole, ScheduleRole } from "../types";
 import { ROOM_ROLES } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 const ROLES = "schedule_roles";
 const EVENTS = "schedule_events";
 
 // ── roles ───────────────────────────────────────────────────────────────────
 
-/**
- * `forRoomRoles: RoomRole[]` — the positions the função falls on by itself.
- * Older documents held a boolean `forEveryone` ("vale para toda a equipe"),
- * which is exactly both positions; `false` meant "escalada pessoa por pessoa",
- * i.e. no position at all.
- */
+/** `forRoomRoles: RoomRole[]` — the positions the função falls on by itself (none stored = nobody automatically). */
 function toRoomRoles(doc: Record<string, unknown>): RoomRole[] {
   if (Array.isArray(doc.forRoomRoles)) return ROOM_ROLES.filter((r) => (doc.forRoomRoles as unknown[]).includes(r));
-  return doc.forEveryone === true ? [...ROOM_ROLES] : [];
+  return [];
 }
 
 function toRole(doc: Record<string, unknown> | null): ScheduleRole | null {
@@ -94,8 +90,7 @@ function toEvent(doc: Record<string, unknown> | null): CampEvent | null {
     startTime: doc.startTime as string,
     endTime: (doc.endTime as string) ?? null,
     notes: (doc.notes as string) ?? "",
-    // legacy docs stored [{ roleId, slots }] — normalise to plain ids
-    roles: ((doc.roles as unknown[]) ?? []).map((r) => (typeof r === "string" ? r : (r as { roleId: string }).roleId)),
+    roles: ((doc.roles as unknown[]) ?? []).filter((r): r is string => typeof r === "string"),
     // missing on old docs: parents already saw every event
     visibleToParents: doc.visibleToParents !== false,
     // legacy docs have no detailColor — default to "" (no tint)
@@ -150,18 +145,8 @@ export async function unassignStaffEverywhere(staffId: string): Promise<void> {
 
 export async function ensureScheduleIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(ROLES).createIndex({ name: 1 }, { unique: true, collation: { locale: "pt", strength: 1 } });
-  try {
-    await db.collection(EVENTS).dropIndex("day_1_startTime_1"); // legacy (day number)
-  } catch {
-    // may not exist
-  }
-  await db.collection(EVENTS).createIndex({ date: 1, startTime: 1 });
-  try {
-    await db.collection(EVENTS).dropIndex("roles.roleId_1"); // legacy shape
-  } catch {
-    // may not exist
-  }
-  await db.collection(EVENTS).createIndex({ roles: 1 });
-  await db.collection(EVENTS).createIndex({ "assignments.staffId": 1 });
+  await ensureIndex(db.collection(ROLES), { name: 1 }, { unique: true, collation: { locale: "pt", strength: 1 } });
+  await ensureIndex(db.collection(EVENTS), { date: 1, startTime: 1 });
+  await ensureIndex(db.collection(EVENTS), { roles: 1 });
+  await ensureIndex(db.collection(EVENTS), { "assignments.staffId": 1 });
 }

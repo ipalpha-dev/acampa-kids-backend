@@ -1,4 +1,5 @@
 import { getDb } from "../db";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "camperLookups";
 
@@ -23,8 +24,8 @@ export async function insertCamperLookup(data: Omit<CamperLookup, "_id">): Promi
 export async function ensureCamperLookupIndexes(): Promise<void> {
   const db = await getDb();
   await Promise.all([
-    db.collection(COLLECTION).createIndex({ at: -1 }),
-    db.collection(COLLECTION).createIndex({ byStaffId: 1, belonged: 1, camperId: 1 }),
-    db.collection(COLLECTION).createIndex({ byStaffId: 1, at: -1 }),
+    ensureIndex(db.collection(COLLECTION), { at: -1 }),
+    ensureIndex(db.collection(COLLECTION), { byStaffId: 1, belonged: 1, camperId: 1 }),
+    ensureIndex(db.collection(COLLECTION), { byStaffId: 1, at: -1 }),
   ]);
 }

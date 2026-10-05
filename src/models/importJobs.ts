@@ -1,4 +1,5 @@
 import { rawDb } from "../db";
+import { ensureIndex } from "../services/indexes";
 
 /**
  * `importJobs` (decision 77, approved shape — ids only): the persons-api imports
@@ -100,7 +101,7 @@ export async function pruneImportJobs(now = Date.now()): Promise<number> {
 
 export async function ensureImportJobIndexes(): Promise<void> {
   const db = await rawDb();
-  await db.collection(COLLECTION).createIndex({ status: 1 });
+  await ensureIndex(db.collection(COLLECTION), { status: 1 });
 }
 
 /** tests only */

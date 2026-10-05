@@ -1,5 +1,6 @@
 import { getDb } from "../db";
 import { currentCampId } from "../services/campContext";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "userCampState";
 
@@ -127,5 +128,7 @@ export async function deleteUserCampStates(campId: string, personIds?: string[])
 
 export async function ensureUserCampStateIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ personId: 1, campId: 1 }, { unique: true });
+  // decision 91: the key moved from `userId` to `personId` → a new name, and partial so a row without
+  // `personId` (an older version's `userId` row) never makes the unique index fail
+  await ensureIndex(db.collection(COLLECTION), { personId: 1, campId: 1 }, { name: "personId_campId_unique_v2", unique: true, partialFilterExpression: { personId: { $exists: true } } });
 }

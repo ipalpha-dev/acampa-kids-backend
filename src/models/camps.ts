@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { rawDb } from "../db";
 import { refreshActiveCamp } from "../services/campContext";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "camps";
 
@@ -93,14 +94,10 @@ export async function updateCamp(id: string, patch: { label?: string; year?: num
   return toCamp(res as Record<string, unknown> | null);
 }
 
-/** Unique-active guard: at most one `{active:true}` document at a time. Best-effort — logs and continues if the server can't create a partial index. */
+/** Unique-active guard: at most one `{active:true}` document at a time. Best-effort — a refused index is logged by name and degrades `/ready` (decision 91). */
 export async function ensureCampsCollection(): Promise<void> {
   const db = await rawDb();
-  try {
-    await db.collection(COLLECTION).createIndex({ active: 1 }, { unique: true, partialFilterExpression: { active: true } });
-  } catch (err) {
-    console.error("camps: could not create the unique-active index", err);
-  }
+  await ensureIndex(db.collection(COLLECTION), { active: 1 }, { unique: true, partialFilterExpression: { active: true } });
 }
 
 export interface CampDeleteOtp {

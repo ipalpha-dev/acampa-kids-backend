@@ -42,6 +42,11 @@ Do NOT:
   persons-api link request (`routes/linkRequests.ts`, decision 80) — registered without child / membership,
   proposed with the coordenação token, accepted or declined by the family with THEIR `responsavel` token;
 - check a peer (core, dispatch) in `/ready` — only Mongo + boot; peers fail at call time;
+- let an index block boot (decision 91): every index goes through `services/indexes.ts#ensureIndex` (logs name +
+  code only, `/ready` 200 with `indexes: "degraded"`); an index whose keys change gets a NEW name;
+- read, migrate, export or show the assistant any collection / field of an older version (decision 90: the old
+  DB is dropped at cut-over). Backup (`services/backupScope.ts`) and assistant (`services/assistantTools.ts`) are
+  ALLOWLISTS — a new collection / field is added there explicitly;
 - send a role token, a phone or health to the browser outside the role's own reads;
 - put person data in the realtime snapshot (camp-ops records only);
 - add a local SMS / e-mail / OTP path — answer `503 IPALPHA_UNAVAILABLE` when core is down;

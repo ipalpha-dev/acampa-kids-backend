@@ -120,23 +120,34 @@ kubectl -n ipalpha-kids rollout restart deploy/acampa-2025-backend
   reconnect. MongoDB also uses `Recreate` to avoid two writers on its data files.
 - There is **no worker Deployment any more** (decision 58): spreadsheet imports
   run in persons-api. Delete the old worker Deployment and the `worker-secret`
-  key when rolling this version out. Old `camperImports` /
-  `camperImportDictionary` collections are no longer read (POC data: drop them
-  by hand; nothing migrates them).
+  key when rolling this version out.
 - Probes: `GET /live` (always 200) for liveness, `GET /ready` (200 only when
   boot finished and MongoDB answers; 503 `{ready, checks, info}` otherwise —
   `info.dispatch` shows the app-channel socket state and never gates) for
   readiness/startup. The server listens before MongoDB connects; `/api/*`
   answers 503 `STARTING` until boot finished.
+- **Indexes never block boot (decision 91).** An index MongoDB refuses
+  (duplicate keys under a unique index, an index of the same name with other
+  keys / options…) is logged once as `[indexes] <collection>.<name> not created
+  (code <n> <CodeName>)` — the name and the error code only, never the
+  message (a duplicate-key message carries document values) — and boot goes
+  on. `/ready` then stays **200** with `checks.indexes: "degraded"`, so the pod
+  keeps serving (slower queries / no uniqueness guard on that index); only
+  MongoDB itself being down answers 503. Fix the data or drop the conflicting
+  index by hand, then restart the backend to re-create it. Indexes whose keys
+  changed in the IPAlpha rewrite carry new names (`*_v2`: e.g.
+  `campId_1_dose_scheduled_unique_v2`, `personId_campId_unique_v2`), so they never
+  collide with an index an older version left behind.
 - Keep ONE backend replica: dispatch keeps exactly one app-channel socket per
   app (a second instance would replace the first; the replaced one stops).
-- The old `healthQueue` collection is no longer used (decision 50). Nothing
-  migrates it: its TTL index empties it within 7 days; backups never dump it.
-- Startup creates indexes and performs one-off migrations (including transports,
-  teams, parent-edit stamps, and admin roster entries). Back up MongoDB before
-  publishing. A code rollback does **not** undo these data migrations.
-- Legacy images in MongoDB migrate lazily when read; no manual copy is needed.
-  Do not upload local development `data/` to production: file metadata must match
+- Startup only creates indexes (see above) and guarantees one active camp; it
+  runs **no data migration** and reads no collection or field of an older
+  version (decision 90).
+- Backups (`bun run scripts/backup.ts`) dump an explicit ALLOWLIST of this
+  version's collections (`src/services/backupScope.ts`); a restore writes only
+  those. Sessions, sign-ins in flight, import jobs and any leftover of an older
+  version are never exported.
+- Do not upload local development `data/` to production: file metadata must match
   the target database. Runtime pictures, `.env`, and scratch files are excluded
   from Git/build contexts.
 - Check Settings → notification toggles before real use. Do not
@@ -145,13 +156,37 @@ kubectl -n ipalpha-kids rollout restart deploy/acampa-2025-backend
 ## Boot and the IPAlpha cut-over
 
 At boot `ensureFirstCamp()` (`services/campMigration.ts`) only guarantees one
-active camp; there is **no data migration** (decision 33). People, roles and
+active camp; there is **no data migration** (decisions 33, 90). People, roles and
 contacts live in IPAlpha: before the first camp on this version, provision the
 Acampa app / project / editions / clients through the core seams (deployment
 §8) and seed the message templates (`bun scripts/templates-json.ts` prints the
-catalog; or Settings → Mensagens → "Criar modelos"). Old `campers` / `staff` /
-`users` collections of a previous version are not read any more — drop them
-once a v2 backup is archived. Backups are format v3; older files are refused.
+catalog; or Settings → Mensagens → "Criar modelos"). Backups are format v3;
+older files are refused.
+
+### Cut-over checklist (decision 90 — Kevyn: "clean all the data. no need to backup")
+
+The old Acampa data is **not** kept: the production `camping` database is
+dropped entirely, **without a backup**, and the new version starts empty.
+
+1. Stop the old backend so nothing writes meanwhile:
+   `kubectl -n ipalpha-kids scale deploy/acampa-2025-backend --replicas=0`
+   (and delete the old worker Deployment + the `worker-secret` key).
+2. **Drop the whole `camping` database** (no backup, no export):
+
+   ```bash
+   kubectl -n ipalpha-kids exec deploy/acampa-2025-mongo -- sh -c \
+     'mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+        --authenticationDatabase admin --eval "db.getSiblingDB(\"camping\").dropDatabase()"'
+   ```
+
+   Check it is gone (`--eval "db.adminCommand({listDatabases:1}).databases.map(d=>d.name)"`).
+3. Empty the pictures volume (`/mnt/k8s-data/ipalpha/kids/acampa-2025/pictures`):
+   its files belonged to the dropped database's metadata and can no longer be
+   reached — kids' photos are not kept around unreachable.
+4. Publish the new version (`./publish -d`, then `./publish`) and verify the
+   running image, the rollout (old pods gone) and `GET /ready` →
+   `{ ready: true, checks: { mongo: "ok", indexes: "ok" } }`.
+5. Provision core (above) and create the first edition's data in the app.
 
 ## Verification
 

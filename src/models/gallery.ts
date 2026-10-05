@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { getDb } from "../db";
 import { config } from "../config";
 import type { GalleryPhoto } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 /**
  * The camp's PHOTO ALBUM. Each photo is one document here plus one document
@@ -232,15 +233,8 @@ export async function listUnindexedGalleryPhotos(limit = 25): Promise<GalleryPho
 export async function ensureGalleryIndexes(): Promise<void> {
   await mkdir(config.filesDir, { recursive: true });
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ createdAt: -1 });
-  await db.collection(COLLECTION).createIndex({ eventId: 1 }, { sparse: true });
-  await db.collection(COLLECTION).createIndex({ order: -1 });
-  await db.collection(COLLECTION).createIndex({ facesIndexedAt: 1 }, { sparse: true });
-  // publishing moved to settings.galleryPublished: drop the per-photo flags
-  await db.collection(COLLECTION).updateMany({ $or: [{ published: { $exists: true } }, { publishedAt: { $exists: true } }] }, { $unset: { published: "", publishedAt: "" } });
-  // photos from before ordering existed: seed `order` from the upload time once
-  const legacy = (await db.collection(COLLECTION).find({ order: { $exists: false } }, { projection: { createdAt: 1 } }).toArray()) as Record<string, unknown>[];
-  for (const doc of legacy) {
-    await db.collection(COLLECTION).updateOne({ _id: doc._id as never }, { $set: { order: new Date((doc.createdAt as Date) ?? 0).getTime() } });
-  }
+  await ensureIndex(db.collection(COLLECTION), { createdAt: -1 });
+  await ensureIndex(db.collection(COLLECTION), { eventId: 1 }, { sparse: true });
+  await ensureIndex(db.collection(COLLECTION), { order: -1 });
+  await ensureIndex(db.collection(COLLECTION), { facesIndexedAt: 1 }, { sparse: true });
 }

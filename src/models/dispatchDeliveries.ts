@@ -1,4 +1,5 @@
 import { rawDb } from "../db";
+import { ensureIndex } from "../services/indexes";
 
 /**
  * `dispatchDeliveries` — ONLY the ids of the webhook deliveries already
@@ -24,5 +25,5 @@ export async function claimDelivery(id: string): Promise<boolean> {
 
 export async function ensureDispatchDeliveryIndexes(): Promise<void> {
   const db = await rawDb();
-  await db.collection(COLLECTION).createIndex({ at: 1 }, { expireAfterSeconds: TTL_SEC });
+  await ensureIndex(db.collection(COLLECTION), { at: 1 }, { expireAfterSeconds: TTL_SEC });
 }

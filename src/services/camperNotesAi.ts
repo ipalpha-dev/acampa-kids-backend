@@ -249,9 +249,9 @@ const GUIDE: { needs: FieldKey[]; line: string }[] = [
 /**
  * The part of the prompt both modes share: what each field means, the exact
  * output formats and the "where does X go" guide, restricted to the fields
- * of the subject. Tuned against the real registration export (see
- * scripts/notes-ai-test.ts) until Grok, Claude and GPT gave the same field
- * placement.
+ * of the subject. Tuned until Grok, Claude and GPT gave the same field
+ * placement (the prompt lab over the old registration export was removed —
+ * decision 90: old data is never read).
  */
 function fieldSpec(lists: OptionLabels, subject: NotesSubject): string {
   const fields = SUBJECT_FIELDS[subject];

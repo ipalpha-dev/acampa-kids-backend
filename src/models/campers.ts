@@ -1,6 +1,7 @@
 import { getDb } from "../db";
 import type { Camper, CamperChangeLog, CamperCheckin, CheckinKind, CheckinLog } from "../types";
 import { baseOf, importEditedOnInsert, importEditOps, PARTICIPANTS, toCheckin, type WriteSource } from "./participants";
+import { ensureIndex } from "../services/indexes";
 
 export { toCheckin } from "./participants";
 
@@ -198,7 +199,8 @@ export async function clearStaleBirthdayNotices(today: string): Promise<number> 
 
 export async function ensureCamperIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(LOG_COLLECTION).createIndex({ personId: 1, at: -1 });
-  await db.collection(LOG_COLLECTION).createIndex({ at: -1 });
-  await db.collection(CHANGE_LOG_COLLECTION).createIndex({ personId: 1, at: -1 });
+  // keys moved from `camperId` to `personId`: new names (decision 91)
+  await ensureIndex(db.collection(LOG_COLLECTION), { personId: 1, at: -1 }, { name: "personId_at_v2" });
+  await ensureIndex(db.collection(LOG_COLLECTION), { at: -1 });
+  await ensureIndex(db.collection(CHANGE_LOG_COLLECTION), { personId: 1, at: -1 }, { name: "personId_at_v2" });
 }

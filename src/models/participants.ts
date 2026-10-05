@@ -1,5 +1,6 @@
 import { getDb } from "../db";
 import type { CamperCheckin, CoreRole } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 /**
  * `participants` (CONTRACTS §15, approved shape): one row per person per camp
@@ -82,10 +83,10 @@ export async function participantKind(personId: string): Promise<ParticipantKind
 export async function ensureParticipantIndexes(): Promise<void> {
   const db = await getDb();
   // one row per person per camp (the wrapper prefixes campId)
-  await db.collection(PARTICIPANTS).createIndex({ personId: 1 }, { unique: true });
-  await db.collection(PARTICIPANTS).createIndex({ kind: 1, createdAt: 1 });
-  await db.collection(PARTICIPANTS).createIndex({ bedroom: 1 });
-  await db.collection(PARTICIPANTS).createIndex({ team: 1 });
-  await db.collection(PARTICIPANTS).createIndex({ caretakerId: 1 });
-  await db.collection(PARTICIPANTS).createIndex({ qrToken: 1 }, { sparse: true });
+  await ensureIndex(db.collection(PARTICIPANTS), { personId: 1 }, { unique: true });
+  await ensureIndex(db.collection(PARTICIPANTS), { kind: 1, createdAt: 1 });
+  await ensureIndex(db.collection(PARTICIPANTS), { bedroom: 1 });
+  await ensureIndex(db.collection(PARTICIPANTS), { team: 1 });
+  await ensureIndex(db.collection(PARTICIPANTS), { caretakerId: 1 });
+  await ensureIndex(db.collection(PARTICIPANTS), { qrToken: 1 }, { sparse: true });
 }

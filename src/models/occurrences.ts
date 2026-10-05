@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { CoreRole, Occurrence, OccurrenceGroup } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "occurrences";
 const GROUPS = new Set<OccurrenceGroup>(["admin", "organizer", "medical"]);
@@ -46,9 +47,10 @@ export async function insertOccurrence(data: OccurrenceData): Promise<Occurrence
 export async function ensureOccurrenceIndexes(): Promise<void> {
   const db = await getDb();
   await Promise.all([
-    db.collection(COLLECTION).createIndex({ createdAt: -1 }),
-    db.collection(COLLECTION).createIndex({ createdByGroup: 1, createdAt: -1 }),
-    db.collection(COLLECTION).createIndex({ campers: 1, createdAt: -1 }),
-    db.collection(COLLECTION).createIndex({ staff: 1, createdAt: -1 }),
+    ensureIndex(db.collection(COLLECTION), { createdAt: -1 }),
+    ensureIndex(db.collection(COLLECTION), { createdByGroup: 1, createdAt: -1 }),
+    // `campers.id` / `staff.id` became plain person-id arrays: new names (decision 91)
+    ensureIndex(db.collection(COLLECTION), { campers: 1, createdAt: -1 }, { name: "campers_createdAt_v2" }),
+    ensureIndex(db.collection(COLLECTION), { staff: 1, createdAt: -1 }, { name: "staff_createdAt_v2" }),
   ]);
 }

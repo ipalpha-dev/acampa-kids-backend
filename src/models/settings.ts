@@ -83,7 +83,7 @@ function toReminder(raw: unknown): CheckinReminder {
   return { at: asDate(r.at), sentAt: asDate(r.sentAt) };
 }
 
-/** `checkinLocations: [{ id, name, lat, lng, radiusM }]` — older documents held ONE `checkinLocation: { lat, lng, radiusM }`: it becomes the "Igreja" spot. */
+/** `checkinLocations: [{ id, name, lat, lng, radiusM }]` — none stored yet: the default "Igreja" spot. */
 function toCheckinLocations(doc: Record<string, unknown>): CheckinLocation[] {
   const raw = doc.checkinLocations;
   if (Array.isArray(raw)) {
@@ -99,15 +99,7 @@ function toCheckinLocations(doc: Record<string, unknown>): CheckinLocation[] {
       }));
     if (list.length > 0) return list;
   }
-  const legacy = (doc.checkinLocation as Partial<CheckinLocation> | undefined) ?? {};
-  return [
-    {
-      ...DEFAULT_CHECKIN_LOCATION,
-      lat: typeof legacy.lat === "number" ? legacy.lat : DEFAULT_CHECKIN_LOCATION.lat,
-      lng: typeof legacy.lng === "number" ? legacy.lng : DEFAULT_CHECKIN_LOCATION.lng,
-      radiusM: typeof legacy.radiusM === "number" ? legacy.radiusM : DEFAULT_CHECKIN_LOCATION.radiusM,
-    },
-  ];
+  return [{ ...DEFAULT_CHECKIN_LOCATION }];
 }
 
 function toParentContacts(raw: unknown): ParentContact[] {

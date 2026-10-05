@@ -8,6 +8,11 @@ import { rawDb } from "../db";
  * connected, indexes, the active camp) and Mongo answers a ping now.
  * IPAlpha core is a peer: never checked here (a core call fails at call
  * time). The dispatch app-channel socket is reported as INFO only.
+ *
+ * Indexes (decision 91): an index Mongo refuses never blocks boot nor makes
+ * the pod unready — `/ready` stays 200 with `checks.indexes: "degraded"` while
+ * Mongo answers, so the app keeps serving (see services/indexes.ts; the failed
+ * names are in the boot log). Only Mongo itself being down answers 503.
  */
 
 const PING_TIMEOUT_MS = 2_000;
@@ -17,6 +22,8 @@ const state = {
   bootError: "",
   /** informative probes (never gate readiness) */
   info: new Map<string, () => string>(),
+  /** `collection.indexName` of every index Mongo refused at boot (names only) */
+  failedIndexes: new Set<string>(),
 };
 
 export function markBooted(): void {
@@ -27,6 +34,16 @@ export function markBooted(): void {
 /** the last boot failure (a short message, no secrets) — boot keeps retrying */
 export function markBootError(message: string): void {
   state.bootError = message;
+}
+
+/** An index Mongo refused (decision 91) — `/ready` says `indexes: "degraded"`, still 200. */
+export function markIndexFailed(name: string): void {
+  state.failedIndexes.add(name);
+}
+
+/** A new boot attempt re-creates every index: forget the previous attempt's failures. */
+export function clearIndexFailures(): void {
+  state.failedIndexes.clear();
 }
 
 export function isBooted(): boolean {
@@ -54,7 +71,12 @@ export function live(c: Context): Response {
 
 export async function ready(c: Context): Promise<Response> {
   const mongo = state.booted ? await mongoOk() : false;
-  const checks = { boot: state.booted ? "ok" : state.bootError ? "retrying" : "starting", mongo: mongo ? "ok" : "down" };
+  const checks = {
+    boot: state.booted ? "ok" : state.bootError ? "retrying" : "starting",
+    mongo: mongo ? "ok" : "down",
+    // never gates readiness: a missing index is slower / less guarded, not down (decision 91)
+    indexes: state.failedIndexes.size ? "degraded" : "ok",
+  };
   const info = Object.fromEntries([...state.info].map(([name, read]) => [name, read()]));
   const ok = state.booted && mongo;
   c.header("Cache-Control", "no-store");
@@ -72,4 +94,5 @@ export function resetReadiness(booted = false): void {
   state.booted = booted;
   state.bootError = "";
   state.info.clear();
+  state.failedIndexes.clear();
 }

@@ -251,7 +251,7 @@ Two collections:
 
   So "os líderes + a Ana e o Pedro" is `forRoomRoles: ["caretaker"]` **plus** two assignments; "só a Ana" is `[]` plus one; "toda a equipe" is both positions. Moving somebody between positions re-does every event at once. One rule keeps it unambiguous: a person does ONE função per event — an explicit assignment always wins over every position link, and a função aimed at a single position wins over the whole-team one (`#autoRoleFor`). `#peopleInRole` returns both groups, tagged `via: "person" | "position"`.
 
-  Legacy documents hold a boolean `forEveryone`; it is read back as both positions (`true`) or none (`false`), and the write endpoints still accept it. No migration needed.
+  The write endpoints still accept the old boolean `forEveryone` as input (`true` = both positions, `false` = none); it is never stored.
   `instructions` (what to do during the event) and `preparation` (what to
   bring / wear / prepare *before* the camp, e.g. "Inspeção: roupa verde estilo
   exército com boné") are HTML from the admin WYSIWYG, **sanitized
@@ -394,9 +394,7 @@ window is open (checked at send time, coalesced like the team's SMS).
 | GET | `/api/files/:id` | **public** | the image, `cache-control: immutable` |
 
 File bytes live under `FILES_DIR` on a persistent volume; MongoDB's `files`
-collection holds metadata. Legacy MongoDB Binary data is migrated to disk on
-first read, then removed from the document. Back up **both MongoDB and the
-pictures directory**. Ids are 24 random bytes (hex) — unguessable — which
+collection holds metadata. Back up **both MongoDB and the pictures directory**. Ids are 24 random bytes (hex) — unguessable — which
 allows the GET to be unauthenticated. The editor stores relative URLs; the
 frontend resolves them against `VITE_API_URL`, or its current origin in production.
 
@@ -461,11 +459,9 @@ the caretaker. `settings.parentAccessWindow` gates their sessions.
 
 ## Teams (times) 🚩 and scoreboard (placar) 🏆
 
-Teams used to be the `equipe` category; they are now their own collection
-(`teams`: name, `color` #rrggbb, `jokerStaffId`, order). At boot
-`ensureTeamIndexes()` migrates the legacy category once: each option becomes
-a team with the **same id**, so `Staff.team` / `Camper.team` keep pointing at
-the right team, then the category is deleted.
+Teams are their own collection (`teams`: name, `color` #rrggbb, order).
+Nothing migrates an older `equipe` category (decision 90: the old database is
+dropped at cut-over).
 
 | Method | Path | Who | Body |
 |---|---|---|---|

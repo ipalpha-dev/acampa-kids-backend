@@ -6,7 +6,6 @@ data
 scripts/.supabase-children.json
 *.log
 *.tsbuildinfo
-# Tests and the notes prompt lab (reads real registration exports) never ship in the image.
+# Tests never ship in the image (nor a stray registration export — decision 90: old data is never read).
 **/*.test.ts
 src/testing
-scripts/notes-ai-test.ts

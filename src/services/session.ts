@@ -5,6 +5,7 @@ import { activeCampId } from "./campContext";
 import { closePersonSockets, closeSessionSockets } from "./realtime";
 import type { RoleGrant } from "./ipalpha/coreClient";
 import type { CoreRole, Session } from "../types";
+import { ensureIndex } from "./indexes";
 
 /**
  * Acampa sessions (CONTRACTS §15): `{personId, roles[], activeRole, campId,
@@ -189,7 +190,7 @@ export async function revokePersonSessions(personId: string): Promise<number> {
 
 export async function ensureSessionIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ personId: 1 });
+  await ensureIndex(db.collection(COLLECTION), { personId: 1 }, { name: "personId_v2" }); // sessions are keyed by personId now (decision 91: new name)
   // Mongo drops expired sessions by itself (the sliding update moves the deadline)
-  await db.collection(COLLECTION).createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+  await ensureIndex(db.collection(COLLECTION), { expiresAt: 1 }, { expireAfterSeconds: 0 });
 }

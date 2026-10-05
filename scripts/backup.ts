@@ -10,10 +10,11 @@
  *
  * BACKUP FILE (one zip):
  *   acampa-backup-YYYYMMDD-HHmmss.zip
- *   ├── backup.xlsx   every MongoDB collection, one tab per collection
- *   │                 (settings, categories, participants… all with their ids;
- *   │                 never `sessions` nor an import job's sealed token —
- *   │                 see EXCLUDED / `jobToken` below)
+ *   ├── backup.xlsx   the ALLOWLISTED collections (src/services/backupScope.ts),
+ *   │                 one tab per collection, all with their ids. Anything
+ *   │                 else in the database — sessions, sign-ins in flight,
+ *   │                 import jobs, a leftover of an older version — is never
+ *   │                 read (decision 90: old Acampa data is never exported)
  *   └── imagens.zip   every file on the FILES_DIR volume (editor images,
  *                     album photos, thumbnails)
  *
@@ -31,13 +32,8 @@
  * file. When the app's data model changes (a collection or field is renamed,
  * a field gains a new shape…), bump BACKUP_VERSION and add one entry to
  * MIGRATIONS mapping the previous version onto the new one — old backup files
- * then restore into the new app unchanged:
- *
- *   // example: version 1 backups becoming version 2
- *   1: (b) => {
- *     renameCollection(b, "prep_sections", "preparation");
- *     renameField(b, "campers", "guardianPhone", "guardianPhones.0");
- *   },
+ * then restore into the new app unchanged (example: `3: (b) => { b.collections.x = … }`).
+ * A restore only ever writes the allowlisted collections.
  */
 import { Binary, ObjectId, type Db } from "mongodb";
 import { inflateRawSync } from "node:zlib";
@@ -47,6 +43,7 @@ import { join } from "node:path";
 import { config } from "../src/config";
 import { closeDb, rawDb } from "../src/db";
 import { SCOPED } from "../src/services/campScope";
+import { backupCollectionNames, restorableCollections, stripBackupDoc } from "../src/services/backupScope";
 import pkg from "../package.json";
 
 /** the version of the backup strategy — mirror this in the app's "Sobre" page */
@@ -59,40 +56,6 @@ export const BACKUP_VERSION = 3;
  * it cannot be restored into v3 (decision 33: no migration ceremony).
  */
 const FIRST_RESTORABLE_VERSION = 3;
-
-/**
- * never dumped: session tokens (sealed IPAlpha tokens), sign-ins in flight and
- * `healthQueue` (removed by decision 50 — a leftover of older versions, its
- * TTL index empties it within 7 days; never dumped meanwhile)
- */
-const EXCLUDED = new Set(["sessions", "healthQueue", "ipalphaLoginStates"]);
-
-const LEGACY_SETTINGS_ID = "global";
-
-/**
- * v1 backups predate the multi-year camps feature: none of their documents
- * carry a `campId`. `--camp` is a DUMP-time filter only (§scripts/backup.ts
- * header) — restoring always targets the whole (already migrated) database,
- * so every v1 file is stamped with ONE camp id: the target DB's active camp,
- * created here exactly like the boot migration's step 1 if the DB has none yet.
- */
-async function ensureCampForBackup(db: Db): Promise<string> {
-  const existingActive = await db.collection("camps").findOne({ active: true });
-  if (existingActive) return String(existingActive._id);
-  const [earliest] = await db.collection("schedule_events").find().sort({ date: 1 }).limit(1).toArray();
-  const date = earliest?.date as string | undefined;
-  const year = date && Number.isFinite(Number(date.slice(0, 4))) ? Number(date.slice(0, 4)) : new Date().getFullYear();
-  const { insertedId } = await db.collection("camps").insertOne({
-    label: `Acampa Kids ${year}`,
-    year,
-    active: true,
-    archivedAt: null,
-    createdAt: new Date(),
-    createdByPersonId: null,
-    editionId: null,
-  });
-  return insertedId.toString();
-}
 
 const META_SHEET = "_backup";
 const XLSX_NAME = "backup.xlsx";
@@ -119,46 +82,7 @@ type Doc = Record<string, unknown>;
  * from the file's version up to BACKUP_VERSION. Async because a migration may
  * need to read the target database (e.g. v1 → v2 needs the active camp's id).
  */
-const MIGRATIONS: Record<number, (backup: Backup, db: Db) => void | Promise<void>> = {
-  // v1 (single camp, no `campId` anywhere) → v2 (multi-year camps)
-  1: async (backup, db) => {
-    const campId = await ensureCampForBackup(db);
-    for (const name of SCOPED) {
-      for (const doc of backup.collections[name] ?? []) if (doc.campId === undefined) doc.campId = campId;
-    }
-    const settingsDocs = backup.collections["settings"] ?? [];
-    if (settingsDocs.length && !settingsDocs.some((d) => String(d._id) === campId)) {
-      const legacy = settingsDocs.find((d) => d._id === LEGACY_SETTINGS_ID);
-      if (legacy) {
-        const { _id, ...rest } = legacy;
-        settingsDocs.push({ ...rest, _id: campId, campId });
-      }
-    }
-  },
-};
-
-// --------------------------------------------------------------- migrations --
-/** migration helper: move every document of collection `from` to `to` */
-function renameCollection(backup: Backup, from: string, to: string): void {
-  if (!backup.collections[from]) return;
-  backup.collections[to] = backup.collections[from];
-  delete backup.collections[from];
-}
-
-/** migration helper: rename a field on every document of a collection */
-function renameField(backup: Backup, collection: string, from: string, to: string): void {
-  for (const doc of backup.collections[collection] ?? []) {
-    if (from in doc) {
-      doc[to] = doc[from];
-      delete doc[from];
-    }
-  }
-}
-
-/** migration helper: drop a field from every document of a collection */
-function dropField(backup: Backup, collection: string, field: string): void {
-  for (const doc of backup.collections[collection] ?? []) delete doc[field];
-}
+const MIGRATIONS: Record<number, (backup: Backup, db: Db) => void | Promise<void>> = {};
 
 async function migrate(backup: Backup, db: Db): Promise<Backup> {
   if (backup.version > BACKUP_VERSION) {
@@ -549,8 +473,8 @@ function backupFromSheets(sheets: Map<string, string[][]>): Backup {
 // ----------------------------------------------------------------- commands --
 async function runBackup(camp?: string): Promise<void> {
   const db = await rawDb();
-  // sessions (sealed person tokens) never leave the database
-  const names = (await db.listCollections().toArray()).map((c) => c.name).filter((n) => !EXCLUDED.has(n)).sort();
+  // allowlist only (decision 90): sessions, sign-ins, import jobs and any older version's collection never leave the database
+  const names = backupCollectionNames((await db.listCollections().toArray()).map((c) => c.name));
   const now = new Date();
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   if (camp) console.log(`📎 filtering to camp ${camp} — SCOPED collections only carry this camp's documents; every global collection is dumped in full.`);
@@ -565,19 +489,7 @@ async function runBackup(camp?: string): Promise<void> {
 
   for (const name of names) {
     const filter = camp && SCOPED.has(name) ? { campId: camp } : {};
-    const docs = (await db.collection(name).find(filter).sort({ _id: 1 }).toArray()) as unknown as Doc[];
-    // an import job's sealed IPAlpha token (decision 50) never leaves the database
-    if (name === "camperImports") for (const doc of docs) delete doc.jobToken;
-    if (name === "files") {
-      // legacy deployments keep the bytes INSIDE Mongo — they travel in imagens.zip instead
-      for (const doc of docs) {
-        const bin = doc.data as Binary | undefined;
-        if (bin instanceof Binary && bin.buffer?.length) {
-          if (!images.has(String(doc._id))) images.set(String(doc._id), new Uint8Array(bin.buffer));
-          delete doc.data;
-        }
-      }
-    }
+    const docs = ((await db.collection(name).find(filter).sort({ _id: 1 }).toArray()) as unknown as Doc[]).map((doc) => stripBackupDoc(name, doc));
     sheets.push(collectionSheet(name, docs));
     console.log(`  ${name}: ${docs.length} documento(s)`);
   }
@@ -650,7 +562,9 @@ async function runRestore(zipPath: string, opts: { withPhotos: boolean; yes: boo
     }
   }
 
-  for (const [name, docs] of Object.entries(backup.collections)) {
+  const { keep, skipped: notAllowed } = restorableCollections(backup.collections);
+  if (notAllowed.length) console.log(`\n🚫 ignoradas (fora da lista de coleções desta versão): ${notAllowed.join(", ")}`);
+  for (const [name, docs] of keep) {
     if (skipped.includes(name)) continue;
     if (name === "files" && !opts.withPhotos) {
       // album photo metadata travels in `files` too — keep those out as well

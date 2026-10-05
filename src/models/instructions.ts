@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { InstructionDoc, DocAudience } from "../types";
 import { DOC_AUDIENCES } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "instructions";
 
@@ -62,5 +63,5 @@ export async function deleteInstruction(id: string): Promise<boolean> {
 
 export async function ensureInstructionIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ order: 1 });
+  await ensureIndex(db.collection(COLLECTION), { order: 1 });
 }

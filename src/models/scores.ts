@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { ScoreEntry } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "scores";
 
@@ -86,7 +87,7 @@ export async function deleteScoresOfTeam(teamId: string): Promise<void> {
 
 export async function ensureScoreIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ teamId: 1, createdAt: -1 });
-  await db.collection(COLLECTION).createIndex({ createdAt: -1 });
-  await db.collection(COLLECTION).createIndex({ eventId: 1, camperId: 1 }, { sparse: true });
+  await ensureIndex(db.collection(COLLECTION), { teamId: 1, createdAt: -1 });
+  await ensureIndex(db.collection(COLLECTION), { createdAt: -1 });
+  await ensureIndex(db.collection(COLLECTION), { eventId: 1, camperId: 1 }, { sparse: true });
 }

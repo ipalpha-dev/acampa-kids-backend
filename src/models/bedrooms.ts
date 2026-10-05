@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { Bedroom, BedroomGroup } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "bedrooms";
 
@@ -86,6 +87,6 @@ export async function countStaffPerBedroom(): Promise<Map<string, number>> {
 
 export async function ensureBedroomIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ name: 1 }, { unique: true });
-  await db.collection(COLLECTION).createIndex({ group: 1, name: 1 });
+  await ensureIndex(db.collection(COLLECTION), { name: 1 }, { unique: true });
+  await ensureIndex(db.collection(COLLECTION), { group: 1, name: 1 });
 }

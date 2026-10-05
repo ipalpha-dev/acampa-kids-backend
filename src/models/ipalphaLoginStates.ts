@@ -1,4 +1,5 @@
 import { rawDb } from "../db";
+import { ensureIndex } from "../services/indexes";
 
 /**
  * `ipalphaLoginStates` — one row per IPAlpha sign-in in flight:
@@ -30,6 +31,6 @@ export async function consumeLoginState(state: string, now = new Date()): Promis
 
 export async function ensureLoginStateIndexes(): Promise<void> {
   const db = await rawDb();
-  await db.collection(COLLECTION).createIndex({ state: 1 }, { unique: true });
-  await db.collection(COLLECTION).createIndex({ createdAt: 1 }, { expireAfterSeconds: LOGIN_STATE_TTL_SECONDS });
+  await ensureIndex(db.collection(COLLECTION), { state: 1 }, { unique: true });
+  await ensureIndex(db.collection(COLLECTION), { createdAt: 1 }, { expireAfterSeconds: LOGIN_STATE_TTL_SECONDS });
 }

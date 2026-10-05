@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import { MEDICATION_SOS_SLOT, type MedicationDose } from "../types";
+import type { MedicationDose } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 /**
  * The medical team's checklist of doses actually GIVEN (Medicações tab).
@@ -17,8 +18,12 @@ const COLLECTION = "medicationDoses";
  */
 const SCHEDULED_FIELD = "scheduled";
 
-/** Explicit name for the uniqueness index, so a change of filter never collides with the auto-generated one. */
-const SCHEDULED_UNIQUE_INDEX = "dose_scheduled_unique";
+/**
+ * Explicit index names (decision 91): the keys moved from `camperId` to `personId`, so the
+ * names are new (`_v2`) and never collide with an index an older version left behind.
+ */
+const SCHEDULED_UNIQUE_INDEX = "dose_scheduled_unique_v2";
+const PERSON_DAY_INDEX = "personId_day_v2";
 
 /** Medicine name → a stable key, so a re-ordered / re-typed list still matches its ticks. */
 export function medKeyOf(name: string): string {
@@ -99,15 +104,12 @@ export async function deleteMedicationDose(id: string): Promise<boolean> {
 
 export async function ensureMedicationIndexes(): Promise<void> {
   const db = await getDb();
-  // ticks written before `scheduled` existed: a fixed "HH:MM" is a scheduled dose, "sos" is not
-  await db.collection(COLLECTION).updateMany({ [SCHEDULED_FIELD]: { $exists: false } }, [
-    { $set: { [SCHEDULED_FIELD]: { $ne: ["$slot", MEDICATION_SOS_SLOT] } } },
-  ]);
   await Promise.all([
-    db.collection(COLLECTION).createIndex({ day: -1, slot: 1 }),
-    db.collection(COLLECTION).createIndex({ personId: 1, day: -1 }),
+    ensureIndex(db.collection(COLLECTION), { day: -1, slot: 1 }),
+    ensureIndex(db.collection(COLLECTION), { personId: 1, day: -1 }, { name: PERSON_DAY_INDEX }),
     // a scheduled dose exists once per kid / medicine / day; "quando necessário" doses repeat, so they stay out of it
-    db.collection(COLLECTION).createIndex(
+    ensureIndex(
+      db.collection(COLLECTION),
       { personId: 1, medKey: 1, day: 1, slot: 1 },
       { name: SCHEDULED_UNIQUE_INDEX, unique: true, partialFilterExpression: { [SCHEDULED_FIELD]: true } },
     ),

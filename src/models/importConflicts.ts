@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { ImportField, ParticipantKind } from "./participants";
+import { ensureIndex } from "../services/indexes";
 
 /**
  * `importConflicts` (decision 78): an import value that was NOT written because
@@ -76,6 +77,6 @@ export async function deleteImportConflictsById(ids: string[]): Promise<number> 
 
 export async function ensureImportConflictIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(IMPORT_CONFLICTS).createIndex({ personId: 1, field: 1 }, { unique: true });
-  await db.collection(IMPORT_CONFLICTS).createIndex({ kind: 1, createdAt: 1 });
+  await ensureIndex(db.collection(IMPORT_CONFLICTS), { personId: 1, field: 1 }, { unique: true });
+  await ensureIndex(db.collection(IMPORT_CONFLICTS), { kind: 1, createdAt: 1 });
 }

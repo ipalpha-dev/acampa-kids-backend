@@ -1,10 +1,9 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import { deleteCategory, findCategoryByKey } from "./categories";
 import { BUS_COLORS, type Transport, type TransportKind } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "transports";
-const LEGACY_CATEGORY_KEY = "transporte";
 
 function toTransport(doc: Record<string, unknown> | null): Transport | null {
   if (!doc) return null;
@@ -80,40 +79,6 @@ export async function nextTransportOrder(): Promise<number> {
 
 export async function ensureTransportIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ order: 1 });
-  await migrateLegacyTransportCategory();
+  await ensureIndex(db.collection(COLLECTION), { order: 1 });
 }
 
-/**
- * One-off migration, run at boot: transports used to be the options of the
- * `transporte` category. Each option becomes a Transport document with the
- * SAME id (option ids are ObjectId strings), so every `Staff.transportation`,
- * `Camper.transportation` and `busHelpers.vehicleId` keeps pointing at the
- * right vehicle. All options are imported as BUSES (they carried no car/bus
- * distinction before) with a colour from the palette and a sequential number
- * (buses have no name); the admin turns the ones that are actually cars into
- * cars afterwards. The category is then removed.
- */
-async function migrateLegacyTransportCategory(): Promise<void> {
-  const legacy = await findCategoryByKey(LEGACY_CATEGORY_KEY);
-  if (!legacy) return;
-  const db = await getDb();
-  const existing = new Set((await listTransports()).map((t) => t._id));
-  const now = new Date();
-  let created = 0;
-  for (const [i, o] of legacy.options.entries()) {
-    if (existing.has(o.id) || !ObjectId.isValid(o.id)) continue;
-    await db.collection(COLLECTION).insertOne({
-      _id: new ObjectId(o.id),
-      kind: "bus",
-      color: BUS_COLORS[i % BUS_COLORS.length].hex,
-      number: String(i + 1),
-      order: o.order,
-      createdAt: now,
-      updatedAt: now,
-    });
-    created++;
-  }
-  await deleteCategory(legacy._id);
-  console.log(`🚌 transports: migrated ${created} vehicle(s) from the "${LEGACY_CATEGORY_KEY}" category`);
-}

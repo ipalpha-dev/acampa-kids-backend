@@ -1,4 +1,5 @@
 import { getDb } from "../db";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "sms_usage";
 
@@ -39,5 +40,5 @@ export async function smsUsageTotal(): Promise<SmsUsageTotal> {
 
 export async function ensureSmsUsageIndex(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ at: -1 });
+  await ensureIndex(db.collection(COLLECTION), { at: -1 });
 }
