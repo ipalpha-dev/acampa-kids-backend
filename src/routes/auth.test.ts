@@ -1,3 +1,4 @@
+import type { Session } from "../types";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   createFakeCore,
@@ -305,6 +306,42 @@ test("coordenação keeps a history camp when the login edition is archived", as
     await (await rawDb()).collection("camps").deleteMany({ _id: { $in: [new ObjectId(past._id), new ObjectId(current._id)] } });
     await activateCamp(original);
   }
+});
+
+test("a camp switch drops the previous camp's remembered role check", async () => {
+  const { ObjectId } = await import("mongodb");
+  const { createCamp, activateCamp } = await import("../models/camps");
+  const { activeCampId } = await import("../services/campContext");
+  const original = activeCampId();
+  const past = await createCamp({ label: "Synthetic past camp", year: 2023, createdByPersonId: PERSON });
+  try {
+    const token = await sessionFor(keys, PERSON, ["coordenacao"]);
+    expect((await call("GET", "/api/bedrooms", undefined, token)).status).toBe(200);
+    const before = core.callsTo("GET /health-lists").length;
+    expect((await call("POST", "/api/auth/camp", { campId: past._id }, token)).status).toBe(200);
+    expect((await call("POST", "/api/auth/camp", { campId: original }, token)).status).toBe(200);
+    expect((await call("GET", "/api/bedrooms", undefined, token)).status).toBe(200);
+    expect(core.callsTo("GET /health-lists").length).toBeGreaterThan(before);
+  } finally {
+    await (await rawDb()).collection("camps").deleteOne({ _id: new ObjectId(past._id) });
+    await activateCamp(original);
+  }
+});
+
+test("a role check that passes then fails does not keep the previous success", async () => {
+  const { validateSessionRole } = await import("../services/acting");
+  const { IpalphaUnavailable } = await import("../services/ipalpha/coreClient");
+  const token = await sessionFor(keys, PERSON, ["coordenacao"]);
+  const session = (await sessionDoc(token)) as unknown as Session;
+  await validateSessionRole(session); // remembered for this session
+  core.on("GET /health-lists", () => json({ reason: "unavailable" }, 503));
+  // a new check for the same session (another camp) drops the remembered success before calling core
+  await expect(validateSessionRole({ ...session, campId: "another-camp" })).rejects.toBeInstanceOf(IpalphaUnavailable);
+  const before = core.callsTo("GET /health-lists").length;
+  // the earlier success is gone: the original camp is asked again and fails too
+  await expect(validateSessionRole(session)).rejects.toBeInstanceOf(IpalphaUnavailable);
+  expect(core.callsTo("GET /health-lists").length).toBe(before + 1);
+  expect(await sessionDoc(token)).not.toBeNull();
 });
 
 test("a repeated camp read reuses the role check for about 15 s; a 401 still ends the session", async () => {

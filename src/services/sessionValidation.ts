@@ -8,8 +8,9 @@ import type { CoreRole } from "../types";
  * membership removed in core stops granting access within 15 s at most.
  * A 401 still ends the session at once, and any failed check (a removed
  * membership included) drops the memo too — so the next recipient is asked
- * again immediately. Logout and role switch clear it as well. It is never
- * written when the check fails.
+ * again immediately. Logout, role switch and camp switch clear it as well.
+ * A new check drops the entry before calling core, so a pass-then-fail cannot
+ * leave it. It is never written when the check fails.
  */
 const VALIDATION_MS = 15_000;
 const memo = new Map<string, number>();
@@ -30,7 +31,7 @@ export function rememberValidation(sessionId: string, role: CoreRole, campId: st
   memo.set(key(sessionId, role, campId), Date.now());
 }
 
-/** Drops every remembered check of a session (logout, revoke, role switch, a failed check). */
+/** Drops every remembered check of a session (logout, revoke, role or camp switch, a check in flight). */
 export function forgetSessionValidation(sessionId: string): void {
   const prefix = `${sessionId}|`;
   for (const k of memo.keys()) if (k.startsWith(prefix)) memo.delete(k);

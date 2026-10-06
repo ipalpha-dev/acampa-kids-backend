@@ -163,6 +163,8 @@ export async function switchSessionRole(id: string, role: CoreRole): Promise<Ses
 /** History / camp switch (coordenação). The offline key rotates too. */
 export async function switchSessionCamp(id: string, campId: string): Promise<Session | null> {
   const db = await getDb();
+  // the previous camp's remembered check must not keep authorizing it
+  forgetSessionValidation(id);
   const res = await db.collection(COLLECTION).findOneAndUpdate({ _id: id as never }, { $set: { campId, offlineKey: newOfflineKey() } }, { returnDocument: "after" });
   return toSession(res as Record<string, unknown> | null);
 }

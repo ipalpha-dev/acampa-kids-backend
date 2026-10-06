@@ -98,6 +98,8 @@ export function coordinationJobToken(session: Session): { token: string; expires
  */
 export async function validateSessionRole(session: Session, role: CoreRole = session.activeRole): Promise<void> {
   if (rememberedValidation(session._id, role, session.campId)) return;
+  // drop it before the core calls: a check that passes then fails must not leave the old entry
+  forgetSessionValidation(session._id);
   try {
     await coreClient().healthLists(roleToken(session, PERSONS_RESOURCE, role));
     const token = roleToken(session, PROJECTS_RESOURCE, role);
@@ -106,7 +108,6 @@ export async function validateSessionRole(session: Session, role: CoreRole = ses
     if (!(await holdsRole(session.personId, role, session.campId))) throw new IpalphaTokenRevoked("membership removed");
     rememberValidation(session._id, role, session.campId);
   } catch (err) {
-    // a removed membership must not stay remembered for the rest of the window
     forgetSessionValidation(session._id);
     if (err instanceof IpalphaTokenRevoked) await revokeSession(session._id);
     throw err;
