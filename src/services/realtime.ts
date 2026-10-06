@@ -1,5 +1,5 @@
 import type { WSContext } from "hono/ws";
-import type { CheckinWindow, Role } from "../types";
+import type { CheckinWindow, CoreRole, Role } from "../types";
 import { todayInSaoPaulo } from "../utils";
 import { activeCampId, currentCampId, withCamp } from "./campContext";
 
@@ -7,8 +7,8 @@ import { activeCampId, currentCampId, withCamp } from "./campContext";
  * Realtime hub: every logged-in client keeps a WebSocket open and receives
  *   - a full `snapshot` right after connecting, and
  *   - an `update` with the collections that changed after every write.
- * Payloads are whole collections (the dataset is small: ~150 kids, ~70 staff,
- * ~40 rooms, ~50 events), which keeps the client logic a simple "replace".
+ * Payloads are whole collections of CAMP-OPS records (~150 kids, ~70 team
+ * rows, ~40 rooms, ~50 events) — never names or health (CONTRACTS §15).
  */
 
 export const COLLECTIONS = ["campers", "staff", "bedrooms", "categories", "transports", "teams", "scores", "roles", "events", "preparation", "instructions", "occurrences", "medications", "gallery", "settings"] as const;
@@ -17,15 +17,43 @@ export type Snapshot = Partial<Record<Collection, unknown>>;
 
 export interface RealtimeClient {
   ws: WSContext;
+  /** the audience (admin on a history session) */
   role: Role;
-  userId: string;
-  /** the person's phone — staff payloads are personalised (own record un-redacted) */
-  phone: string;
+  /** the acting IPAlpha role */
+  coreRole: CoreRole;
+  /** payloads are personalised per person (own record, own room, own kids) */
+  personId: string;
+  sessionId: string;
   /** the camp this session (and every payload it receives) is scoped to */
   campId: string;
 }
 
 const clients = new Set<RealtimeClient>();
+
+/** Validate each recipient before a camp payload; core outages suppress delivery. */
+export async function authorizedClientSession(client: RealtimeClient) {
+  const { findSession, revokeSession } = await import("./session");
+  const { validateSessionRole } = await import("./acting");
+  const { accessWindowClosed, canSwitchCamps } = await import("../middleware/auth");
+  const session = await findSession(client.sessionId);
+  if (!session || session.expiresAt.getTime() <= Date.now()) {
+    if (session) await revokeSession(session._id);
+    closeSessionSockets(client.sessionId);
+    return null;
+  }
+  try {
+    await validateSessionRole(session);
+    if (session.activeRole !== client.coreRole || session.campId !== client.campId) return null;
+    if ((session.campId !== activeCampId() && !canSwitchCamps(session)) || await accessWindowClosed(session)) {
+      await revokeSession(session._id);
+      return null;
+    }
+    return session;
+  } catch {
+    return null;
+  }
+}
+
 
 export function addClient(client: RealtimeClient): void {
   clients.add(client);
@@ -87,7 +115,9 @@ async function flush(): Promise<void> {
       // one payload per distinct view (role, or role+person for staff)
       const byKey = new Map<string, string | null>();
       for (const client of campClients) {
-        const viewer = { activeRole: client.role, phone: client.phone };
+        const session = await authorizedClientSession(client);
+        if (!session) continue;
+        const viewer = { sessionId: session._id, activeRole: client.role, coreRole: client.coreRole, personId: client.personId };
         const key = snapshotKey(viewer);
         if (!byKey.has(key)) {
           try {
@@ -105,22 +135,77 @@ async function flush(): Promise<void> {
   }
 }
 
-/** targeted event, not a collection replace: one record's background review advanced */
-export type AiReviewedKind = "camper" | "staff";
-export type AiReviewedStatus = "structured" | "reviewed" | "error";
+// ── session lifecycle: a socket never outlives (or out-scopes) its session ──
 
 /**
- * Tells every connected client about one record's background AI review:
- * "structured" = the fast Jev pass wrote the structured health fields
- * (cleanup still pending); "reviewed"/"error" are terminal. The payload
- * carries only the record identity — clients re-read what they need
- * (or ignore it; unknown types are skipped).
+ * The session ended (logout, SESSION_ENDED after a core 401, revocation,
+ * access window): its sockets get `SESSION_ENDED` and close with 4401, so the
+ * phone returns to login and wipes its offline copy at once.
  */
-export function emitAiReviewed(kind: AiReviewedKind, id: string, status: AiReviewedStatus, attempts: number): void {
+export function closeSessionSockets(sessionId: string, reason = "session ended"): number {
+  return closeWhere((c) => c.sessionId === sessionId, reason);
+}
+
+/** Every socket of a person (logged out everywhere). */
+export function closePersonSockets(personId: string, reason = "session ended"): number {
+  return closeWhere((c) => c.personId === personId, reason);
+}
+
+function closeWhere(match: (c: RealtimeClient) => boolean, reason: string): number {
+  let closed = 0;
+  for (const client of [...clients]) {
+    if (!match(client)) continue;
+    clients.delete(client);
+    closed++;
+    try {
+      client.ws.send(JSON.stringify({ type: "error", code: "SESSION_ENDED", message: "Sua sessão terminou. Entre de novo." }));
+      client.ws.close(4401, reason);
+    } catch {
+      /* already gone */
+    }
+  }
+  return closed;
+}
+
+/**
+ * Role / camp switch: the session's open sockets are RE-KEYED to the new
+ * acting role (and camp) and receive a fresh snapshot of that scope — never
+ * another update of the previous role's data.
+ */
+export async function rekeySessionSockets(next: { id: string; role: Role; coreRole: CoreRole; campId: string }): Promise<number> {
+  const mine = [...clients].filter((c) => c.sessionId === next.id);
+  if (mine.length === 0) return 0;
+  const { loadCollections } = await import("./snapshot");
+  for (const client of mine) {
+    client.role = next.role;
+    client.coreRole = next.coreRole;
+    client.campId = next.campId;
+  }
+  await withCamp(next.campId, async () => {
+    try {
+      if (!(await authorizedClientSession(mine[0]))) return;
+      const data = await loadCollections({ sessionId: next.id, activeRole: next.role, coreRole: next.coreRole, personId: mine[0].personId });
+      const payload = JSON.stringify({ type: "snapshot", at: new Date().toISOString(), data });
+      for (const client of mine) safeSend(client, payload);
+    } catch (err) {
+      console.error("realtime: re-key snapshot failed", err instanceof Error ? err.message : err);
+      // never leave a socket on a scope it no longer has: close it, the client reconnects
+      for (const client of mine) closeWhere((c) => c === client, "role changed");
+    }
+  });
+  return mine.length;
+}
+
+/**
+ * A persons-api import (§20) moved on — progress of a step, or a batch Acampa
+ * just applied to `participants`. Only the IMPORTER's sockets of that camp
+ * hear it (ids and counts only, never row data); the import screen re-reads
+ * `GET /api/imports/:id` and the results.
+ */
+export function emitImportEvent(personId: string, campId: string, type: "import-progress" | "import-batch", data: Record<string, unknown>): void {
   if (clients.size === 0) return;
-  const campId = currentCampId();
-  const payload = JSON.stringify({ type: "ai-review-done", at: new Date().toISOString(), data: { kind, id, status, attempts } });
-  for (const client of clients) if (client.campId === campId) safeSend(client, payload);
+  const payload = JSON.stringify({ type, at: new Date().toISOString(), data });
+  for (const client of clients) if (client.campId === campId && client.personId === personId) safeSend(client, payload);
 }
 
 // ── staff access window: evict the ordinary team when it closes ─────────────
@@ -132,40 +217,21 @@ export function emitAiReviewed(kind: AiReviewedKind, id: string, status: AiRevie
  * 4401, so the phone logs out and wipes its local copy at once.
  */
 export async function evictStaffOutsideWindow(): Promise<void> {
-  const [{ findStaffByPhone }, { staffHasAccess }, { revokeUserSessions }, { staffAccessOpen }] = await Promise.all([
-    import("../models/staff"),
-    import("./scope"),
-    import("./session"),
-    import("../models/settings"),
-  ]);
-  const now = new Date();
   const byCamp = new Map<string, RealtimeClient[]>();
   for (const client of clients) byCamp.set(client.campId, [...(byCamp.get(client.campId) ?? []), client]);
 
   for (const [campId, campClients] of byCamp) {
     await withCamp(campId, async () => {
-      const { getSettings } = await import("../models/settings");
-      const settings = await getSettings();
       for (const client of campClients) {
-        let name: string;
-        if (client.role === "parent") {
-          if (staffAccessOpen(settings.parentAccessWindow, now)) continue;
-          name = `parent ${client.phone}`;
-        } else {
-          if (client.role !== "staff" && client.role !== "health_staff") continue;
-          const me = await findStaffByPhone(client.phone);
-          if (!me || staffHasAccess(me._id, settings, now)) continue;
-          name = me.name;
-        }
-        await revokeUserSessions(client.userId);
+        if (await authorizedClientSession(client)) continue;
         try {
-          client.ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "O período de acesso da equipe terminou." }));
+          client.ws.send(JSON.stringify({ type: "error", code: "UNAUTHORIZED", message: "O período de acesso terminou." }));
           client.ws.close(4401, "access window closed");
         } catch {
           /* already gone */
         }
         clients.delete(client);
-        console.log(`🚪 access window closed → logged out ${name}`);
+        console.log(`🚪 access window closed → logged out a ${client.coreRole} session`);
       }
     });
   }
@@ -263,14 +329,18 @@ export function scheduleBirthdayNotices(): void {
 }
 
 // ── safety net: an instant further than setTimeout's limit (~24 days) can't be armed, so re-check hourly
-setInterval(
-  () =>
-    void withCamp(activeCampId(), async () => {
-      const m = await import("./notify");
-      await Promise.all([m.syncWelcomes(), m.syncParentWelcomes(), m.sendCheckinReminder(), m.sendBirthdayNotices()]);
-    }),
-  60 * 60_000,
-);
+setInterval(() => {
+  let campId: string;
+  try {
+    campId = activeCampId();
+  } catch {
+    return; // boot has not finished (Mongo still down) — nothing to catch up yet
+  }
+  void withCamp(campId, async () => {
+    const m = await import("./notify");
+    await Promise.all([m.syncWelcomes(), m.syncParentWelcomes(), m.sendCheckinReminder(), m.sendBirthdayNotices()]);
+  });
+}, 60 * 60_000);
 
 // ── heartbeat (lets phones notice a dead connection and reconnect) ─────────
 

@@ -4,44 +4,74 @@ import { getDb } from "../db";
 /**
  * Read-only MongoDB tools for the camp assistant.
  *
- * Security rules:
- * - only explicit application collections are visible (never `sessions`)
- * - credentials, QR secrets, binary files and face embeddings are stripped
- * - aggregation stages that can write or run server-side code are rejected
+ * Security rules (decision 90 — ALLOWLISTS, never denylists):
+ * - only the collections named below are visible; anything else in the
+ *   database (sessions, sign-ins, import jobs, a leftover of an older version
+ *   such as `campers` / `staff` / `users`) does not exist for the assistant
+ * - only the FIELDS named per collection are visible: every query runs as an
+ *   aggregation whose first stage projects the allowlist, so a filter, sort
+ *   or pipeline stage over any other field (a name / phone / health snapshot
+ *   on an old document, `qrToken`, thumbnails, face embeddings, file bytes)
+ *   sees nothing — it cannot even be used as a match oracle
+ * - Acampa's Mongo holds camp operations only (CONTRACTS §15): no names,
+ *   contacts or health — those live in IPAlpha and are not reachable here
+ * - aggregation stages that can write, join or run server-side code are rejected
  * - every query has a result and execution-time cap
+ *
+ * A new field / collection = a new entry here, after checking it is camp ops
+ * (ids, flags, camp texts) — never person data.
  */
 
 interface AssistantCollection {
   description: string;
-  hiddenFields?: string[];
+  /** the ONLY fields the assistant sees (`_id` is always there) */
+  fields: readonly string[];
 }
 
+const CHECKIN_FIELDS = ["checkin", "busCheckin", "busReturnCheckin"] as const;
+
 const COLLECTIONS: Record<string, AssistantCollection> = {
-  campers: { description: "Acampantes: cadastro, responsáveis, saúde, quarto, time, transporte e check-ins.", hiddenFields: ["qrToken"] },
-  staff: { description: "Equipe: cadastro, saúde, quarto, função no quarto, time, transporte, check-in e colete." },
-  bedrooms: { description: "Quartos, alas, quantidade de beliches/camas e capacidade." },
-  teams: { description: "Times do acampamento e suas cores." },
-  transports: { description: "Ônibus, carros, números, cores e capacidade." },
-  categories: { description: "Categorias e opções usadas nas fichas, como alergias e condições crônicas." },
-  schedule_events: { description: "Programação: eventos, datas, horários, funções e pessoas escaladas." },
-  schedule_roles: { description: "Funções da programação, instruções e preparação." },
-  scores: { description: "Histórico do placar por time, evento e acampante." },
-  checkinLog: { description: "Auditoria de check-ins e cancelamentos de check-in." },
-  medicationDoses: { description: "Doses de medicamentos registradas pela equipe médica." },
-  occurrences: { description: "Ocorrências registradas pela administração, organização e equipe médica." },
-  instructions: { description: "Documentos de instruções gerais." },
-  prep_sections: { description: "Seções e checklists de preparação." },
-  settings: { description: "Configurações gerais, janelas, listas de ajudantes e contatos." },
-  gallery: { description: "Metadados do álbum de fotos.", hiddenFields: ["thumb", "faces", "faceModel", "facesIndexedAt"] },
-  files: { description: "Metadados dos arquivos enviados; o conteúdo binário não é disponibilizado.", hiddenFields: ["data"] },
-  camperChangeLog: { description: "Histórico de alterações nas fichas dos acampantes." },
-  camperLookups: { description: "Auditoria de leituras emergenciais de crachás." },
-  camperImports: { description: "Processos de importação de planilhas de acampantes e equipe." },
-  camperImportDictionary: { description: "Dicionário aprendido durante importações de planilhas." },
-  users: { description: "Contas de acesso, nomes, telefones e perfis; dados de autenticação são ocultados.", hiddenFields: ["otp"] },
-  ai_usage: { description: "Métricas de uso das funções de IA." },
-  sms_usage: { description: "Métricas de envio de SMS." },
+  participants: {
+    description: "Participantes do acampamento por personId (kind camper = criança, team = equipe): quarto, cama, líder (caretakerId), time, transporte, check-ins, colete, observações. Sem nomes nem saúde (ficam no IPAlpha).",
+    fields: [
+      "personId", "kind", "team", "transportation", "bedroom", ...CHECKIN_FIELDS, "generalNotes", "draft", "createdAt", "updatedAt",
+      // kids
+      "invitedBy", "caretakerId", "bed", "bedroomPreference", "parentEditedAt",
+      // team
+      "active", "roomRole", "vest", "prepDone", "welcomeSentAt", "photosSmsSentAt", "foreignLookupCount", "foreignLookupCamperIds", "foreignLookupAlertedAt",
+    ],
+  },
+  bedrooms: { description: "Quartos, alas, quantidade de beliches/camas e capacidade.", fields: ["name", "group", "bunkBeds", "singleBeds", "notes", "draft", "createdAt", "updatedAt"] },
+  teams: { description: "Times do acampamento e suas cores.", fields: ["name", "color", "order", "draft", "createdAt", "updatedAt"] },
+  transports: { description: "Ônibus, carros, números, cores e capacidade.", fields: ["kind", "name", "color", "number", "capacity", "order", "draft", "createdAt", "updatedAt"] },
+  categories: { description: "Categorias e opções usadas nas fichas, como alergias e condições crônicas.", fields: ["key", "name", "emoji", "description", "appliesTo", "selection", "options", "order", "createdAt", "updatedAt"] },
+  schedule_events: { description: "Programação: eventos, datas, horários, funções e pessoas escaladas.", fields: ["date", "title", "emoji", "startTime", "endTime", "notes", "roles", "visibleToParents", "assignments", "createdAt", "updatedAt"] },
+  schedule_roles: { description: "Funções da programação, instruções e preparação.", fields: ["name", "emoji", "instructions", "preparation", "forRoomRoles", "hasDetail", "detailFromTeam", "detailPlaceholder", "createdAt", "updatedAt"] },
+  scores: { description: "Histórico do placar por time, evento e acampante.", fields: ["teamId", "points", "kind", "note", "camperId", "eventId", "byPersonId", "createdAt"] },
+  checkinLog: { description: "Auditoria de check-ins e cancelamentos de check-in.", fields: ["who", "personId", "kind", "action", "at", "byPersonId", "byRole", "note"] },
+  medicationDoses: { description: "Doses de medicamentos registradas pela equipe médica.", fields: ["personId", "medKey", "medName", "dose", "day", "slot", "scheduled", "givenAt", "byPersonId", "note"] },
+  occurrences: { description: "Ocorrências registradas pela administração, organização e equipe médica.", fields: ["campers", "staff", "description", "createdByPersonId", "createdByRole", "createdByGroup", "createdAt"] },
+  instructions: { description: "Documentos de instruções gerais.", fields: ["title", "emoji", "audience", "content", "order", "createdAt", "updatedAt"] },
+  prep_sections: { description: "Seções e checklists de preparação.", fields: ["title", "emoji", "audiences", "content", "order", "createdAt", "updatedAt"] },
+  settings: {
+    description: "Configurações gerais, janelas, listas de ajudantes e contatos.",
+    fields: [
+      "checkinLocations", "notifications", "checkinWindow", "busReturnWindow", "busHelpers", "parentContacts", "staffAccessWindow", "parentAccessWindow",
+      "checkinTestMode", "kidsRoomsDraft", "scoreDraft", "scoreHideWindow", "wizardMode", "galleryPublished", "checkinReminder", "updatedAt",
+    ],
+  },
+  gallery: { description: "Metadados do álbum de fotos.", fields: ["fileId", "order", "caption", "eventId", "byPersonId", "createdAt", "updatedAt"] },
+  files: { description: "Metadados dos arquivos enviados; o conteúdo binário não é disponibilizado.", fields: ["name", "type", "size", "byPersonId", "createdAt"] },
+  camperChangeLog: { description: "Histórico de alterações nas fichas dos acampantes (quais campos, nunca os valores).", fields: ["personId", "at", "byPersonId", "byRole", "medical", "fields"] },
+  camperLookups: { description: "Auditoria de leituras emergenciais de crachás.", fields: ["at", "camperId", "byStaffId", "belonged"] },
+  ai_usage: { description: "Métricas de uso das funções de IA.", fields: ["at", "vendor", "model", "kind", "promptTokens", "completionTokens", "ok"] },
+  sms_usage: { description: "Métricas de envio de mensagens (modelo e quantidade).", fields: ["at", "templateSlug", "channel", "sent"] },
 };
+
+/** The collections + fields the assistant may see (tests / audits read this). */
+export function assistantAllowlist(audience: AssistantAudience): Record<string, readonly string[]> {
+  return Object.fromEntries(Object.entries(collectionsFor(audience)).map(([name, c]) => [name, c.fields]));
+}
 
 /**
  * Who is asking. `all` (admin / organizer) reaches every collection below;
@@ -49,12 +79,13 @@ const COLLECTIONS: Record<string, AssistantCollection> = {
  * reference data needed to READ their health — never staff, accounts,
  * settings, occurrences, audit logs, scores, photos or imports.
  */
-export type AssistantAudience = "all" | "medical";
+export type AssistantAudience = "all" | "medical" | "organizer";
 
-const MEDICAL_COLLECTIONS: readonly string[] = ["campers", "bedrooms", "teams", "transports", "categories", "medicationDoses"];
+const MEDICAL_COLLECTIONS: readonly string[] = ["participants", "bedrooms", "teams", "transports", "categories", "medicationDoses"];
 
 function collectionsFor(audience: AssistantAudience): Record<string, AssistantCollection> {
   if (audience === "all") return COLLECTIONS;
+  if (audience === "organizer") return Object.fromEntries(Object.entries(COLLECTIONS).filter(([name]) => name !== "medicationDoses"));
   return Object.fromEntries(MEDICAL_COLLECTIONS.map((name) => [name, COLLECTIONS[name]]));
 }
 
@@ -112,50 +143,35 @@ function normalizeIds(value: unknown, parentKey = ""): unknown {
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [key, normalizeIds(child, key.startsWith("$") ? parentKey : key)]));
 }
 
-function safeProjection(config: AssistantCollection, requested: unknown): Record<string, 0 | 1> {
+/** First stage of every query: only the allowlisted fields exist from here on. */
+function allowlistStage(config: AssistantCollection): Record<string, unknown> {
+  return { $project: Object.fromEntries(config.fields.map((field) => [field, 1])) };
+}
+
+/** The caller's projection, reduced to allowlisted paths (inclusive when any field is included). */
+function requestedProjection(config: AssistantCollection, requested: unknown): Record<string, 0 | 1> | null {
+  if (!requested || typeof requested !== "object" || Array.isArray(requested)) return null;
+  const allowed = new Set(["_id", ...config.fields]);
   const projection: Record<string, 0 | 1> = {};
-  if (requested && typeof requested === "object" && !Array.isArray(requested)) {
-    for (const [key, value] of Object.entries(requested as Record<string, unknown>)) {
-      if (!/^[A-Za-z0-9_.]+$/.test(key)) continue;
-      if (value === 0 || value === 1) projection[key] = value;
-    }
+  for (const [key, value] of Object.entries(requested as Record<string, unknown>)) {
+    if (!/^[A-Za-z0-9_.]+$/.test(key) || !allowed.has(key.split(".")[0])) continue;
+    if (value === 0 || value === 1) projection[key] = value;
   }
-  const hidden = new Set(config.hiddenFields ?? []);
-  for (const field of hidden) delete projection[field];
-  const inclusive = Object.values(projection).some((value) => value === 1);
-  if (!inclusive) for (const field of hidden) projection[field] = 0;
-  return projection;
+  const inclusive = Object.entries(projection).some(([key, value]) => key !== "_id" && value === 1);
+  if (inclusive) for (const [key, value] of Object.entries(projection)) if (value === 0 && key !== "_id") delete projection[key];
+  return Object.keys(projection).length ? projection : null;
 }
 
-function assertNoHiddenReferences(value: unknown, config: AssistantCollection): void {
-  const hidden = config.hiddenFields ?? [];
-  if (Array.isArray(value)) {
-    for (const item of value) assertNoHiddenReferences(item, config);
-    return;
-  }
-  if (!value || typeof value !== "object") {
-    if (typeof value === "string" && value.startsWith("$") && hidden.some((field) => value === `$${field}` || value.startsWith(`$${field}.`))) {
-      throw new Error("O pipeline tentou acessar um campo protegido.");
-    }
-    return;
-  }
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (hidden.some((field) => key === field || key.startsWith(`${field}.`))) throw new Error("O pipeline tentou acessar um campo protegido.");
-    assertNoHiddenReferences(child, config);
-  }
-}
-
-function sanitize(value: unknown, hidden = new Set<string>()): unknown {
+function sanitize(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
   if (value instanceof ObjectId) return value.toString();
-  if (Array.isArray(value)) return value.map((v) => sanitize(v, hidden));
+  if (Array.isArray(value)) return value.map((v) => sanitize(v));
   if (!value || typeof value !== "object") return value;
   const out: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (hidden.has(key)) continue;
     // Binary-like values are metadata only; bytes never leave the server.
     if (child && typeof child === "object" && ((child as { _bsontype?: string })._bsontype === "Binary" || child instanceof Uint8Array)) continue;
-    out[key] = sanitize(child, hidden);
+    out[key] = sanitize(child);
   }
   return out;
 }
@@ -167,7 +183,7 @@ function compactResult(value: unknown): unknown {
 }
 
 /** The read-only tools this session may call — scoped to the audience's collections. */
-export function buildAssistantTools(audience: AssistantAudience): AssistantTool[] {
+export function buildAssistantTools(audience: AssistantAudience, session?: import("../types").Session): AssistantTool[] {
   const allowed = collectionsFor(audience);
   return [
   {
@@ -177,11 +193,10 @@ export function buildAssistantTools(audience: AssistantAudience): AssistantTool[
     run: async () => {
       const db = await getDb();
       return Promise.all(Object.entries(allowed).map(async ([name, config]) => {
-        const [count, sample] = await Promise.all([
-          db.collection(name).estimatedDocumentCount(),
-          db.collection(name).findOne({}, { projection: safeProjection(config, {}) }),
-        ]);
-        return { collection: name, description: config.description, count, fields: sample ? Object.keys(sanitize(sample, new Set(config.hiddenFields)) as Record<string, unknown>).sort() : [] };
+        const count = name === "medicationDoses"
+          ? await db.collection(name).countDocuments({ personId: { $in: session ? await medicationIds(session) : [] } })
+          : await db.collection(name).estimatedDocumentCount();
+        return { collection: name, description: config.description, count, fields: ["_id", ...config.fields] };
       }));
     },
   },
@@ -192,7 +207,7 @@ export function buildAssistantTools(audience: AssistantAudience): AssistantTool[
       type: "object",
       properties: {
         collection: { type: "string", enum: Object.keys(allowed) },
-        filter: { type: "object", description: "Filtro MongoDB. Ex.: {\"bedroom\":\"id\"}, {\"checkin\":null}, {\"name\":{\"$regex\":\"Ana\",\"$options\":\"i\"}}", additionalProperties: true },
+        filter: { type: "object", description: "Filtro MongoDB. Ex.: {\"bedroom\":\"id\"}, {\"checkin\":null}, {\"kind\":\"camper\"}", additionalProperties: true },
         projection: { type: "object", description: "Campos a incluir (1) ou excluir (0).", additionalProperties: { type: "integer", enum: [0, 1] } },
         sort: { type: "object", description: "Ordenação por campo: 1 crescente, -1 decrescente.", additionalProperties: { type: "integer", enum: [-1, 1] } },
         limit: { type: "integer", minimum: 1, maximum: MAX_ROWS },
@@ -204,18 +219,25 @@ export function buildAssistantTools(audience: AssistantAudience): AssistantTool[
       const { name, config } = collectionOf(args.collection, allowed);
       const filter = args.filter && typeof args.filter === "object" && !Array.isArray(args.filter) ? args.filter : {};
       assertSafe(filter, "filter");
-      assertNoHiddenReferences(filter, config);
       const rawSort = args.sort && typeof args.sort === "object" && !Array.isArray(args.sort) ? args.sort as Record<string, unknown> : {};
-      assertNoHiddenReferences(rawSort, config);
       const sort = Object.fromEntries(Object.entries(rawSort).filter(([key, value]) => /^[A-Za-z0-9_.]+$/.test(key) && (value === 1 || value === -1))) as Record<string, 1 | -1>;
       const limit = Math.min(MAX_ROWS, Math.max(1, typeof args.limit === "number" ? Math.floor(args.limit) : 50));
+      const projection = requestedProjection(config, args.projection);
+      // the allowlist projection comes FIRST: the filter / sort only ever see allowlisted fields
+      const pipeline: Record<string, unknown>[] = [
+        allowlistStage(config),
+        { $match: normalizeIds(filter) as Record<string, unknown> },
+        ...(Object.keys(sort).length ? [{ $sort: sort }] : []),
+        { $limit: limit },
+        ...(projection ? [{ $project: projection }] : []),
+      ];
+      if (name === "medicationDoses") {
+        const ids = session ? await medicationIds(session) : [];
+        pipeline.unshift({ $match: { personId: { $in: ids } } });
+      }
       const db = await getDb();
-      const docs = await db.collection(name)
-        .find(normalizeIds(filter) as Record<string, unknown>, { projection: safeProjection(config, args.projection), maxTimeMS: MAX_TIME_MS })
-        .sort(sort)
-        .limit(limit)
-        .toArray();
-      return compactResult({ collection: name, returned: docs.length, limit, rows: sanitize(docs, new Set(config.hiddenFields)) });
+      const docs = await db.collection(name).aggregate(pipeline, { maxTimeMS: MAX_TIME_MS, allowDiskUse: false }).toArray();
+      return compactResult({ collection: name, returned: docs.length, limit, rows: sanitize(docs) });
     },
   },
   {
@@ -238,14 +260,18 @@ export function buildAssistantTools(audience: AssistantAudience): AssistantTool[
         const keys = Object.keys(stage as Record<string, unknown>);
         if (keys.length !== 1 || !SAFE_AGGREGATE_STAGES.has(keys[0])) throw new Error(`Estágio não permitido: ${keys[0] ?? "vazio"}`);
         assertSafe(stage, "pipeline");
-        assertNoHiddenReferences(stage, config);
       }
-      const pipeline = normalizeIds(args.pipeline) as Record<string, unknown>[];
+      // the allowlist projection comes FIRST: no stage ever sees a field outside it
+      const pipeline = [allowlistStage(config), ...(normalizeIds(args.pipeline) as Record<string, unknown>[])];
       // A final hard cap protects both Mongo and the model even when the caller omitted $limit.
       pipeline.push({ $limit: MAX_ROWS });
+      if (name === "medicationDoses") {
+        const ids = session ? await medicationIds(session) : [];
+        pipeline.unshift({ $match: { personId: { $in: ids } } });
+      }
       const db = await getDb();
       const rows = await db.collection(name).aggregate(pipeline, { maxTimeMS: MAX_TIME_MS, allowDiskUse: false }).toArray();
-      return compactResult({ collection: name, rows: sanitize(rows, new Set(config.hiddenFields)) });
+      return compactResult({ collection: name, rows: sanitize(rows) });
     },
   },
   ];
@@ -277,8 +303,8 @@ export function assistantResponsesToolSpecs(audience: AssistantAudience) {
   ];
 }
 
-export async function runAssistantTool(audience: AssistantAudience, name: string, rawArgs: string): Promise<string> {
-  const tool = buildAssistantTools(audience).find((item) => item.name === name);
+export async function runAssistantTool(audience: AssistantAudience, name: string, rawArgs: string, session?: import("../types").Session): Promise<string> {
+  const tool = buildAssistantTools(audience, session).find((item) => item.name === name);
   if (!tool) return JSON.stringify({ error: `Ferramenta desconhecida: ${name}` });
   let args: Record<string, unknown> = {};
   try {
@@ -292,4 +318,10 @@ export async function runAssistantTool(audience: AssistantAudience, name: string
     console.error("assistant tool failed", name, error);
     return JSON.stringify({ error: error instanceof Error ? error.message : "Consulta indisponível." });
   }
+}
+
+async function medicationIds(session: import("../types").Session): Promise<string[]> {
+  const { listMedicationDoses } = await import("../models/medications");
+  const { permittedMedicationIds } = await import("../routes/medications");
+  return [...await permittedMedicationIds(session, (await listMedicationDoses()).map((d) => d.personId))];
 }

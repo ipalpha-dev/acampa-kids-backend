@@ -1,36 +1,38 @@
 import { getDb } from "../db";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "sms_usage";
 
-/** what one text costs on Comtele, in reais — ≈ 9,5 centavos per SMS sent */
+/** what one SMS costs, in reais — ≈ 9,5 centavos per SMS sent (the "Sobre" page estimate) */
 export const SMS_COST_BRL = 0.095;
 
+/** One message request to notifications-api: template + how many went out. Never a phone, e-mail or person id. */
 export interface SmsUsageEntry {
   at: Date;
-  /** E.164 phone the text went to */
-  phone: string;
-  /** message length — Comtele bills long texts per 160-char segment */
-  chars: number;
+  templateSlug: string;
+  channel: "sms" | "email";
+  sent: number;
 }
 
 export interface SmsUsageTotal {
   sent: number;
-  /** sent × SMS_COST_BRL */
+  /** SMS sent × SMS_COST_BRL */
   costBrl: number;
   lastAt: string | null;
 }
 
 export async function recordSms(entry: SmsUsageEntry): Promise<void> {
+  if (entry.sent <= 0) return;
   const db = await getDb();
   await db.collection(COLLECTION).insertOne(entry).catch((e) => console.error("sms usage: insert failed", e));
 }
 
-/** Totals for the settings "Sobre" page: how many texts went out and what they cost. */
+/** Totals for the settings "Sobre" page: how many SMS went out and what they cost (e-mails are not counted). */
 export async function smsUsageTotal(): Promise<SmsUsageTotal> {
   const db = await getDb();
   const rows = (await db
     .collection(COLLECTION)
-    .aggregate([{ $group: { _id: null, sent: { $sum: 1 }, lastAt: { $max: "$at" } } }])
+    .aggregate([{ $match: { channel: { $ne: "email" } } }, { $group: { _id: null, sent: { $sum: { $ifNull: ["$sent", 1] } }, lastAt: { $max: "$at" } } }])
     .toArray()) as { sent: number; lastAt: Date | null }[];
   const r = rows[0];
   return { sent: r?.sent ?? 0, costBrl: (r?.sent ?? 0) * SMS_COST_BRL, lastAt: r?.lastAt ? r.lastAt.toISOString() : null };
@@ -38,5 +40,5 @@ export async function smsUsageTotal(): Promise<SmsUsageTotal> {
 
 export async function ensureSmsUsageIndex(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ at: -1 });
+  await ensureIndex(db.collection(COLLECTION), { at: -1 });
 }

@@ -13,7 +13,6 @@ import { IMAGE_MODELS, generateImage, isImageShape } from "../services/imageAi";
 import { describeStyleTokens } from "../services/htmlStyle";
 import { NOTES_MAX_CHARS, NOTES_MODES, sortCamperNotes, type CamperNotesFields, type NotesSubject } from "../services/camperNotesAi";
 import { FIELD_DEDUP_MODEL, dedupField, isDedupField } from "../services/fieldDedupAi";
-import { GUESS_SEX_MODEL, guessCamperSex } from "../services/guessCamperSexAi";
 import type { Role, SessionUser } from "../types";
 
 interface Env {
@@ -260,7 +259,7 @@ ai.get("/models", async (c) => {
 ai.use("/edit", async (c, next) => {
   const role = c.get("activeRole");
   if (role !== "admin") {
-    if (role !== "staff" && role !== "health_staff") {
+    if (role !== "staff") {
       return c.json({ error: { code: "FORBIDDEN", message: "Você não tem permissão para usar o assistente." } }, 403);
     }
     const scope = await resolveScope(c.get("user"));
@@ -273,7 +272,7 @@ ai.use("/edit", async (c, next) => {
 const editorGuard = createMiddleware<Env>(async (c, next) => {
   const role = c.get("activeRole");
   if (role !== "admin") {
-    if (role !== "staff" && role !== "health_staff") return c.json({ error: { code: "FORBIDDEN", message: "Sem permissão." } }, 403);
+    if (role !== "staff") return c.json({ error: { code: "FORBIDDEN", message: "Sem permissão." } }, 403);
     const scope = await resolveScope(c.get("user"));
     if (!scope.all && !scope.organizer && !scope.medical) return c.json({ error: { code: "FORBIDDEN", message: "Sem permissão." } }, 403);
   }
@@ -370,23 +369,6 @@ ai.post("/dedup-field", async (c) => {
   const r = await dedupField(body.field, value, c.req.raw.signal);
   if (r.usage) void recordAiUsage({ at: new Date(), vendor: FIELD_DEDUP_MODEL.vendor, model: FIELD_DEDUP_MODEL.id, kind: "dedup_field", userId: c.get("userId"), ...r.usage, ok: true });
   return c.json({ value: r.value, changed: r.changed });
-});
-
-/**
- * POST /api/ai/guess-sex { name } → { sex: "F" | "M" | null }
- *
- * Background fill of the hidden sex field on the camper form, from the kid's
- * (Brazilian) first name. Jev 1.13 narrow yes/no decisions (OpenRouter).
- * Best-effort: any failure or a disabled gateway returns `sex: null` so the
- * form never blocks.
- */
-ai.post("/guess-sex", async (c) => {
-  const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
-  const name = typeof body?.name === "string" ? body.name.trim().slice(0, 100) : "";
-  if (!name || !config.ai.openRouterApiKey) return c.json({ sex: null });
-  const r = await guessCamperSex(name, c.req.raw.signal);
-  if (r.usage) void recordAiUsage({ at: new Date(), vendor: GUESS_SEX_MODEL.vendor, model: GUESS_SEX_MODEL.id, kind: "guess_sex", userId: c.get("userId"), ...r.usage, ok: true });
-  return c.json({ sex: r.sex });
 });
 
 ai.post("/edit", async (c) => {

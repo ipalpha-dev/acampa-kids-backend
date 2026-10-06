@@ -56,7 +56,7 @@ async function buildPatch(body: Record<string, unknown>, partial: boolean): Prom
 teams.use("*", requireAuth);
 
 /** GET /api/teams — every logged-in team member / admin (names + colours are public inside the app). */
-teams.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => c.json({ teams: (await listTeams()).map(serializeTeam) }));
+teams.get("/", requireRole("admin", "staff", "parent"), async (c) => c.json({ teams: (await listTeams()).map(serializeTeam) }));
 
 // ── write: admin or organizer ──────────────────────────────────────────────────────
 
@@ -97,12 +97,12 @@ teams.post("/auto-assign-campers", async (c) => {
   if (!body || !Array.isArray(body.groups) || body.groups.some((group) => !Array.isArray(group) || group.some((id) => typeof id !== "string"))) return fail(c, "GROUPS_INVALID", "Os grupos de crianças são inválidos.");
   const all = await listTeams();
   if (all.length < 2) return fail(c, "TEAMS_REQUIRED", "Crie pelo menos dois times para fazer a distribuição.", 409);
-  const [{ getDb }, { ObjectId }] = await Promise.all([import("../db"), import("mongodb")]);
+  const { getDb } = await import("../db");
   const groups = body.groups as string[][];
   const flat = groups.flat();
-  if (flat.some((id) => !ObjectId.isValid(id)) || new Set(flat).size !== flat.length) return fail(c, "GROUPS_INVALID", "Os grupos de crianças são inválidos.");
+  if (flat.some((id) => !id) || new Set(flat).size !== flat.length) return fail(c, "GROUPS_INVALID", "Os grupos de crianças são inválidos.");
   const db = await getDb();
-  const existing = flat.length ? await db.collection("campers").countDocuments({ _id: { $in: flat.map((id) => new ObjectId(id)) }, draft: { $ne: true } }) : 0;
+  const existing = flat.length ? await db.collection("participants").countDocuments({ kind: "camper", personId: { $in: flat }, draft: { $ne: true } }) : 0;
   if (existing !== flat.length) return fail(c, "GROUPS_INVALID", "Uma criança não está mais disponível.", 409);
   const assigned = await assignCamperGroupsAcrossTeams(all.map((team) => team._id), groups);
   publish("campers");
@@ -113,13 +113,13 @@ teams.post("/auto-assign-campers", async (c) => {
 teams.put("/assignments", async (c) => {
   const body = await c.req.json<{ kind?: unknown; ids?: unknown; teamId?: unknown }>().catch(() => null);
   if (!body || (body.kind !== "camper" && body.kind !== "staff") || !Array.isArray(body.ids) || body.ids.length === 0 || body.ids.some((id) => typeof id !== "string") || (body.teamId !== null && typeof body.teamId !== "string")) return fail(c, "ASSIGNMENT_INVALID", "A distribuição é inválida.");
-  const [{ getDb }, { ObjectId }] = await Promise.all([import("../db"), import("mongodb")]);
+  const { getDb } = await import("../db");
   const ids = body.ids as string[];
-  if (ids.some((id) => !ObjectId.isValid(id)) || new Set(ids).size !== ids.length) return fail(c, "ASSIGNMENT_INVALID", "As pessoas são inválidas.");
+  if (ids.some((id) => !id) || new Set(ids).size !== ids.length) return fail(c, "ASSIGNMENT_INVALID", "As pessoas são inválidas.");
   if (body.teamId && !(await findTeamById(body.teamId))) return fail(c, "TEAM_NOT_FOUND", "Time não encontrado.", 404);
   const db = await getDb();
-  const collection = body.kind === "camper" ? "campers" : "staff";
-  const filter: Record<string, unknown> = { _id: { $in: ids.map((id) => new ObjectId(id)) }, draft: { $ne: true } };
+  const collection = "participants";
+  const filter: Record<string, unknown> = { kind: body.kind === "camper" ? "camper" : "team", personId: { $in: ids }, draft: { $ne: true } };
   if (body.kind === "staff") filter.active = { $ne: false };
   const existing = await db.collection(collection).countDocuments(filter);
   if (existing !== ids.length) return fail(c, "PERSON_NOT_FOUND", "Uma pessoa não está mais disponível.", 404);

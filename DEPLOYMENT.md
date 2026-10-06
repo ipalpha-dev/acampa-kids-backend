@@ -22,28 +22,16 @@ committed YAML or frontend `VITE_*` variables.
 | `MONGODB_DB` | `camping` |
 | `MONGO_USERNAME`, `MONGO_PASSWORD` | Deployment-only expansion variables from Secret `mongo-credentials`, keys `username`, `password`; credentials must be URI-safe |
 | `FILES_DIR` | `/app/data/files`, mounted from `acampa-2025-pictures-pvc` |
-| `JWT_SECRET` | Secret `acampa-2025-secrets`, key `jwt-secret`; required, strong, never the development default |
-| `SESSION_HOURS` | `96` |
-| `OTP_EXPIRE_MINUTES` | `5` |
-| `OTP_MAX_ATTEMPTS` | `3` |
-| `ACCOUNT_FREEZE_MINUTES` | `30` |
-| `RESEND_COOLDOWN_SECONDS` | `60` |
-| `COMTELE_API_KEY` | Secret `acampa-2025-secrets`, key `comtele-api-key`; required in production. Empty enables console-only mock OTP |
-| `COMTELE_PREFIX` | `AcampaKids` |
-| `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (SMS links) |
-| `PUBLIC_ORIGIN` | `https://ipalpha-kids-camping.kevyn.com.br` (image URLs in notification emails). Alias `BACKEND_PUBLIC_URL`. Empty = mail send is refused |
-| `SENDGRID_API_KEY` | Optional Secret `acampa-2025-secrets`, key `sendgrid-api-key`. Empty = notification emails are logged only |
-| `MAIL_FROM` | `alphakids@kevyn.com.br` (verified SendGrid sender) |
-| `MAIL_FROM_NAME` | `Acampa Kids` |
+| `SESSION_TOKEN_KEY` | Secret `acampa-2025-secrets`, key `session-token-key` — 32 bytes (`openssl rand -hex 32`); seals the per-role IPAlpha tokens kept in each session (AES-256-GCM). Rotating it ends every session |
+| `SESSION_HOURS` | `96` (fallback only; auth-api's `sessionIdleHours` wins) |
+| `SUPER_ADMIN_PERSON_IDS` | comma list of IPAlpha person ids of the deployment owners |
+| `TRUST_PROXY_HOPS` | `1` (Traefik appends the real peer as the last `X-Forwarded-For` entry). Set to the number of appending proxies; `0` ignores the header |
+| `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (the `{link}` of the message templates) |
 | `NOTIFY_COALESCE_SECONDS` | `20` |
-| `IMPORT_ADMIN_PHONE` | Admin E.164 phone notified when an AI import review takes over five minutes |
-| `IMPORT_SUPER_ADMIN_PHONE` | Super-admin E.164 phone for import error alerts; default `+5561985891092` |
-| `WORKER_SECRET` | Secret `acampa-2025-secrets`, key `worker-secret`; shared by the API and the import worker for `POST /api/worker/reviewed` (websocket event per reviewed record). **Required (not optional): pods fail to start without the key — patch the Secret before rolling out** |
-| `BACKEND_URL` | Worker only: `http://acampa-2025-backend:3000` (cluster-internal API address for the callback) |
-| `SUPER_ADMIN_PHONE` | E.164 phone guaranteed the top-level `admin` login role at API startup |
+| `IPALPHA_ENV` | `prod` in production; `preview` / `dev` enable the wizard's synthetic sample camp (decision 71 — anything else answers 403 `SAMPLE_DISABLED`) |
 | `AI_BASE_URL` | `https://ai-models.kevyn.com.br/v1` |
 | `AI_API_KEY` | Secret `acampa-2025-secrets`, key `ai-api-key`; optional, empty disables AI |
-| `OPENROUTER_API_KEY` | Secret `acampa-2025-secrets`, key `openrouter-api-key`; optional. Empty disables Jev (icon suggestions + every closed import decision: column mapping, health bucketing, option/transport/team/leader matching, neurodivergent yes/no, name sex) — the generative fallback then does all of it, slower. Worker also needs it for health structuring |
+| `OPENROUTER_API_KEY` | Secret `acampa-2025-secrets`, key `openrouter-api-key`; optional. Empty disables the editor's icon suggestions (imports no longer use AI in Acampa — persons-api runs them through ai-api, cost on the project) |
 | `AI_TRANSCRIBE_URL` | `https://whisper.kevyn.com.br/v1`; empty hides voice input |
 | `AI_TRANSCRIBE_MODEL` | `whisper-large-v3-turbo` |
 | `AI_TRANSCRIBE_KEY` | Optional Secret key `ai-transcribe-key`; leave absent if the speech endpoint needs no authentication |
@@ -55,6 +43,19 @@ committed YAML or frontend `VITE_*` variables.
 | `FACE_SERVICE_URL` | `http://acampa-2025-face:8000` (cluster-internal only). Empty disables the parents' photo search |
 | `FACE_MATCH_THRESHOLD` | `0.22`; low so parents find their kid (a few other children in the results is ok) |
 | `FACE_MIN_DETECTION_SCORE` | `0.4` |
+| `IPALPHA_AUTH_API_URL` | auth-api base URL (server-to-server; JWKS at `/.well-known/jwks.json`). **Every `IPALPHA_*` below (+ `SESSION_TOKEN_KEY`) is required — any missing = nobody can sign in** (boot logs the missing names, never values) |
+| `IPALPHA_AUTH_ORIGIN` | auth-webapp origin that hosts the sign-in popup / One Tap frame |
+| `IPALPHA_PERSONS_API_URL` | persons-api base URL (names, health, registrations, links, count, birthdays today) |
+| `IPALPHA_NOTIFICATIONS_API_URL` | notifications-api base URL (template messages by person id) |
+| `IPALPHA_TOKEN_ISSUER` | auth-api `iss` |
+| `IPALPHA_CLIENT_ID`, `IPALPHA_ENTRY_POINT`, `IPALPHA_REDIRECT_URI` | Acampa's confidential external entry point in auth-api |
+| `IPALPHA_CLIENT_SECRET` | Secret ref only — the entry point's client secret |
+| `IPALPHA_SYSTEM_CLIENT_ID` | Acampa's app-bound system client: `login:relay`, `projects:editions`, `projects:app-members`, `projects:templates`, `persons:app-names`, `notifications:send-template`, `dispatch:app-channel` (CONTRACTS §14, §22) |
+| `IPALPHA_SYSTEM_CLIENT_SECRET` | Secret ref only |
+| `IPALPHA_PROJECT_ID` | the yearly Acampa project (camps = its editions; roles = its memberships) |
+| `IPALPHA_PROJECTS_API_URL` | projects-api base URL (editions, memberships, message templates) |
+| `IPALPHA_DISPATCH_URL` | optional — dispatch-api origin for the ONE app-channel socket (`/api/dispatch/socket.io`, namespace `/apps`). Empty = no socket: import batches arrive by webhook and by the catch-up (boot, the importer's reads) from persons-api |
+| `IPALPHA_WEBHOOK_SECRET` | Secret ref only — the app webhook signing secret (Mordomia / Developers portal → app → webhook, shown once). Webhook URL to register: `https://<acampa host>/api/dispatch/webhook`. Empty = the webhook answers 503 |
 
 MongoDB uses `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`
 from `mongo-credentials`, and `MONGO_INITDB_DATABASE=camping`. These initialize
@@ -68,7 +69,7 @@ variable. `DEV_LAN` is development-only. Docker excludes local `.env` files.
 ### Rotating or adding a secret key
 
 `acampa-2025-secrets` already exists, so **patch** it — never re-create it from a
-single `--from-literal`, that would drop `jwt-secret` and the rest. Read the value
+single `--from-literal`, that would drop `session-token-key` and the rest. Read the value
 from the terminal so it never reaches shell history or the process table:
 
 ```bash
@@ -117,68 +118,75 @@ kubectl -n ipalpha-kids rollout restart deploy/acampa-2025-backend
 - Keep one backend replica with `Recreate`: realtime sockets and notification
   timers are process-local. A rollout causes a brief API interruption; clients
   reconnect. MongoDB also uses `Recreate` to avoid two writers on its data files.
-- Run a separate worker Deployment from the same backend image with command
-  `bun run src/worker.ts`. Keep one replica: it claims 15 imported campers at a
-  time, reviews them in parallel, requeues stale claims on startup and sleeps
-  for 10 seconds only when the queue is empty.
-- Startup creates indexes and performs one-off migrations (including transports,
-  teams, parent-edit stamps, and admin roster entries). Back up MongoDB before
-  publishing. A code rollback does **not** undo these data migrations.
-- Legacy images in MongoDB migrate lazily when read; no manual copy is needed.
-  Do not upload local development `data/` to production: file metadata must match
+- There is **no worker Deployment any more** (decision 58): spreadsheet imports
+  run in persons-api. Delete the old worker Deployment and the `worker-secret`
+  key when rolling this version out.
+- Probes: `GET /live` (always 200) for liveness, `GET /ready` (200 only when
+  boot finished and MongoDB answers; 503 `{ready, checks, info}` otherwise —
+  `info.dispatch` shows the app-channel socket state and never gates) for
+  readiness/startup. The server listens before MongoDB connects; `/api/*`
+  answers 503 `STARTING` until boot finished.
+- **Indexes never block boot (decision 91).** An index MongoDB refuses
+  (duplicate keys under a unique index, an index of the same name with other
+  keys / options…) is logged once as `[indexes] <collection>.<name> not created
+  (code <n> <CodeName>)` — the name and the error code only, never the
+  message (a duplicate-key message carries document values) — and boot goes
+  on. `/ready` then stays **200** with `checks.indexes: "degraded"`, so the pod
+  keeps serving (slower queries / no uniqueness guard on that index); only
+  MongoDB itself being down answers 503. Fix the data or drop the conflicting
+  index by hand, then restart the backend to re-create it. Indexes whose keys
+  changed in the IPAlpha rewrite carry new names (`*_v2`: e.g.
+  `campId_1_dose_scheduled_unique_v2`, `personId_campId_unique_v2`), so they never
+  collide with an index an older version left behind.
+- Keep ONE backend replica: dispatch keeps exactly one app-channel socket per
+  app (a second instance would replace the first; the replaced one stops).
+- Startup only creates indexes (see above) and guarantees one active camp; it
+  runs **no data migration** and reads no collection or field of an older
+  version (decision 90).
+- Backups (`bun run scripts/backup.ts`) dump an explicit ALLOWLIST of this
+  version's collections (`src/services/backupScope.ts`); a restore writes only
+  those. Sessions, sign-ins in flight, import jobs and any leftover of an older
+  version are never exported.
+- Do not upload local development `data/` to production: file metadata must match
   the target database. Runtime pictures, `.env`, and scratch files are excluded
   from Git/build contexts.
-- Check Settings → notification toggles and SMS redirect before real use. Do not
-  send OTPs or enable broadcasts just to smoke-test a deployment.
+- Check Settings → notification toggles before real use. Do not
+  send login codes or enable broadcasts just to smoke-test a deployment.
 
-## Multi-year camps boot migration
+## Boot and the IPAlpha cut-over
 
-`migrateToCamps()` (`services/campMigration.ts`) runs once on every boot,
-right after `ensureCampsCollection()` and before the rest of the index setup
-(`index.ts`). It is idempotent — safe against an already-migrated database,
-and safe against a fresh one:
+At boot `ensureFirstCamp()` (`services/campMigration.ts`) only guarantees one
+active camp; there is **no data migration** (decisions 33, 90). People, roles and
+contacts live in IPAlpha: before the first camp on this version, provision the
+Acampa app / project / editions / clients through the core seams (deployment
+§8) and seed the message templates (`bun scripts/templates-json.ts` prints the
+catalog; or Settings → Mensagens → "Criar modelos"). Backups are format v3;
+older files are refused.
 
-1. **First camp.** If the `camps` collection is empty, inserts one `{ label:
-   "Acampa Kids <year>", year, active: true }` — `year` comes from the
-   earliest `schedule_events.date`, else today's year. A pre-existing
-   single-camp deployment becomes this camp's **active** year.
-2. **Stamp.** Every document in a SCOPED collection with no `campId` gets the
-   active camp's id (`updateMany({ campId: { $exists: false } }, { $set: {
-   campId } })`, per collection).
-3. **Settings.** The single `settings._id: "global"` document is copied to
-   `_id: <activeCampId>` (the old `"global"` document is left in place,
-   unused).
-4. **Legacy indexes.** Every SCOPED collection's index whose key does **not**
-   start with `campId` is dropped (`bedrooms.name`, `categories.key`,
-   `schedule_roles.name`, `staff.phone`, the `medicationDoses` scheduled-key
-   unique index…) — the `ensure*Indexes()` calls right after this recreate
-   them through the scoped `Db` wrapper as `{ campId, ... }`, so a second
-   camp never collides with the first on the old unique keys.
-5. **User marks.** `users.prepDone` / `welcomeSentAt` / `photosSmsSentAt`
-   move to `userCampState` rows for the first camp, then are unset from
-   `users`.
+### Cut-over checklist (decision 90 — Kevyn: "clean all the data. no need to backup")
 
-Expect log lines like:
+The old Acampa data is **not** kept: the production `camping` database is
+dropped entirely, **without a backup**, and the new version starts empty.
 
-```
-🏕️  camps: created the first camp — "Acampa Kids 2025"
-🏕️  camps: stamped campId on 148 "campers" document(s)
-🏕️  camps: copied settings.global → settings for the active camp
-🏕️  camps: dropped legacy index "bedrooms.name_1"
-🏕️  camps: moved prep/welcome marks of 42 user(s) to userCampState
-🏕️  active camp: "Acampa Kids 2025" (<id>)
-```
+1. Stop the old backend so nothing writes meanwhile:
+   `kubectl -n ipalpha-kids scale deploy/acampa-2025-backend --replicas=0`
+   (and delete the old worker Deployment + the `worker-secret` key).
+2. **Drop the whole `camping` database** (no backup, no export):
 
-A database already on multi-year camps just prints the last line — steps 1–5
-find nothing to do.
+   ```bash
+   kubectl -n ipalpha-kids exec deploy/acampa-2025-mongo -- sh -c \
+     'mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+        --authenticationDatabase admin --eval "db.getSiblingDB(\"camping\").dropDatabase()"'
+   ```
 
-### Upgrading an existing deployment
-
-**Take a backup first** (`bun run backup`, from `backend/`) — the migration
-touches every collection in the database. Then roll out the new image as
-usual; the migration runs automatically at boot, before the API accepts
-traffic. No manual step, no downtime beyond the normal rollout window (one
-replica, `Recreate` — see "Persistent data and upgrades" above).
+   Check it is gone (`--eval "db.adminCommand({listDatabases:1}).databases.map(d=>d.name)"`).
+3. Empty the pictures volume (`/mnt/k8s-data/ipalpha/kids/acampa-2025/pictures`):
+   its files belonged to the dropped database's metadata and can no longer be
+   reached — kids' photos are not kept around unreachable.
+4. Publish the new version (`./publish -d`, then `./publish`) and verify the
+   running image, the rollout (old pods gone) and `GET /ready` →
+   `{ ready: true, checks: { mongo: "ok", indexes: "ok" } }`.
+5. Provision core (above) and create the first edition's data in the app.
 
 ## Verification
 

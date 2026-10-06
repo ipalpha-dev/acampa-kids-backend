@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireManager, requireRole } from "../middleware/roles";
 import {
   deletePrepSection,
@@ -14,19 +14,12 @@ import { cleanHtml } from "../services/html";
 import { publish } from "../services/realtime";
 import { canSeePrep, isParent, prepDoneOf, resolveScope, type Scope } from "../services/scope";
 import { notifyPreparationChange } from "../services/notify";
-import { findByPhone, setUserPrepDone } from "../models/users";
+import { setUserPrepDoneState } from "../models/userCampState";
 import { clearPrepDoneKey } from "../models/preparation";
 import { isEmojiLike } from "../utils";
-import { PREP_AUDIENCES, PREP_TEAM_AUDIENCES, type PrepAudience, type PrepSection, type Role, type SessionUser } from "../types";
+import { PREP_AUDIENCES, PREP_TEAM_AUDIENCES, type PrepAudience, type PrepSection } from "../types";
 
-interface Env {
-  Variables: {
-    userId: string;
-    sessionId: string;
-    activeRole: Role;
-    user: SessionUser;
-  };
-}
+type Env = { Variables: AuthVariables };
 
 /**
  * Preparação — general sections read before the camp ("O que levar",
@@ -101,7 +94,7 @@ function buildPatch(body: Record<string, unknown>, partial: boolean): { patch: P
 
 preparation.use("*", requireAuth);
 
-preparation.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
+preparation.get("/", requireRole("admin", "staff", "parent"), async (c) => {
   const scope = await resolveScope(c.get("user"));
   return c.json({ sections: serializePrepListFor(await listPrepSections(), scope) });
 });
@@ -120,9 +113,7 @@ preparation.put("/me/:key", requireRole("parent"), async (c) => {
   const section = await findPrepSectionById(key.slice("section:".length));
   const scope = await resolveScope(c.get("user"));
   if (!section || !canSeePrep(scope, section)) return fail(c, "SECTION_NOT_FOUND", "Seção não encontrada.", 404);
-  const me = await findByPhone(c.get("user").phone);
-  if (!me) return fail(c, "USER_NOT_FOUND", "Cadastro não encontrado.", 404);
-  const updated = await setUserPrepDone(me._id, key, body.done);
+  const updated = await setUserPrepDoneState(c.get("user").personId, key, body.done);
   // only this parent's payload changes; publish re-sends the collection to everyone (cheap, ~10 sections)
   publish("preparation");
   return c.json({ done: (updated?.prepDone ?? []).includes(key) });

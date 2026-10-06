@@ -5,8 +5,8 @@
  */
 
 export const SCOPED = new Set([
-  "campers",
-  "staff",
+  "participants",
+  "importConflicts",
   "bedrooms",
   "categories",
   "transports",
@@ -23,7 +23,6 @@ export const SCOPED = new Set([
   "checkinLog",
   "camperChangeLog",
   "camperLookups",
-  "camperImports",
   "ai_usage",
   "sms_usage",
 ]);

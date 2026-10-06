@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { camperMatchKey, normalizeKey, remapLink, settingsToImport, staffMatchKey, stripForCopy, type SettingsRemap } from "./campImport";
+import { normalizeKey, remapLink, settingsToImport, stripForCopy, type SettingsRemap } from "./campImport";
 import { DEFAULT_SETTINGS } from "../models/settings";
 import type { Settings } from "../types";
 
@@ -7,34 +7,6 @@ describe("normalizeKey", () => {
   test("is accent and case insensitive", () => {
     expect(normalizeKey("Ana Lúcia")).toBe(normalizeKey("ana lucia"));
     expect(normalizeKey("JOÃO")).toBe(normalizeKey("joão"));
-  });
-});
-
-describe("camperMatchKey", () => {
-  test("matches by name + birth date when both are known", () => {
-    const key = camperMatchKey({ name: "Ana Lúcia", birthDate: "2012-05-01" });
-    expect(key).toBe(camperMatchKey({ name: "ana lucia", birthDate: "2012-05-01" }));
-  });
-  test("falls back to cpf when there is no birth date", () => {
-    expect(camperMatchKey({ name: "Ana", birthDate: null, cpf: "111.222.333-44" })).toBe("cpf:11122233344");
-  });
-  test("falls back to externalId when there is neither birth date nor cpf", () => {
-    expect(camperMatchKey({ name: "Ana", birthDate: null, externalId: "ext-1" })).toBe("ext:ext-1");
-  });
-  test("null when nothing identifies the camper", () => {
-    expect(camperMatchKey({ name: "", birthDate: null })).toBeNull();
-  });
-});
-
-describe("staffMatchKey", () => {
-  test("matches by phone when known", () => {
-    expect(staffMatchKey({ name: "Ana", phone: "+5511999999999" })).toBe("phone:5511999999999");
-  });
-  test("falls back to normalized name when there is no phone", () => {
-    expect(staffMatchKey({ name: "Ana Lúcia", phone: null })).toBe(`name:${normalizeKey("Ana Lucia")}`);
-  });
-  test("null when neither identifies the person", () => {
-    expect(staffMatchKey({ name: "", phone: null })).toBeNull();
   });
 });
 
@@ -87,40 +59,26 @@ describe("stripForCopy", () => {
 
 describe("settingsToImport", () => {
   const remap: SettingsRemap = {
-    staff: (id) => (id === "known" ? "known-new" : null),
+    person: (id) => (id === "known" ? "known" : null),
     vehicle: (id) => (id === "vehicle-known" ? "vehicle-new" : null),
   };
 
-  test("drops staff ids that don't remap", () => {
-    const source: Settings = { ...DEFAULT_SETTINGS, organizers: { staffIds: ["known", "unknown"] } };
-    expect(settingsToImport(source, remap).organizers).toEqual({ staffIds: ["known-new"] });
+  test("drops bus helpers whose person is not on the team or whose vehicle didn't remap", () => {
+    const source: Settings = { ...DEFAULT_SETTINGS, busHelpers: { helpers: [{ personId: "known", vehicleId: "vehicle-known" }, { personId: "known", vehicleId: "unknown" }, { personId: "unknown", vehicleId: "vehicle-known" }] } };
+    expect(settingsToImport(source, remap).busHelpers).toEqual({ helpers: [{ personId: "known", vehicleId: "vehicle-new" }] });
   });
-  test("drops bus helpers whose staff or vehicle didn't remap", () => {
-    const source: Settings = { ...DEFAULT_SETTINGS, busHelpers: { helpers: [{ staffId: "known", vehicleId: "vehicle-known" }, { staffId: "known", vehicleId: "unknown" }, { staffId: "unknown", vehicleId: "vehicle-known" }] } };
-    expect(settingsToImport(source, remap).busHelpers).toEqual({ helpers: [{ staffId: "known-new", vehicleId: "vehicle-new" }] });
-  });
-  test("drops parent contacts whose staff didn't remap", () => {
-    const source: Settings = { ...DEFAULT_SETTINGS, parentContacts: [{ id: "c1", title: "Coordenação", staffId: "known" }, { id: "c2", title: "Outro", staffId: "unknown" }] };
-    expect(settingsToImport(source, remap).parentContacts).toEqual([{ id: "c1", title: "Coordenação", staffId: "known-new" }]);
+  test("drops parent contacts whose person is not on the team", () => {
+    const source: Settings = { ...DEFAULT_SETTINGS, parentContacts: [{ id: "c1", title: "Coordenação", personId: "known" }, { id: "c2", title: "Outro", personId: "unknown" }] };
+    expect(settingsToImport(source, remap).parentContacts).toEqual([{ id: "c1", title: "Coordenação", personId: "known" }]);
   });
   test("never copies windows, drafts, wizardMode or galleryPublished", () => {
     const source: Settings = { ...DEFAULT_SETTINGS, wizardMode: true, galleryPublished: true, kidsRoomsDraft: true, scoreDraft: true };
     const out = settingsToImport(source, remap);
-    expect(out).not.toHaveProperty("wizardMode");
-    expect(out).not.toHaveProperty("galleryPublished");
-    expect(out).not.toHaveProperty("kidsRoomsDraft");
-    expect(out).not.toHaveProperty("scoreDraft");
-    expect(out).not.toHaveProperty("checkinWindow");
-    expect(out).not.toHaveProperty("busReturnWindow");
-    expect(out).not.toHaveProperty("staffAccessWindow");
-    expect(out).not.toHaveProperty("parentAccessWindow");
-    expect(out).not.toHaveProperty("scoreHideWindow");
-    expect(out).not.toHaveProperty("checkinReminder");
+    for (const key of ["wizardMode", "galleryPublished", "kidsRoomsDraft", "scoreDraft", "checkinWindow", "busReturnWindow", "staffAccessWindow", "parentAccessWindow", "scoreHideWindow", "checkinReminder"]) expect(out).not.toHaveProperty(key);
   });
-  test("keeps checkinLocations, notifications and smsRedirect verbatim", () => {
+  test("keeps checkinLocations and notifications verbatim", () => {
     const out = settingsToImport(DEFAULT_SETTINGS, remap);
     expect(out.checkinLocations).toEqual(DEFAULT_SETTINGS.checkinLocations);
     expect(out.notifications).toEqual(DEFAULT_SETTINGS.notifications);
-    expect(out.smsRedirect).toEqual(DEFAULT_SETTINGS.smsRedirect);
   });
 });

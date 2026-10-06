@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { ScoreEntry } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "scores";
 
@@ -13,10 +14,8 @@ function toEntry(doc: Record<string, unknown> | null): ScoreEntry | null {
     kind: (doc.kind as ScoreEntry["kind"]) ?? "add",
     note: (doc.note as string) ?? "",
     camperId: (doc.camperId as string) ?? null,
-    camperName: (doc.camperName as string) ?? "",
     eventId: (doc.eventId as string) ?? null,
-    byUserId: (doc.byUserId as string) ?? "",
-    byName: (doc.byName as string) ?? "",
+    byPersonId: (doc.byPersonId as string) ?? "",
     createdAt: doc.createdAt as Date,
   };
 }
@@ -88,7 +87,7 @@ export async function deleteScoresOfTeam(teamId: string): Promise<void> {
 
 export async function ensureScoreIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ teamId: 1, createdAt: -1 });
-  await db.collection(COLLECTION).createIndex({ createdAt: -1 });
-  await db.collection(COLLECTION).createIndex({ eventId: 1, camperId: 1 }, { sparse: true });
+  await ensureIndex(db.collection(COLLECTION), { teamId: 1, createdAt: -1 });
+  await ensureIndex(db.collection(COLLECTION), { createdAt: -1 });
+  await ensureIndex(db.collection(COLLECTION), { eventId: 1, camperId: 1 }, { sparse: true });
 }

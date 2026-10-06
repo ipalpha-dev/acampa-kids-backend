@@ -208,7 +208,7 @@ function fieldLines(lists: OptionLabels, subject: NotesSubject): Record<FieldKey
       leftover === "healthNotes"
         ? `- "healthNotes": string. Para a EQUIPE MÉDICA: o que fazer em crise, condições/doenças fora da lista, alergias fora da lista, cuidados (convulsão, pressão, gestação, limitação física, cirurgia recente, fisioterapia, órteses) E TAMBÉM tudo o que não coube em nenhum outro campo. O que sobra fica com as palavras originais do texto (só retire os trechos movidos). Se tudo foi para outros campos, devolva "".`
         : `- "healthNotes": string. Para a EQUIPE MÉDICA: o que fazer em crise, condições/doenças fora da lista, alergias fora da lista, cuidados físicos (sonambulismo, enurese/xixi na cama, vômitos, convulsão, febre frequente, dor), fisioterapia, órteses. Frases curtas; assuntos diferentes em linhas diferentes.`,
-    bedroomPreference: `- "bedroomPreference": string. Com quem ${who} quer dividir o quarto e pedidos sobre a CAMA. Formato: nomes separados por vírgula, iniciais maiúsculas, mantendo entre parênteses o vínculo ou a ressalva que ${author} escreveu: "Bernardo Faria, Lucas (primo), Daniel Araújo (convidado, não confirmado)". Pedido sobre a cama vem depois dos nomes, separado por " · ", com o motivo curto se houver: "Enzo Dalfovo · só cama de baixo (vira dormindo)", "cama de cima só com proteção lateral". Se o texto só diz "cama de baixo", escreva "só cama de baixo".`,
+    bedroomPreference: `- "bedroomPreference": string. Com quem ${who} quer dividir o quarto e pedidos sobre a CAMA. Formato: nomes separados por vírgula, iniciais maiúsculas, mantendo entre parênteses o vínculo ou a ressalva que ${author} escreveu: "Tomás Exemplo, Lucas (primo), Davi Modelo (convidado, não confirmado)". Pedido sobre a cama vem depois dos nomes, separado por " · ", com o motivo curto se houver: "Caio Exemplo · só cama de baixo (vira dormindo)", "cama de cima só com proteção lateral". Se o texto só diz "cama de baixo", escreva "só cama de baixo".`,
     weightKg: `- "weightKg": number ou null. Peso em kg quando o texto informa ("Peso: 28.5kg" → 28.5, "30kgkg" → 30). null se não há.`,
     insurance: `- "insurance": string. Nome do convênio/plano de saúde ("Sulamerica", "Bradesco Saúde", "Amil Black"); iniciais maiúsculas, sem o número da carteirinha. "Não tem" / "particular" → "Não tem". Vazio se não há.`,
     insuranceCard: `- "insuranceCard": string. Número da carteirinha do convênio, só dígitos e espaços como escrito. Vazio se não há.`,
@@ -249,9 +249,9 @@ const GUIDE: { needs: FieldKey[]; line: string }[] = [
 /**
  * The part of the prompt both modes share: what each field means, the exact
  * output formats and the "where does X go" guide, restricted to the fields
- * of the subject. Tuned against the real registration export (see
- * scripts/notes-ai-test.ts) until Grok, Claude and GPT gave the same field
- * placement.
+ * of the subject. Tuned until Grok, Claude and GPT gave the same field
+ * placement (the prompt lab over the old registration export was removed —
+ * decision 90: old data is never read).
  */
 function fieldSpec(lists: OptionLabels, subject: NotesSubject): string {
   const fields = SUBJECT_FIELDS[subject];

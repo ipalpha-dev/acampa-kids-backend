@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { findCamperById } from "../models/campers";
 import { insertOccurrence, listOccurrences, occurrencesForGroup } from "../models/occurrences";
 import { findStaffById } from "../models/staff";
@@ -7,16 +7,9 @@ import { cleanHtml } from "../services/html";
 import { notifyOccurrence } from "../services/notify";
 import { publish } from "../services/realtime";
 import { resolveScope, viewerOccurrenceGroup } from "../services/scope";
-import type { Occurrence, OccurrenceGroup, OccurrencePerson, Role, SessionUser } from "../types";
+import type { Occurrence, OccurrenceGroup } from "../types";
 
-interface Env {
-  Variables: {
-    userId: string;
-    sessionId: string;
-    activeRole: Role;
-    user: SessionUser;
-  };
-}
+type Env = { Variables: AuthVariables };
 
 const occurrences = new Hono<Env>();
 const DESCRIPTION_MAX = 400_000;
@@ -31,11 +24,8 @@ export function serializeOccurrence(occurrence: Occurrence) {
     campers: occurrence.campers,
     staff: occurrence.staff,
     description: occurrence.description,
-    createdBy: {
-      id: occurrence.createdByUserId,
-      name: occurrence.createdByName,
-      role: occurrence.createdByRole,
-    },
+    /** person ids (names via POST /api/people/names) */
+    createdBy: { personId: occurrence.createdByPersonId, role: occurrence.createdByRole, group: occurrence.createdByGroup },
     createdAt: occurrence.createdAt,
   };
 }
@@ -43,7 +33,7 @@ export function serializeOccurrence(occurrence: Occurrence) {
 async function occurrenceAccess(c: Context<Env, string>): Promise<OccurrenceGroup | null> {
   const role = c.get("activeRole");
   if (role === "admin") return "admin";
-  if (role !== "staff" && role !== "health_staff") return null;
+  if (role !== "staff") return null;
   return viewerOccurrenceGroup(await resolveScope(c.get("user")));
 }
 
@@ -55,11 +45,11 @@ function parseIds(value: unknown, label: string): string[] | { error: string } {
   return ids;
 }
 
-async function resolvePeople(ids: string[], kind: "camper" | "staff"): Promise<OccurrencePerson[] | { error: string }> {
+/** The involved people must be this camp's participants; stored as person ids only. */
+async function resolvePeople(ids: string[], kind: "camper" | "staff"): Promise<string[] | { error: string }> {
   const records = await Promise.all(ids.map((id) => (kind === "camper" ? findCamperById(id) : findStaffById(id))));
-  const missing = records.findIndex((record) => !record);
-  if (missing >= 0) return { error: `${kind === "camper" ? "Acampante" : "Pessoa da equipe"} não encontrado(a).` };
-  return records.map((record) => ({ id: record!._id, name: record!.name }));
+  if (records.some((record) => !record)) return { error: `${kind === "camper" ? "Acampante" : "Pessoa da equipe"} não encontrado(a).` };
+  return records.map((record) => record!._id);
 }
 
 occurrences.use("*", requireAuth);
@@ -93,15 +83,7 @@ occurrences.post("/", async (c) => {
   if (!Array.isArray(staff)) return fail(c, "STAFF_INVALID", staff.error, 404);
 
   const user = c.get("user");
-  const created = await insertOccurrence({
-    campers,
-    staff,
-    description,
-    createdByUserId: c.get("userId"),
-    createdByName: user.name,
-    createdByRole: c.get("activeRole"),
-    createdByGroup: group,
-  });
+  const created = await insertOccurrence({ campers, staff, description, createdByPersonId: user.id, createdByRole: user.coreRole, createdByGroup: group });
   publish("occurrences");
   void notifyOccurrence(created);
   return c.json({ occurrence: serializeOccurrence(created) }, 201);

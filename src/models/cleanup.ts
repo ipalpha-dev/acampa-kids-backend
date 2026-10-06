@@ -1,4 +1,3 @@
-import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import { currentCampId } from "../services/campContext";
 import { countUserNotificationMarks, resetUserPhotosNotice, resetUserWelcome } from "./userCampState";
@@ -8,8 +7,8 @@ import { countUserNotificationMarks, resetUserPhotosNotice, resetUserWelcome } f
  * its own documents AND every reference the rest of the data keeps to them,
  * so the database is left ready for next year's camp.
  *
- * What is NEVER touched here: the login accounts (`users` — only the "already
- * sent" marks they carry are cleared) and the categories.
+ * What is NEVER touched here: the people themselves (they live in IPAlpha
+ * persons-api / projects-api — only Acampa's camp-ops rows go) and the categories.
  * The funções (schedule roles) with their instructions / preparation texts and
  * the Preparação / Instruções content are reused every year, so they only go
  * when asked for explicitly: the "docs" block, and the Programação toggle.
@@ -24,62 +23,56 @@ export type CleanupGroup = (typeof CLEANUP_GROUPS)[number];
  */
 export async function wipeCampers(): Promise<number> {
   const db = await getDb();
-  const { deletedCount } = await db.collection("campers").deleteMany({});
+  const { deletedCount } = await db.collection("participants").deleteMany({ kind: "camper" });
   await Promise.all([
     db.collection("checkinLog").deleteMany({}),
     db.collection("medicationDoses").deleteMany({}),
     db.collection("camperChangeLog").deleteMany({}),
     db.collection("camperLookups").deleteMany({}),
     db.collection("scores").deleteMany({ camperId: { $ne: null } }),
-    db.collection("staff").updateMany(
-      { $or: [{ foreignLookupCount: { $gt: 0 } }, { foreignLookupCamperIds: { $exists: true, $ne: [] } }] },
-      { $set: { foreignLookupCount: 0, foreignLookupNames: [], foreignLookupCamperIds: [], foreignLookupAlertedAt: null, updatedAt: new Date() } },
+    db.collection("participants").updateMany(
+      { kind: "team", $or: [{ foreignLookupCount: { $gt: 0 } }, { foreignLookupCamperIds: { $exists: true, $ne: [] } }] },
+      { $set: { foreignLookupCount: 0, foreignLookupCamperIds: [], foreignLookupAlertedAt: null, updatedAt: new Date() } },
     ),
   ]);
   return deletedCount;
 }
 
 /**
- * The admin lists a team member may be on. When the Equipe block is wiped,
- * each one may be KEPT (Configurações → Limpeza, the toggles on the card):
- * its people survive the wipe and the list itself is left as it is.
+ * Settings lists that point at team members. When the Equipe block is wiped,
+ * each may be KEPT (Configurações → Limpeza): its people survive the wipe and
+ * the list stays. (Helper ROLES live in projects-api and are never touched.)
  */
-export const STAFF_KEEP_GROUPS = ["organizers", "gameOrganizers", "scoreHelpers", "medicalStaff", "checkinHelpers", "busHelpers", "vestHelpers", "photographers", "parentContacts"] as const;
+export const STAFF_KEEP_GROUPS = ["busHelpers", "parentContacts"] as const;
 export type StaffKeepGroup = (typeof STAFF_KEEP_GROUPS)[number];
 
-/** The staff ids one admin list holds (each list has its own shape). */
-function staffIdsOf(settings: Record<string, unknown> | null, group: StaffKeepGroup): string[] {
+function personIdsOf(settings: Record<string, unknown> | null, group: StaffKeepGroup): string[] {
   if (!settings) return [];
-  if (group === "busHelpers") return ((settings.busHelpers as { helpers?: { staffId: string }[] } | undefined)?.helpers ?? []).map((h) => h.staffId);
-  if (group === "parentContacts") return ((settings.parentContacts as { staffId: string }[] | undefined) ?? []).map((p) => p.staffId);
-  return (settings[group] as { staffIds?: string[] } | undefined)?.staffIds ?? [];
+  if (group === "busHelpers") return ((settings.busHelpers as { helpers?: { personId: string }[] } | undefined)?.helpers ?? []).map((h) => h.personId);
+  return ((settings.parentContacts as { personId: string }[] | undefined) ?? []).map((p) => p.personId);
 }
 
-/** The emptied value of one admin list. */
 function emptyList(group: StaffKeepGroup): unknown {
-  if (group === "busHelpers") return { helpers: [] };
-  if (group === "parentContacts") return [];
-  return { staffIds: [] };
+  return group === "busHelpers" ? { helpers: [] } : [];
 }
 
 /**
- * Every team member except the people on the admin lists named in `keep`, plus
- * their event assignments, the kids they looked after and every admin list that
- * named them. Login accounts (`users`) are never touched. A kept list is left
- * untouched — its people stay on it.
+ * Every team row except the people on the lists named in `keep`, plus their
+ * event assignments, the kids they looked after and every list that named
+ * them. Memberships in projects-api are not touched (Mordomia owns them).
  */
 export async function wipeStaff(keep: readonly StaffKeepGroup[] = []): Promise<number> {
   const db = await getDb();
   const settings = (await db.collection("settings").findOne({ _id: currentCampId() as never })) as Record<string, unknown> | null;
-  const saved = new Set(keep.flatMap((g) => staffIdsOf(settings, g)).filter((id) => ObjectId.isValid(id)));
-  const filter = { _id: { $nin: [...saved].map((id) => new ObjectId(id)) } };
-  const doomed = (await db.collection("staff").find(filter, { projection: { _id: 1 } }).toArray()).map((d) => String(d._id));
-  const { deletedCount } = await db.collection("staff").deleteMany(filter);
+  const saved = [...new Set(keep.flatMap((g) => personIdsOf(settings, g)))];
+  const filter = { kind: "team", personId: { $nin: saved } };
+  const doomed = (await db.collection("participants").find(filter, { projection: { personId: 1 } }).toArray()).map((d) => String(d.personId));
+  const { deletedCount } = await db.collection("participants").deleteMany(filter);
   const now = new Date();
   const lists: Record<string, unknown> = { updatedAt: now };
   for (const g of STAFF_KEEP_GROUPS) if (!keep.includes(g)) lists[g] = emptyList(g);
   await Promise.all([
-    db.collection("campers").updateMany({ caretakerId: { $in: doomed } }, { $set: { caretakerId: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ kind: "camper", caretakerId: { $in: doomed } }, { $set: { caretakerId: null, updatedAt: now } }),
     db.collection<Record<string, unknown>>("schedule_events").updateMany(
       { "assignments.staffId": { $in: doomed } },
       { $pull: { assignments: { staffId: { $in: doomed } } } as never, $set: { updatedAt: now } },
@@ -95,8 +88,8 @@ export async function wipeBedrooms(): Promise<number> {
   const { deletedCount } = await db.collection("bedrooms").deleteMany({});
   const now = new Date();
   await Promise.all([
-    db.collection("campers").updateMany({ $or: [{ bedroom: { $ne: null } }, { bed: { $ne: null } }, { caretakerId: { $ne: null } }] }, { $set: { bedroom: null, bed: null, caretakerId: null, updatedAt: now } }),
-    db.collection("staff").updateMany({ bedroom: { $ne: null } }, { $set: { bedroom: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ kind: "camper", $or: [{ bedroom: { $ne: null } }, { bed: { $ne: null } }, { caretakerId: { $ne: null } }] }, { $set: { bedroom: null, bed: null, caretakerId: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ kind: "team", bedroom: { $ne: null } }, { $set: { bedroom: null, updatedAt: now } }),
   ]);
   return deletedCount;
 }
@@ -107,8 +100,7 @@ export async function wipeTransports(): Promise<number> {
   const { deletedCount } = await db.collection("transports").deleteMany({});
   const now = new Date();
   await Promise.all([
-    db.collection("campers").updateMany({ transportation: { $ne: null } }, { $set: { transportation: null, updatedAt: now } }),
-    db.collection("staff").updateMany({ transportation: { $ne: null } }, { $set: { transportation: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ transportation: { $ne: null } }, { $set: { transportation: null, updatedAt: now } }),
     db.collection("settings").updateOne({ _id: currentCampId() as never }, { $set: { busHelpers: { helpers: [] }, updatedAt: now } }),
   ]);
   return deletedCount;
@@ -120,8 +112,7 @@ export async function wipeTeams(): Promise<number> {
   const { deletedCount } = await db.collection("teams").deleteMany({});
   const now = new Date();
   await Promise.all([
-    db.collection("campers").updateMany({ team: { $ne: null } }, { $set: { team: null, updatedAt: now } }),
-    db.collection("staff").updateMany({ team: { $ne: null } }, { $set: { team: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ team: { $ne: null } }, { $set: { team: null, updatedAt: now } }),
     db.collection("scores").deleteMany({}),
   ]);
   return deletedCount;
@@ -156,7 +147,7 @@ export async function wipeDocs(): Promise<number> {
   const [instructions, prep] = await Promise.all([
     db.collection("instructions").deleteMany({}),
     db.collection("prep_sections").deleteMany({}),
-    db.collection("staff").updateMany({ prepDone: { $exists: true, $ne: [] } }, { $set: { prepDone: [], updatedAt: now } }),
+    db.collection("participants").updateMany({ kind: "team", prepDone: { $exists: true, $ne: [] } }, { $set: { prepDone: [], updatedAt: now } }),
     db.collection("userCampState").updateMany({ campId, prepDone: { $exists: true, $ne: [] } }, { $set: { prepDone: [] } }),
   ]);
   return instructions.deletedCount + prep.deletedCount;
@@ -206,17 +197,6 @@ export async function resetCampSettings(): Promise<void> {
   );
 }
 
-/** SUPER ADMIN handover: drop every login except the phones in `keep`. Sessions go with them. */
-export async function wipeUsersExcept(keepPhones: readonly string[]): Promise<number> {
-  const db = await getDb();
-  const keep = [...new Set(keepPhones.filter(Boolean))];
-  const doomed = await db.collection("users").find(keep.length ? { phone: { $nin: keep } } : {}, { projection: { _id: 1 } }).toArray();
-  const ids = doomed.map((d) => String(d._id));
-  if (ids.length) await db.collection("sessions").deleteMany({ userId: { $in: ids } });
-  const { deletedCount } = await db.collection("users").deleteMany(keep.length ? { phone: { $nin: keep } } : {});
-  return deletedCount;
-}
-
 /** Every photo of the album. Returns the ids of the full-size files the caller must drop too. */
 export async function wipeGallery(): Promise<{ count: number; fileIds: string[] }> {
   const db = await getDb();
@@ -235,7 +215,7 @@ export async function wipeWelcomes(): Promise<number> {
   const db = await getDb();
   const now = new Date();
   const [team, parents] = await Promise.all([
-    db.collection("staff").updateMany({ welcomeSentAt: { $ne: null } }, { $set: { welcomeSentAt: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ kind: "team", welcomeSentAt: { $ne: null } }, { $set: { welcomeSentAt: null, updatedAt: now } }),
     resetUserWelcome(),
   ]);
   return team.modifiedCount + parents;
@@ -250,42 +230,12 @@ export async function wipeNotices(): Promise<number> {
   const db = await getDb();
   const now = new Date();
   const [team, parents, kids, reminder] = await Promise.all([
-    db.collection("staff").updateMany({ photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ kind: "team", photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null, updatedAt: now } }),
     resetUserPhotosNotice(),
-    db.collection("campers").updateMany({ birthdayNoticeDay: { $ne: null } }, { $unset: { birthdayNoticeDay: "" }, $set: { updatedAt: now } }),
+    db.collection("participants").updateMany({ kind: "camper", birthdayNoticeDay: { $ne: null } }, { $unset: { birthdayNoticeDay: "" }, $set: { updatedAt: now } }),
     db.collection("settings").updateOne({ _id: currentCampId() as never, "checkinReminder.sentAt": { $ne: null } }, { $set: { "checkinReminder.sentAt": null, updatedAt: now } }),
   ]);
   return team.modifiedCount + parents + kids.modifiedCount + reminder.modifiedCount;
-}
-
-/**
- * The import DICTIONARY cache (`camperImportDictionary`): the remembered
- * spreadsheet-value → app-value mappings that both the staff and the camper
- * imports reuse to skip re-mapping the same columns every year. SUPER ADMIN
- * only — clearing it makes the next import start its mapping from scratch.
- */
-export async function wipeImportCache(): Promise<number> {
-  const db = await getDb();
-  const { deletedCount } = await db.collection("camperImportDictionary").deleteMany({});
-  return deletedCount;
-}
-
-/** Staff-import column mappings only (`staff-column:…`). */
-export async function wipeStaffImportCache(): Promise<number> {
-  const db = await getDb();
-  const { deletedCount } = await db.collection("camperImportDictionary").deleteMany({ field: { $regex: "^staff-column:" } });
-  return deletedCount;
-}
-
-/** How many remembered mappings the import dictionary cache holds. */
-export async function countImportCache(): Promise<{ count: number; staff: number; campers: number }> {
-  const db = await getDb();
-  const col = db.collection("camperImportDictionary");
-  const [count, staff] = await Promise.all([
-    col.countDocuments({}),
-    col.countDocuments({ field: { $regex: "^staff-column:" } }),
-  ]);
-  return { count, staff, campers: Math.max(0, count - staff) };
 }
 
 /**
@@ -297,9 +247,9 @@ export async function countNotificationMarks(): Promise<{ welcomes: number; noti
   const db = await getDb();
   const sent = { $ne: null };
   const [staffWelcome, staffPhotos, birthdays, reminder, userMarks] = await Promise.all([
-    db.collection("staff").countDocuments({ welcomeSentAt: sent }),
-    db.collection("staff").countDocuments({ photosSmsSentAt: sent }),
-    db.collection("campers").countDocuments({ birthdayNoticeDay: sent }),
+    db.collection("participants").countDocuments({ kind: "team", welcomeSentAt: sent }),
+    db.collection("participants").countDocuments({ kind: "team", photosSmsSentAt: sent }),
+    db.collection("participants").countDocuments({ kind: "camper", birthdayNoticeDay: sent }),
     db.collection("settings").countDocuments({ _id: currentCampId() as never, "checkinReminder.sentAt": sent }),
     countUserNotificationMarks(),
   ]);

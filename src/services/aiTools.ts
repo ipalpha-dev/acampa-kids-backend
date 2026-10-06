@@ -8,8 +8,9 @@ import { listPrepSections } from "../models/preparation";
 import { listStaff } from "../models/staff";
 import { listTeams } from "../models/teams";
 import { getSettings } from "../models/settings";
-import { listAdmins } from "../models/users";
-import { bedroomCapacity } from "../types";
+import { bedroomCapacity, COORDINATION_ROLE } from "../types";
+import { membersOf } from "./members";
+import { namesOf } from "./people";
 import { assignmentDetail, autoAudienceLabel, isAutomatic, teamMap } from "./schedule";
 
 /**
@@ -18,8 +19,9 @@ import { assignmentDetail, autoAudienceLabel, isAutomatic, teamMap } from "./sch
  * pushed up-front: the model asks, the backend answers with a compact JSON.
  *
  * Privacy: the model never receives camper data (only the *fields* a camper
- * record has), nor staff health data. Staff names appear only where the app
- * already shows them to the whole team (assignments, contacts, lists).
+ * record has), nor any health data, phone or e-mail. Team names (read live
+ * from IPAlpha) appear only where the app already shows them to the whole
+ * team (assignments, contacts, lists).
  */
 
 export interface AiTool {
@@ -49,7 +51,9 @@ function textOf(html: string, max = 1500): string {
 }
 
 async function labelMaps() {
-  const [cats, teams, transports, staff] = await Promise.all([listCategories(), listTeams(), listTransports(), listStaff({ active: true })]);
+  const [cats, teams, transports, rows] = await Promise.all([listCategories(), listTeams(), listTransports(), listStaff({ active: true })]);
+  const names = await namesOf(rows.map((s) => s._id));
+  const staff = rows.map((s) => ({ ...s, name: names.get(s._id)?.name ?? "" }));
   const option = new Map<string, string>();
   for (const c of cats) for (const o of c.options) option.set(o.id, o.label);
   for (const t of teams) option.set(t._id, t.name); // teams are looked up like options (Staff.team / Camper.team)
@@ -88,12 +92,12 @@ export const AI_TOOLS: AiTool[] = [
   {
     name: "get_checkin_info",
     description:
-      "SÓ o check-in das crianças: janela oficial (data e horário de abertura e fechamento, definida pela organização), como funciona a chamada na igreja e no ônibus, e os nomes dos ajudantes de check-in (sem telefone). Use quando o texto falar de check-in, chegada ou entrega das crianças. Não traz o resto da programação nem contatos.",
+      "SÓ o check-in das crianças: janela oficial (data e horário de abertura e fechamento, definida pela organização), como funciona a chamada na igreja e no ônibus, e os nomes dos ajudantes de check-in. Use quando o texto falar de check-in, chegada ou entrega das crianças. Não traz o resto da programação nem contatos.",
     parameters: NO_ARGS,
     run: async () => {
-      const [settings, { staff, option }] = await Promise.all([getSettings(), labelMaps()]);
-      const byId = new Map(staff.map((s) => [s._id, s]));
-      const name = (id: string) => byId.get(id)?.name;
+      const [settings, { option }, checkin] = await Promise.all([getSettings(), labelMaps(), membersOf("checkin").catch(() => [])]);
+      const names = await namesOf([...checkin.map((m) => m.personId), ...settings.busHelpers.helpers.map((h) => h.personId)]);
+      const name = (id: string) => names.get(id)?.name;
       const fmt = (d: Date | null) => (d ? d.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: "long", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : null);
       return {
         janela_checkin: { abre: fmt(settings.checkinWindow.from) ?? "[não definido]", fecha: fmt(settings.checkinWindow.until) ?? "[não definido]" },
@@ -101,8 +105,8 @@ export const AI_TOOLS: AiTool[] = [
           igreja: "O pai/mãe entrega a criança, confirma os dados da ficha no app e o ajudante registra o check-in. A partir daí a criança está sob responsabilidade da equipe.",
           onibus: "Segunda chamada, na porta do veículo, antes de sair: confirma que cada criança embarcou no veículo certo.",
         },
-        ajudantes_checkin_igreja: settings.checkinHelpers.staffIds.map(name).filter(Boolean),
-        ajudantes_onibus: settings.busHelpers.helpers.map((h) => ({ veiculo: option.get(h.vehicleId) ?? h.vehicleId, nome: name(h.staffId) })).filter((h) => h.nome),
+        ajudantes_checkin_igreja: checkin.map((m) => name(m.personId)).filter(Boolean),
+        ajudantes_onibus: settings.busHelpers.helpers.map((h) => ({ veiculo: option.get(h.vehicleId) ?? h.vehicleId, nome: name(h.personId) })).filter((h) => h.nome),
       };
     },
   },
@@ -203,13 +207,14 @@ export const AI_TOOLS: AiTool[] = [
     run: async () => ({
       crianca: {
         identificacao: ["Nome", "Data de nascimento (idade)", "Peso (kg)"],
+        onde_fica: "Nome, documentos, responsáveis e saúde ficam no cadastro IPAlpha da pessoa; o app do acampamento guarda só quarto, time, transporte, check-ins e observações.",
         acampamento: ["Time", "Transporte (veículo)", "Quarto", "Cama (posição)", "Preferência de quarto (com quem quer ficar)"],
         saude: ["Alergias", "Alergias a medicamentos", "Condições crônicas", "Medicamentos em uso (texto)", "Restrições alimentares", "Observações de saúde"],
         responsaveis: ["Nome do responsável", "Telefone do responsável", "Contato de emergência", "Convênio", "Carteirinha do convênio"],
         outros: ["Observações gerais", "Check-in na igreja (quando, por quem)", "Check-in no ônibus (quando, por quem)"],
       },
       equipe: {
-        identificacao: ["Nome", "Telefone"],
+        identificacao: ["Nome"],
         acampamento: ["Time", "Transporte (veículo)", "Quarto", "Ativo/inativo"],
         saude: ["Alergias", "Alergias a medicamentos", "Condições crônicas", "Medicamentos em uso", "Restrições alimentares", "Observações de saúde"],
         outros: ["Check-in na igreja", "Itens da Preparação marcados como feitos"],
@@ -220,26 +225,26 @@ export const AI_TOOLS: AiTool[] = [
   {
     name: "get_contacts",
     description:
-      "Contatos com telefone: administradores, organização, contatos divulgados aos pais, equipe médica, ajudantes. Use SÓ quando o usuário pedir explicitamente para incluir 'quem chamar' / telefone, ou quando o texto original já tiver uma seção de contatos. Nunca acrescente contatos por conta própria.",
+      "Quem procurar (só NOMES e a função — telefones ficam no IPAlpha e nunca vêm aqui): coordenação, contatos divulgados aos pais, organização, equipe médica, ajudantes. Use SÓ quando o usuário pedir explicitamente para incluir 'quem chamar', ou quando o texto original já tiver uma seção de contatos. Nunca acrescente contatos por conta própria.",
     parameters: NO_ARGS,
     run: async () => {
-      const [settings, admins, { staff, option }] = await Promise.all([getSettings(), listAdmins(), labelMaps()]);
-      const byId = new Map(staff.map((s) => [s._id, s]));
-      const person = (id: string) => {
-        const s = byId.get(id);
-        return s ? { nome: s.name, telefone: s.phone ?? undefined } : null;
-      };
-      const list = (ids: string[]) => ids.map(person).filter(Boolean);
+      const settings = await getSettings();
+      const roles = ["coordenacao", "organizacao", "organizacao-jogos", "pontuacao", "saude", "coletes", "checkin"] as const;
+      const lists = await Promise.all(roles.map((r) => membersOf(r).catch(() => [])));
+      const ids = [...lists.flat().map((m) => m.personId), ...settings.parentContacts.map((c) => c.personId), ...settings.busHelpers.helpers.map((h) => h.personId)];
+      const names = await namesOf(ids);
+      const list = (i: number) => [...new Set(lists[i].map((m) => names.get(m.personId)?.name).filter(Boolean))];
+      const { option } = await labelMaps();
       return {
-        administradores: admins.map((a) => ({ nome: a.name, telefone: a.phone })),
-        contatos_para_pais: settings.parentContacts.map((c) => ({ funcao: c.title, ...person(c.staffId) })),
-        organizacao: list(settings.organizers.staffIds),
-        organizacao_dos_jogos: list(settings.gameOrganizers.staffIds),
-        ajudantes_do_placar: list(settings.scoreHelpers.staffIds),
-        equipe_medica: list(settings.medicalStaff.staffIds),
-        responsaveis_coletes: list(settings.vestHelpers.staffIds),
-        ajudantes_checkin_igreja: list(settings.checkinHelpers.staffIds),
-        ajudantes_onibus: settings.busHelpers.helpers.map((h) => ({ veiculo: option.get(h.vehicleId) ?? h.vehicleId, ...person(h.staffId) })),
+        coordenacao: list(roles.indexOf(COORDINATION_ROLE)),
+        contatos_para_pais: settings.parentContacts.map((c) => ({ funcao: c.title, nome: names.get(c.personId)?.name })),
+        organizacao: list(1),
+        organizacao_dos_jogos: list(2),
+        ajudantes_do_placar: list(3),
+        equipe_medica: list(4),
+        responsaveis_coletes: list(5),
+        ajudantes_checkin_igreja: list(6),
+        ajudantes_onibus: settings.busHelpers.helpers.map((h) => ({ veiculo: option.get(h.vehicleId) ?? h.vehicleId, nome: names.get(h.personId)?.name })),
       };
     },
   },

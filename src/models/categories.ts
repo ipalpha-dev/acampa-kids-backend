@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { Category, CategoryAudience, CategoryOption, CategorySelection } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "categories";
 
@@ -106,6 +107,6 @@ export async function nextCategoryOrder(): Promise<number> {
 
 export async function ensureCategoryIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ key: 1 }, { unique: true });
-  await db.collection(COLLECTION).createIndex({ appliesTo: 1, order: 1 });
+  await ensureIndex(db.collection(COLLECTION), { key: 1 }, { unique: true });
+  await ensureIndex(db.collection(COLLECTION), { appliesTo: 1, order: 1 });
 }

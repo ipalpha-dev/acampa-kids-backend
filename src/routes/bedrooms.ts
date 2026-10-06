@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { publish } from "../services/realtime";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireManager, requireRole } from "../middleware/roles";
 import {
   countStaffPerBedroom,
@@ -14,23 +14,15 @@ import {
 } from "../models/bedrooms";
 import { countCampersPerBedroom, listCampers, updateCamper } from "../models/campers";
 import { listStaff, updateStaff } from "../models/staff";
-import { BEDROOM_GROUPS, bedroomCapacity, ROOM_ROLES, type Bedroom, type BedroomGroup, type Role, type RoomRole, type SessionUser } from "../types";
+import { BEDROOM_GROUPS, bedroomCapacity, ROOM_ROLES, type Bedroom, type BedroomGroup, type RoomRole } from "../types";
 import { serializeCamperList } from "./campers";
 import { serializeStaffList } from "./staff";
 import { canSeeBedroom, resolveScope } from "../services/scope";
-import { applyBedroomGroupToOccupants, resolveGender } from "../services/camperSex";
 import { notifyRoomsApplied, roomsAppliedMessages } from "../services/notify";
 import { getSettings } from "../models/settings";
-import { comteleEnabled } from "../services/comtele";
+import { firstName, namesOf } from "../services/people";
 
-interface Env {
-  Variables: {
-    userId: string;
-    sessionId: string;
-    activeRole: Role;
-    user: SessionUser;
-  };
-}
+type Env = { Variables: AuthVariables };
 
 const bedrooms = new Hono<Env>();
 
@@ -137,7 +129,7 @@ bedrooms.use("*", requireAuth);
 // ── read: admin sees every room; staff/health staff only their own (see services/scope.ts) ──
 
 /** GET /api/bedrooms?group=girls|boys|staff — sorted by group then number (scoped). */
-bedrooms.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
+bedrooms.get("/", requireRole("admin", "staff", "parent"), async (c) => {
   const group = c.req.query("group");
   if (group && !BEDROOM_GROUPS.includes(group as BedroomGroup)) {
     return fail(c, "GROUP_INVALID", "Ala inválida. Use girls, boys ou staff.");
@@ -150,7 +142,7 @@ bedrooms.get("/", requireRole("admin", "staff", "health_staff", "parent"), async
   return c.json({ bedrooms: list.filter((b) => canSeeBedroom(scope, b._id)).map((b) => serializeBedroom(b, occ.get(b._id))) });
 });
 
-bedrooms.get("/:id", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
+bedrooms.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
   const b = await findBedroomById(c.req.param("id"));
   // outside the viewer's scope → same answer as "does not exist" (no probing)
   if (!b || !canSeeBedroom(await resolveScope(c.get("user")), b._id)) return fail(c, "BEDROOM_NOT_FOUND", "Quarto não encontrado.", 404);
@@ -159,7 +151,7 @@ bedrooms.get("/:id", requireRole("admin", "staff", "health_staff", "parent"), as
 });
 
 /** GET /api/bedrooms/:id/detail — the room + who sleeps there (campers and staff caretakers). */
-bedrooms.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async (c) => {
+bedrooms.get("/:id/detail", requireRole("admin", "staff"), async (c) => {
   const b = await findBedroomById(c.req.param("id"));
   const scope = await resolveScope(c.get("user"));
   if (!b || !canSeeBedroom(scope, b._id)) return fail(c, "BEDROOM_NOT_FOUND", "Quarto não encontrado.", 404);
@@ -221,9 +213,6 @@ bedrooms.put("/:id", async (c) => {
 
   const updated = await updateBedroom(existing._id, result.patch);
   if (result.patch.group && result.patch.group !== existing.group) {
-    const n = await applyBedroomGroupToOccupants(existing._id, result.patch.group, { userId: c.get("userId"), signal: c.req.raw.signal });
-    if (n.campers) publish("campers");
-    if (n.staff) publish("staff");
   }
   const occ = await occupancy();
   publish("bedrooms");
@@ -250,7 +239,6 @@ function parsePlacement(v: unknown): { id: string; bedroom: unknown; roomRole: u
   return typeof o.id === "string" ? { id: o.id, bedroom: o.bedroom, roomRole: o.roomRole, caretakerId: o.caretakerId } : null;
 }
 
-const firstWord = (name: string) => name.split(" ")[0];
 
 /** null-ish bedroom must reach us as null (""/undefined = no room) */
 const asRoom = (v: unknown): string | null => (v === undefined || v === null || v === "" ? null : v as string);
@@ -283,6 +271,8 @@ bedrooms.post("/apply", async (c) => {
   const roomById = new Map(rooms.map((b) => [b._id, b]));
   const staffById = new Map(staffAll.map((s) => [s._id, s]));
   const camperById = new Map(campersAll.map((k) => [k._id, k]));
+  // decision 39: the kid's sex comes from IPAlpha with the name — the wing check reads it live
+  const sexOf = await namesOf(camperMoves.map((m) => m.id));
 
   // ── validate the placements against the FINAL state they produce ──
   const finalStaff = new Map(staffAll.map((s) => [s._id, { ...s }]));
@@ -306,17 +296,18 @@ bedrooms.post("/apply", async (c) => {
     const caretakerId = asRoom(m.caretakerId);
     if (bedroom) {
       const room = roomById.get(bedroom)!;
-      if (room.group === "staff") return fail(c, "BEDROOM_INVALID", `${firstWord(k.name)} não dorme em quarto da equipe.`);
+      if (room.group === "staff") return fail(c, "BEDROOM_INVALID", "Uma criança não dorme em quarto da equipe.");
       const wing = room.group === "girls" ? "F" : "M";
-      if (k.sex && k.sex !== wing) {
-        return fail(c, "SEX_INVALID", `${firstWord(k.name)} não pode dormir na ala ${room.group === "girls" ? "das meninas" : "dos meninos"}.`);
+      const sex = sexOf.get(k._id)?.sex ?? null;
+      if (sex && sex !== wing) {
+        return fail(c, "SEX_INVALID", `Uma das crianças não pode dormir na ala ${room.group === "girls" ? "das meninas" : "dos meninos"}.`);
       }
     }
     if (caretakerId) {
       const caretaker = finalStaff.get(caretakerId);
       if (!caretaker) return fail(c, "CARETAKER_INVALID", "Líder não encontrado.", 404);
-      if (caretaker.bedroom !== bedroom) return fail(c, "CARETAKER_INVALID", `${firstWord(caretaker.name)} não dorme neste quarto.`);
-      if (caretaker.roomRole !== "caretaker") return fail(c, "CARETAKER_INVALID", `${firstWord(caretaker.name)} é auxiliar neste quarto, não líder.`);
+      if (caretaker.bedroom !== bedroom) return fail(c, "CARETAKER_INVALID", "O líder escolhido não dorme neste quarto.");
+      if (caretaker.roomRole !== "caretaker") return fail(c, "CARETAKER_INVALID", "A pessoa escolhida é auxiliar neste quarto, não líder.");
     }
   }
 
@@ -329,11 +320,8 @@ bedrooms.post("/apply", async (c) => {
     const roomRole = (m.roomRole === undefined ? s.roomRole : m.roomRole) as RoomRole;
     if (bedroom === s.bedroom && roomRole === s.roomRole) continue; // no-op
     if (roomRole !== s.roomRole) roleChanged = true;
-    // girls/boys wing decides the sex; a staff room / no room re-guesses from the name
-    const gender = bedroom !== s.bedroom
-      ? await resolveGender({ name: s.name, bedroomId: bedroom, requested: s.probableGender, guessIfMissing: true, signal: c.req.raw.signal, userId: c.get("userId") })
-      : undefined;
-    await updateStaff(m.id, { bedroom, roomRole, ...(gender !== undefined ? { sex: gender.sex, probableGender: gender.probableGender } : {}) });
+    // the girls / boys wing decides the (derived) sex
+    await updateStaff(m.id, { bedroom, roomRole });
     staffApplied++;
   }
 
@@ -343,10 +331,7 @@ bedrooms.post("/apply", async (c) => {
     const bedroom = asRoom(m.bedroom);
     const caretakerId = asRoom(m.caretakerId);
     if (bedroom === k.bedroom && caretakerId === k.caretakerId) continue; // no-op
-    const gender = bedroom !== k.bedroom
-      ? await resolveGender({ name: k.name, bedroomId: bedroom, requested: k.probableGender, guessIfMissing: true, signal: c.req.raw.signal, userId: c.get("userId") })
-      : undefined;
-    await updateCamper(m.id, { bedroom, caretakerId, ...(bedroom !== k.bedroom ? { bed: null } : {}), ...(gender !== undefined ? { sex: gender.sex, probableGender: gender.probableGender } : {}) });
+    await updateCamper(m.id, { bedroom, caretakerId, ...(bedroom !== k.bedroom ? { bed: null } : {}) });
     campersApplied++;
   }
 
@@ -401,8 +386,9 @@ bedrooms.post("/apply/preview", async (c) => {
     if (!now || now.bedroom !== k.bedroom || now.roomRole !== "caretaker") k.caretakerId = null;
   }
 
-  const messages = roomsAppliedMessages({ staff: staffAll, campers: campersAll }, { staff: afterStaff, campers: afterCampers }, settings, rooms);
-  return c.json({ messages, smsEnabled: comteleEnabled() });
+  const kidNames = new Map([...(await namesOf(afterCampers.map((k) => k._id)))].map(([id, n]) => [id, firstName(n.name)]));
+  const messages = roomsAppliedMessages({ staff: staffAll, campers: campersAll }, { staff: afterStaff, campers: afterCampers }, settings, rooms, kidNames);
+  return c.json({ messages, smsEnabled: true });
 });
 
 /** DELETE /api/bedrooms/:id — refused while someone is assigned to it. */

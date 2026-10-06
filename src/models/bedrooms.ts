@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
 import type { Bedroom, BedroomGroup } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "bedrooms";
 
@@ -75,9 +76,9 @@ export async function deleteBedroom(id: string): Promise<boolean> {
 export async function countStaffPerBedroom(): Promise<Map<string, number>> {
   const db = await getDb();
   const rows = await db
-    .collection("staff")
+    .collection("participants")
     .aggregate<{ _id: string; n: number }>([
-      { $match: { bedroom: { $type: "string" } } },
+      { $match: { kind: "team", draft: { $ne: true }, bedroom: { $type: "string" } } },
       { $group: { _id: "$bedroom", n: { $sum: 1 } } },
     ])
     .toArray();
@@ -86,6 +87,6 @@ export async function countStaffPerBedroom(): Promise<Map<string, number>> {
 
 export async function ensureBedroomIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ name: 1 }, { unique: true });
-  await db.collection(COLLECTION).createIndex({ group: 1, name: 1 });
+  await ensureIndex(db.collection(COLLECTION), { name: 1 }, { unique: true });
+  await ensureIndex(db.collection(COLLECTION), { group: 1, name: 1 });
 }

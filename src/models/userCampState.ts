@@ -1,17 +1,18 @@
 import { getDb } from "../db";
 import { currentCampId } from "../services/campContext";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "userCampState";
 
 /**
- * The per-year marks that used to live on `users` (a global, deployment-wide
- * collection — see models/users.ts): `prepDone`, `welcomeSentAt`,
- * `photosSmsSentAt`. One row per (user, camp). UNSCOPED collection (it
+ * Per-year marks of a person who is NOT a participant row (parents —
+ * CONTRACTS §15 "userCampState keyed by personId"): `prepDone`,
+ * `welcomeSentAt`, `photosSmsSentAt`. One row per (person, camp). UNSCOPED collection (it
  * carries its own `campId` field instead of relying on the `Db` wrapper),
  * because it is looked up by an explicit camp id as often as by the current one.
  */
 export interface UserCampState {
-  userId: string;
+  personId: string;
   campId: string;
   prepDone: string[];
   welcomeSentAt: Date | null;
@@ -21,7 +22,7 @@ export interface UserCampState {
 function toState(doc: Record<string, unknown> | null): UserCampState | null {
   if (!doc) return null;
   return {
-    userId: doc.userId as string,
+    personId: doc.personId as string,
     campId: doc.campId as string,
     prepDone: (doc.prepDone as string[]) ?? [],
     welcomeSentAt: (doc.welcomeSentAt as Date) ?? null,
@@ -29,23 +30,23 @@ function toState(doc: Record<string, unknown> | null): UserCampState | null {
   };
 }
 
-const EMPTY: Omit<UserCampState, "userId" | "campId"> = { prepDone: [], welcomeSentAt: null, photosSmsSentAt: null };
+const EMPTY: Omit<UserCampState, "personId" | "campId"> = { prepDone: [], welcomeSentAt: null, photosSmsSentAt: null };
 
-export async function findUserCampState(userId: string, campId: string = currentCampId()): Promise<UserCampState | null> {
+export async function findUserCampState(personId: string, campId: string = currentCampId()): Promise<UserCampState | null> {
   const db = await getDb();
-  return toState(await db.collection(COLLECTION).findOne({ userId, campId }));
+  return toState(await db.collection(COLLECTION).findOne({ personId, campId }));
 }
 
-/** Every state row for the given camp, keyed by userId — used to merge onto a list of users in one query. */
-export async function listUserCampStates(userIds: string[], campId: string = currentCampId()): Promise<Map<string, UserCampState>> {
-  if (userIds.length === 0) return new Map();
+/** Every state row for the given camp, keyed by personId — used to merge onto a list of users in one query. */
+export async function listUserCampStates(personIds: string[], campId: string = currentCampId()): Promise<Map<string, UserCampState>> {
+  if (personIds.length === 0) return new Map();
   const db = await getDb();
-  const docs = await db.collection(COLLECTION).find({ userId: { $in: userIds }, campId }).toArray();
-  return new Map(docs.map((d) => [d.userId as string, toState(d as Record<string, unknown>)!]));
+  const docs = await db.collection(COLLECTION).find({ personId: { $in: personIds }, campId }).toArray();
+  return new Map(docs.map((d) => [d.personId as string, toState(d as Record<string, unknown>)!]));
 }
 
 /** The fields a user's profile carries for the current camp, defaulting to empty when no row exists yet. */
-export function stateOrEmpty(state: UserCampState | null | undefined): Omit<UserCampState, "userId" | "campId"> {
+export function stateOrEmpty(state: UserCampState | null | undefined): Omit<UserCampState, "personId" | "campId"> {
   return state ? { prepDone: state.prepDone, welcomeSentAt: state.welcomeSentAt, photosSmsSentAt: state.photosSmsSentAt } : EMPTY;
 }
 
@@ -53,14 +54,14 @@ function isDuplicateKey(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: number }).code === 11000;
 }
 
-async function claimMark(userId: string, campId: string, field: "welcomeSentAt" | "photosSmsSentAt"): Promise<boolean> {
+async function claimMark(personId: string, campId: string, field: "welcomeSentAt" | "photosSmsSentAt"): Promise<boolean> {
   const db = await getDb();
   const now = new Date();
-  const res = await db.collection(COLLECTION).updateOne({ userId, campId, $or: [{ [field]: null }, { [field]: { $exists: false } }] }, { $set: { [field]: now } });
+  const res = await db.collection(COLLECTION).updateOne({ personId, campId, $or: [{ [field]: null }, { [field]: { $exists: false } }] }, { $set: { [field]: now } });
   if (res.modifiedCount === 1) return true;
   if (res.matchedCount === 1) return false;
   try {
-    await db.collection(COLLECTION).insertOne({ userId, campId, ...EMPTY, [field]: now });
+    await db.collection(COLLECTION).insertOne({ personId, campId, ...EMPTY, [field]: now });
     return true;
   } catch (err) {
     if (isDuplicateKey(err)) return false;
@@ -68,8 +69,8 @@ async function claimMark(userId: string, campId: string, field: "welcomeSentAt" 
   }
 }
 
-export async function claimUserWelcome(userId: string, campId: string = currentCampId()): Promise<boolean> {
-  return claimMark(userId, campId, "welcomeSentAt");
+export async function claimUserWelcome(personId: string, campId: string = currentCampId()): Promise<boolean> {
+  return claimMark(personId, campId, "welcomeSentAt");
 }
 
 export async function resetUserWelcome(campId: string = currentCampId()): Promise<number> {
@@ -78,8 +79,8 @@ export async function resetUserWelcome(campId: string = currentCampId()): Promis
   return res.modifiedCount;
 }
 
-export async function claimUserPhotosNotice(userId: string, campId: string = currentCampId()): Promise<boolean> {
-  return claimMark(userId, campId, "photosSmsSentAt");
+export async function claimUserPhotosNotice(personId: string, campId: string = currentCampId()): Promise<boolean> {
+  return claimMark(personId, campId, "photosSmsSentAt");
 }
 
 export async function resetUserPhotosNotice(campId: string = currentCampId()): Promise<number> {
@@ -88,10 +89,10 @@ export async function resetUserPhotosNotice(campId: string = currentCampId()): P
   return res.modifiedCount;
 }
 
-export async function setUserPrepDoneState(userId: string, key: string, done: boolean, campId: string = currentCampId()): Promise<UserCampState> {
+export async function setUserPrepDoneState(personId: string, key: string, done: boolean, campId: string = currentCampId()): Promise<UserCampState> {
   const db = await getDb();
   const res = await db.collection(COLLECTION).findOneAndUpdate(
-    { userId, campId },
+    { personId, campId },
     (done
       ? { $addToSet: { prepDone: key }, $setOnInsert: { welcomeSentAt: null, photosSmsSentAt: null } }
       : { $pull: { prepDone: key }, $setOnInsert: { welcomeSentAt: null, photosSmsSentAt: null } }) as never,
@@ -117,15 +118,17 @@ export async function countUserNotificationMarks(campId: string = currentCampId(
 }
 
 /** SUPER ADMIN handover / camp deletion: drop this camp's rows for the given users (or every row of the camp). */
-export async function deleteUserCampStates(campId: string, userIds?: string[]): Promise<number> {
+export async function deleteUserCampStates(campId: string, personIds?: string[]): Promise<number> {
   const db = await getDb();
   const filter: Record<string, unknown> = { campId };
-  if (userIds) filter.userId = { $in: userIds };
+  if (personIds) filter.personId = { $in: personIds };
   const res = await db.collection(COLLECTION).deleteMany(filter);
   return res.deletedCount;
 }
 
 export async function ensureUserCampStateIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ userId: 1, campId: 1 }, { unique: true });
+  // decision 91: the key moved from `userId` to `personId` → a new name, and partial so a row without
+  // `personId` (an older version's `userId` row) never makes the unique index fail
+  await ensureIndex(db.collection(COLLECTION), { personId: 1, campId: 1 }, { name: "personId_campId_unique_v2", unique: true, partialFilterExpression: { personId: { $exists: true } } });
 }

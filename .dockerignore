@@ -4,8 +4,9 @@
 node_modules
 data
 scripts/.supabase-children.json
+scripts/collect-openrouter-secret.sh
 *.log
 *.tsbuildinfo
-# Tests and the notes prompt lab (reads real registration exports) never ship in the image.
+# Tests never ship in the image (nor a stray registration export — decision 90: old data is never read).
 **/*.test.ts
-scripts/notes-ai-test.ts
+src/testing

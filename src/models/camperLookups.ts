@@ -1,4 +1,5 @@
 import { getDb } from "../db";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "camperLookups";
 
@@ -6,11 +7,10 @@ const COLLECTION = "camperLookups";
 export interface CamperLookup {
   _id: string;
   at: Date;
+  /** the kid (person id) */
   camperId: string;
-  camperName: string;
+  /** who scanned (person id) */
   byStaffId: string;
-  byStaffName: string;
-  byUserId: string;
   /** true when the kid was already in the scanner's normal scope */
   belonged: boolean;
 }
@@ -24,8 +24,8 @@ export async function insertCamperLookup(data: Omit<CamperLookup, "_id">): Promi
 export async function ensureCamperLookupIndexes(): Promise<void> {
   const db = await getDb();
   await Promise.all([
-    db.collection(COLLECTION).createIndex({ at: -1 }),
-    db.collection(COLLECTION).createIndex({ byStaffId: 1, belonged: 1, camperId: 1 }),
-    db.collection(COLLECTION).createIndex({ byStaffId: 1, at: -1 }),
+    ensureIndex(db.collection(COLLECTION), { at: -1 }),
+    ensureIndex(db.collection(COLLECTION), { byStaffId: 1, belonged: 1, camperId: 1 }),
+    ensureIndex(db.collection(COLLECTION), { byStaffId: 1, at: -1 }),
   ]);
 }

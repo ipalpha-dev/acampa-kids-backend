@@ -1,15 +1,12 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import { deleteCategory, findCategoryByKey } from "./categories";
 import type { Team } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "teams";
 
-/** the category key the teams used to live under (before they got their own collection) */
-const LEGACY_CATEGORY_KEY = "equipe";
-
 /**
- * Default palette for migrated / new teams.
+ * Default palette for new teams.
  * High-saturation, kid-nameable colours that stay distinct outdoors
  * (vermelho / laranja / amarelo / verde / ciano / azul / roxo / rosa / marrom / preto / lima).
  */
@@ -81,8 +78,7 @@ export async function unlinkTeamEverywhere(teamId: string): Promise<void> {
   const db = await getDb();
   const now = new Date();
   await Promise.all([
-    db.collection("campers").updateMany({ team: teamId }, { $set: { team: null, updatedAt: now } }),
-    db.collection("staff").updateMany({ team: teamId }, { $set: { team: null, updatedAt: now } }),
+    db.collection("participants").updateMany({ team: teamId }, { $set: { team: null, updatedAt: now } }),
   ]);
 }
 
@@ -104,44 +100,15 @@ export async function assignCamperGroupsAcrossTeams(teamIds: string[], groups: s
   }
   if (!assignments.size) return 0;
   const now = new Date();
-  await db.collection("campers").bulkWrite([...assignments].map(([id, team]) => ({
-    updateOne: { filter: { _id: new ObjectId(id), draft: { $ne: true } }, update: { $set: { team, updatedAt: now } } },
+  await db.collection("participants").bulkWrite([...assignments].map(([id, team]) => ({
+    // a hand-made distribution: remembered like any manual edit (decision 78)
+    updateOne: { filter: { kind: "camper", personId: id, draft: { $ne: true } }, update: { $set: { team, updatedAt: now }, $addToSet: { importEdited: "team" } } },
   })));
   return assignments.size;
 }
 
 export async function ensureTeamIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ order: 1, name: 1 });
-  await migrateLegacyTeamCategory();
+  await ensureIndex(db.collection(COLLECTION), { order: 1, name: 1 });
 }
 
-/**
- * One-off migration, run at boot: the teams used to be the options of the
- * `equipe` category. Each option becomes a Team document with the SAME id
- * (the option ids are ObjectId strings), so every `Staff.team` /
- * `Camper.team` keeps pointing at the right team. Inactive options come along
- * too (people may still reference them). The category is then removed.
- */
-async function migrateLegacyTeamCategory(): Promise<void> {
-  const legacy = await findCategoryByKey(LEGACY_CATEGORY_KEY);
-  if (!legacy) return;
-  const db = await getDb();
-  const existing = new Set((await listTeams()).map((t) => t._id));
-  const now = new Date();
-  let created = 0;
-  for (const [i, o] of legacy.options.entries()) {
-    if (existing.has(o.id) || !ObjectId.isValid(o.id)) continue;
-    await db.collection(COLLECTION).insertOne({
-      _id: new ObjectId(o.id),
-      name: o.label,
-      color: TEAM_PALETTE[i % TEAM_PALETTE.length],
-      order: o.order,
-      createdAt: now,
-      updatedAt: now,
-    });
-    created++;
-  }
-  await deleteCategory(legacy._id);
-  console.log(`🚩 teams: migrated ${created} team(s) from the "${LEGACY_CATEGORY_KEY}" category`);
-}

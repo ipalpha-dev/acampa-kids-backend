@@ -3,20 +3,16 @@ import { getDb } from "../db";
 import type { PrepSection, PrepAudience } from "../types";
 import { PREP_AUDIENCES, PREP_TEAM_AUDIENCES } from "../types";
 import { clearUserPrepDoneKey } from "./userCampState";
+import { ensureIndex } from "../services/indexes";
 
 const COLLECTION = "prep_sections";
 
-/**
- * `audiences: PrepAudience[]` — older documents held a single `audience`
- * ("all" | "caretaker" | "helper"): "all" meant the whole team (parents did not exist yet).
- */
+/** `audiences: PrepAudience[]` (at least one; an empty / unknown list falls back to the whole team). */
 function toAudiences(doc: Record<string, unknown>): PrepAudience[] {
   if (Array.isArray(doc.audiences)) {
     const list = PREP_AUDIENCES.filter((a) => (doc.audiences as unknown[]).includes(a));
     if (list.length) return list;
   }
-  const legacy = doc.audience;
-  if (legacy === "caretaker" || legacy === "helper") return [legacy];
   return [...PREP_TEAM_AUDIENCES];
 }
 
@@ -80,12 +76,12 @@ export async function clearPrepDoneKey(key: string): Promise<void> {
   const db = await getDb();
   const now = new Date();
   await Promise.all([
-    db.collection("staff").updateMany({ prepDone: key }, { $pull: { prepDone: key }, $set: { updatedAt: now } } as never),
+    db.collection("participants").updateMany({ kind: "team", prepDone: key }, { $pull: { prepDone: key }, $set: { updatedAt: now } } as never),
     clearUserPrepDoneKey(key),
   ]);
 }
 
 export async function ensurePrepIndexes(): Promise<void> {
   const db = await getDb();
-  await db.collection(COLLECTION).createIndex({ order: 1 });
+  await ensureIndex(db.collection(COLLECTION), { order: 1 });
 }

@@ -74,10 +74,6 @@ export function formatBrazilPhone(e164: string): string {
   return `(${ddd}) ${rest.slice(0, 5)}-${rest.slice(5)}`;
 }
 
-/** +5511981234567 -> 5511981234567 (format Comtele expects) */
-export function toComtelePhone(e164: string): string {
-  return e164.replace(/\D/g, "");
-}
 
 /** Great-circle distance in metres between two WGS84 points (haversine). */
 export function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
@@ -129,13 +125,13 @@ export function minutesBetween(from: Date, to: Date): number {
 }
 
 /** Highest-privilege role first: the login session acts as the best role the person holds. */
-const ROLE_PRIORITY: Role[] = ["admin", "health_staff", "staff", "parent"];
+const ROLE_PRIORITY: Role[] = ["admin", "staff", "parent"];
 export function pickActiveRole(roles: Role[]): Role {
   return ROLE_PRIORITY.find((r) => roles.includes(r)) ?? roles[0] ?? "parent";
 }
 
 export function isRole(value: unknown): value is Role {
-  return typeof value === "string" && ["parent", "staff", "health_staff", "admin"].includes(value);
+  return typeof value === "string" && ["parent", "staff", "admin"].includes(value);
 }
 
 /**

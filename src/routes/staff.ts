@@ -1,54 +1,39 @@
 import { Hono, type Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { publish } from "../services/realtime";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireManager, requireRole } from "../middleware/roles";
 import { countStaffPerBedroom, findBedroomById } from "../models/bedrooms";
 import { countCampersPerBedroom } from "../models/campers";
 import { listCampers, reassignCampers, setCaretakerOf, updateCamper } from "../models/campers";
 import { listEvents, listRoles, unassignStaffEverywhere } from "../models/schedule";
 import { serializeCamperList } from "./campers";
-import {
-  deleteStaff,
-  findStaffById,
-  findStaffByPhone,
-  insertStaff,
-  listStaff,
-  NO_VEST,
-  setStaffCheckin,
-  setStaffPrepDone,
-  setStaffVest,
-  updateStaff,
-  type StaffData,
-} from "../models/staff";
+import { deleteStaff, EMPTY_STAFF, findStaffById, insertStaff, listStaff, NO_VEST, setStaffCheckin, setStaffPrepDone, setStaffVest, updateStaff, type StaffData } from "../models/staff";
+import { participantKind } from "../models/participants";
+import { editionRolesOf } from "../services/members";
 import { logCheckin } from "../models/campers";
-import { bedroomCapacity, ROOM_ROLES, STAFF_CATEGORY_KEYS, type Role, type RoomRole, type SessionUser, type Staff } from "../types";
-import { resolveGender, resolveWriteGender } from "../services/camperSex";
+import { bedroomCapacity, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, ROOM_ROLES, TEAM_ROLE, type RoomRole, type SessionUser, type Staff } from "../types";
 import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
-import { bedroomFullMessage, isInvalid, parseBedroom, parseMedications, parseMulti, parseTeam, parseText, parseTransport } from "./_validate";
+import { bedroomFullMessage, isInvalid, parseBedroom, parseTeam, parseText, parseTransport } from "./_validate";
 import { listTeams } from "../models/teams";
 import { assignmentDetail, autoRoleFor, dutyOf, teamMap } from "../services/schedule";
-import { distanceMeters, normalizeBrazilPhone, normalizeEmail, titleCaseName, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
+import { distanceMeters, normalizeBrazilPhone, titleCaseName, nowInSaoPauloWallClock, saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { getSettings } from "../models/settings";
-import { ensureLoginAccount, isAdminPhone } from "../models/users";
 import { notifyCaretakerChange, notifyCheckin, notifyStaffChange, syncWelcomes } from "../services/notify";
+import { actingToken, campEditionId, coordinationToken } from "../services/acting";
+import { coreClient } from "../services/ipalpha";
+import { PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
+import { healthFlagsOf, nameMatches, namesOf, pageOf, readHealth } from "../services/people";
+import { registrationData, registrationExtras, registrationProfile } from "../services/coreRegistration";
 
-interface Env {
-  Variables: {
-    userId: string;
-    sessionId: string;
-    activeRole: Role;
-    user: SessionUser;
-  };
-}
+type Env = { Variables: AuthVariables };
 
 const staff = new Hono<Env>();
 
 const NAME_MAX = 80;
 const TEXT_MAX = 500;
-const DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 
-function fail(c: Context, code: string, message: string, status: 400 | 404 | 409 = 400) {
+function fail(c: Context, code: string, message: string, status: 400 | 403 | 404 | 409 | 502 = 400) {
   return c.json({ error: { code, message } }, status);
 }
 
@@ -58,49 +43,32 @@ export function serializeStaff(s: Staff) {
 }
 
 /**
- * Serializes `s` according to the viewer's scope, or returns `null` when the
- * viewer may not see this person at all. A colleague in the same room comes
- * back as a CONTACT record (`redacted: true`): name, phone, room role and
- * team — no health data, no transport/check-in. The VEST helper gets everyone as
- * name + phone + vest status (`redacted: true` too: nothing else leaves the
- * server). A PARENT (inside the parents'
- * window) gets the team of their kid's room and the important contacts as
- * name + phone (+ the room and room role, so the app can tell the caretaker
- * from the rest) — never the vest, health or check-in.
+ * The team member's camp-ops record per the viewer's scope, or null when
+ * invisible. A CONTACT view (roommate, a parent's contact, the vest helper)
+ * keeps only the room role, the room when the viewer may know it and — for
+ * the vest helper — the vest. Phones are never here: a contact is reached
+ * through core (the app shows the name; contacts come from persons-api with
+ * the acting role token).
  */
 export function serializeStaffFor(s: Staff, scope: Scope) {
   const vis = staffVisibility(scope, s);
   if (vis === "none") return null;
   const full = serialize(s);
-  // draft rooms: the person's own record travels without the bedroom
   if (vis === "full") return hideOwnBedroom(scope) ? { ...full, bedroom: null } : full;
-  // the room is only revealed for a roommate (the viewer already knows their own room) or to the parent of a kid sleeping there
   const roommate = !scope.all && !scope.kidsRoomsDraft && scope.bedroom !== null && s.bedroom === scope.bedroom;
   const parentRoom = !scope.all && scope.parentKids.length > 0 && s.bedroom !== null && scope.parentBedrooms.includes(s.bedroom);
   return {
     ...full,
     redacted: true,
-    phone: s.phone,
-    email: null,
-    document: "",
-    birthDate: null,
-    // a roommate's team is public inside the room (the games are played together); parents / vest helpers don't get it
     team: roommate ? s.team : null,
     bedroom: roommate || parentRoom ? s.bedroom : null,
     transportation: null,
-    allergies: [],
-    drugAllergies: [],
-    foodRestrictions: "",
-    healthIssues: [],
-    medications: [],
-    healthNotes: "",
+    generalNotes: "",
     checkin: null,
-    // the vest status is the vest helper's business only
     vest: !scope.all && scope.vestHelper ? s.vest : NO_VEST,
     prepDone: [],
-    // never leak another person's out-of-scope scan history to roommates / vest helpers / parents
     foreignLookupCount: 0,
-    foreignLookupNames: [],
+    foreignLookupCamperIds: [],
   };
 }
 
@@ -109,187 +77,63 @@ export function serializeStaffList(list: Staff[], scope: Scope) {
   return list.map((s) => serializeStaffFor(s, scope)).filter((x): x is NonNullable<typeof x> => x !== null);
 }
 
-/** Bedroom change: girls/boys wing wins; staff room / no room re-guesses from the name. */
-async function setStaffBedroom(id: string, name: string, bedroom: string | null, extra: Partial<StaffData>, c: Context<Env>) {
-  const existing = await findStaffById(id);
-  const gender = await resolveGender({
-    name,
-    bedroomId: bedroom,
-    requested: existing?.probableGender ?? null,
-    guessIfMissing: true,
-    signal: c.req.raw.signal,
-    userId: c.get("userId"),
-  });
-  return updateStaff(id, { ...extra, bedroom, sex: gender.sex, probableGender: gender.probableGender });
+async function setStaffBedroom(id: string, bedroom: string | null, extra: Partial<StaffData>) {
+  return updateStaff(id, { ...extra, bedroom });
 }
 
 function serialize(s: Staff) {
   return {
     id: s._id,
-    name: s.name,
-    sex: s.sex,
-    probableGender: s.probableGender,
-    phone: s.phone,
-    email: s.email,
-    document: s.document,
-    birthDate: s.birthDate,
-    /** this roster row belongs to an admin login — badge only */
-    admin: isAdminPhone(s.phone),
+    personId: s.personId,
     active: s.active,
     team: s.team,
     bedroom: s.bedroom,
     roomRole: s.roomRole,
     transportation: s.transportation,
-    allergies: s.allergies,
-    drugAllergies: s.drugAllergies,
-    foodRestrictions: s.foodRestrictions,
-    healthIssues: s.healthIssues,
-    medications: s.medications,
-    healthNotes: s.healthNotes,
-    aiReviewStatus: s.aiReviewStatus ?? null,
-    aiReviewError: s.aiReviewError ?? "",
-    aiReviewStartedAt: s.aiReviewStartedAt ?? null,
-    aiReviewFinishedAt: s.aiReviewFinishedAt ?? null,
+    generalNotes: s.generalNotes,
     checkin: s.checkin,
     vest: s.vest,
     prepDone: s.prepDone,
-    /** out-of-scope emergency QR lookups — always on the wire so the admin export / Geral card can show them; 0 for everyone else in practice */
+    /** out-of-scope emergency QR lookups (person ids of the kids) */
     foreignLookupCount: s.foreignLookupCount,
-    foreignLookupNames: s.foreignLookupNames,
+    foreignLookupCamperIds: s.foreignLookupCamperIds,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };
 }
 
-/**
- * Builds a validated patch from a request body. When `partial` is true only
- * the keys present in the body are validated (PUT); otherwise every field is
- * resolved and required ones are enforced (POST).
- */
-async function buildPatch(
-  body: Record<string, unknown>,
-  partial: boolean,
-): Promise<{ patch: Partial<StaffData> } | { code: string; message: string; status?: 400 | 409 }> {
+/** Validated camp-ops patch (only keys present in the body). */
+async function buildPatch(body: Record<string, unknown>): Promise<{ patch: Partial<StaffData> } | { code: string; message: string; status?: 400 | 409 }> {
   const patch: Partial<StaffData> = {};
-  const has = (k: string) => !partial || body[k] !== undefined;
-
-  if (has("name")) {
-    const name = typeof body.name === "string" ? titleCaseName(body.name) : "";
-    if (!name || name.length > NAME_MAX) {
-      return { code: "NAME_INVALID", message: `Informe um nome com até ${NAME_MAX} caracteres.` };
-    }
-    patch.name = name;
-  }
-
-  if (has("phone")) {
-    const raw = body.phone;
-    if (raw === undefined || raw === null || (typeof raw === "string" && !raw.trim())) {
-      // the phone is the login: the form never creates or leaves a member without one.
-      // (the importer writes straight to the model, so old records with no phone stay valid until edited)
-      return { code: "PHONE_REQUIRED", message: "Informe o celular: é por ele que a pessoa entra no app." };
-    } else {
-      const phone = typeof raw === "string" ? normalizeBrazilPhone(raw) : null;
-      if (!phone) return { code: "PHONE_INVALID", message: "Informe um celular brasileiro válido com DDD." };
-      patch.phone = phone;
-    }
-  }
-
-  if (has("email")) {
-    const raw = body.email;
-    if (raw === undefined || raw === null || (typeof raw === "string" && !raw.trim())) {
-      patch.email = null;
-    } else if (typeof raw !== "string") {
-      return { code: "EMAIL_INVALID", message: "Informe um e-mail válido." };
-    } else {
-      const email = normalizeEmail(raw);
-      if (!email) return { code: "EMAIL_INVALID", message: "Informe um e-mail válido." };
-      patch.email = email;
-    }
-  }
-
+  const has = (k: string) => body[k] !== undefined;
   if (has("active")) {
-    const active = body.active === undefined ? true : body.active;
-    if (typeof active !== "boolean") return { code: "ACTIVE_INVALID", message: "Ativo deve ser sim ou não." };
-    patch.active = active;
+    if (typeof body.active !== "boolean") return { code: "ACTIVE_INVALID", message: "Ativo deve ser sim ou não." };
+    patch.active = body.active;
   }
-
   if (has("team")) {
     const v = await parseTeam(body.team);
     if (isInvalid(v)) return { code: "TEAM_INVALID", message: v.error };
     patch.team = v;
   }
-
   if (has("transportation")) {
     const v = await parseTransport(body.transportation);
     if (isInvalid(v)) return { code: "TRANSPORTATION_INVALID", message: v.error };
     patch.transportation = v;
   }
-
   if (has("bedroom")) {
     const v = await parseBedroom(body.bedroom);
     if (isInvalid(v)) return { code: "BEDROOM_INVALID", message: v.error };
     patch.bedroom = v;
   }
-
   if (has("roomRole")) {
-    const v = body.roomRole === undefined ? "helper" : body.roomRole;
-    if (!ROOM_ROLES.includes(v as RoomRole)) return { code: "ROOM_ROLE_INVALID", message: "Função no quarto deve ser líder ou auxiliar." };
-    patch.roomRole = v as RoomRole;
+    if (!ROOM_ROLES.includes(body.roomRole as RoomRole)) return { code: "ROOM_ROLE_INVALID", message: "Função no quarto deve ser líder ou auxiliar." };
+    patch.roomRole = body.roomRole as RoomRole;
   }
-
-  if (has("sex")) {
-    const v = body.sex;
-    if (v === undefined || v === null || v === "") patch.sex = null;
-    else if (v !== "F" && v !== "M") return { code: "SEX_INVALID", message: "Sexo inválido." };
-    else patch.sex = v;
+  if (has("generalNotes")) {
+    const v = parseText(body.generalNotes, TEXT_MAX);
+    if (isInvalid(v)) return { code: "GENERALNOTES_INVALID", message: v.error };
+    patch.generalNotes = v;
   }
-
-  if (has("probableGender")) {
-    const v = body.probableGender;
-    if (v === undefined || v === null || v === "") patch.probableGender = null;
-    else if (v !== "F" && v !== "M") return { code: "SEX_INVALID", message: "Sexo inválido." };
-    else patch.probableGender = v;
-  }
-
-  const multis: [("allergies" | "drugAllergies" | "healthIssues"), string][] = [
-    ["allergies", "Alergias"],
-    ["drugAllergies", "Alergia a medicamentos"],
-    ["healthIssues", "Problemas de saúde"],
-  ];
-  for (const [field, label] of multis) {
-    if (!has(field)) continue;
-    const v = await parseMulti(body[field], STAFF_CATEGORY_KEYS[field], label);
-    if (isInvalid(v)) return { code: `${field.toUpperCase()}_INVALID`, message: v.error };
-    patch[field] = v;
-  }
-
-  if (has("medications")) {
-    const v = parseMedications(body.medications);
-    if (isInvalid(v)) return { code: "MEDICATIONS_INVALID", message: v.error };
-    patch.medications = v;
-  }
-
-  if (has("document")) {
-    const v = parseText(body.document, TEXT_MAX);
-    if (isInvalid(v)) return { code: "DOCUMENT_INVALID", message: v.error };
-    patch.document = v;
-  }
-
-  if (has("birthDate")) {
-    const v = body.birthDate;
-    if (v === undefined || v === null || v === "") patch.birthDate = null;
-    else if (typeof v !== "string" || !DATE_RE.test(v) || Number.isNaN(Date.parse(v))) {
-      return { code: "BIRTH_DATE_INVALID", message: "Data de nascimento inválida." };
-    } else patch.birthDate = v;
-  }
-
-  for (const field of ["foodRestrictions", "healthNotes"] as const) {
-    if (!has(field)) continue;
-    const v = parseText(body[field], TEXT_MAX);
-    if (isInvalid(v)) return { code: `${field.toUpperCase()}_INVALID`, message: v.error };
-    patch[field] = v;
-  }
-
   return { patch };
 }
 
@@ -297,20 +141,47 @@ staff.use("*", requireAuth);
 
 // ── read: admin sees everyone; staff/health staff only their own room (see services/scope.ts) ──
 
-/** GET /api/staff?active=true|false — lists members sorted by name (scoped). */
-staff.get("/", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
+/**
+ * GET /api/staff?active=&cursor&limit&q — one PAGE of the team members the
+ * viewer may see (camp ops + live `name` / `nickname` for the page, + the
+ * neutral `hasHealth` for roles allowed health). `{items, nextCursor, total}`.
+ */
+staff.get("/", requireRole("admin", "staff", "parent"), async (c) => {
   const q = c.req.query("active");
   const active = q === "true" ? true : q === "false" ? false : undefined;
+  const nameQ = (c.req.query("q") ?? "").trim();
   const [list, scope] = await Promise.all([listStaff({ active }), resolveScope(c.get("user"))]);
-  return c.json({ staff: serializeStaffList(list, scope) });
+  let visible = list.filter((s) => staffVisibility(scope, s) !== "none");
+  let names = new Map<string, { name: string; nickname: string | null; sex: "F" | "M" | null }>();
+  if (nameQ) {
+    names = await namesOf(visible.map((s) => s._id));
+    visible = visible.filter((s) => nameMatches(names.get(s._id)?.name ?? "", nameQ) || nameMatches(names.get(s._id)?.nickname ?? "", nameQ));
+  }
+  const page = pageOf(visible, c.req.query("cursor"), Number(c.req.query("limit") ?? 50));
+  const missing = page.items.filter((s) => !names.has(s._id)).map((s) => s._id);
+  if (missing.length) for (const [id, n] of await namesOf(missing)) names.set(id, n);
+  const mayHealth = scope.all || scope.organizer;
+  // the neutral ♥: core's light flag (decision 69) — never a full medical read for a list
+  const flags = mayHealth ? await healthFlagsOf(actingToken(c, PERSONS_RESOURCE), page.items.map((s) => s._id)) : new Map<string, boolean>();
+  const items = page.items.map((s) => ({
+    ...serializeStaffFor(s, scope)!,
+    name: names.get(s._id)?.name ?? "",
+    nickname: names.get(s._id)?.nickname ?? null,
+    sex: names.get(s._id)?.sex ?? null,
+    ...(mayHealth ? { hasHealth: flags.get(s._id) === true } : {}),
+  }));
+  return c.json({ items, nextCursor: page.nextCursor, total: visible.length });
 });
 
-staff.get("/:id", requireRole("admin", "staff", "health_staff", "parent"), async (c) => {
+/** GET /api/staff/:id — the member's page (camp ops + name; health for the person themself / managers, via the acting token). */
+staff.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
   const s = await findStaffById(c.req.param("id"));
-  // outside the viewer's scope → same answer as "does not exist" (no probing)
-  const out = s ? serializeStaffFor(s, await resolveScope(c.get("user"))) : null;
-  if (!out) return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
-  return c.json({ staff: out });
+  const scope = await resolveScope(c.get("user"));
+  const out = s ? serializeStaffFor(s, scope) : null;
+  if (!s || !out) return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
+  const name = (await namesOf([s._id])).get(s._id);
+  const withHealth = staffVisibility(scope, s) === "full";
+  return c.json({ staff: { ...out, name: name?.name ?? "", nickname: name?.nickname ?? null, sex: name?.sex ?? null, ...(withHealth ? { health: await readHealth(actingToken(c, PERSONS_RESOURCE), s._id) } : {}) } });
 });
 
 /**
@@ -318,7 +189,7 @@ staff.get("/:id", requireRole("admin", "staff", "health_staff", "parent"), async
  * are assigned to, with the role) + the campers in their bedroom (the kids
  * they are responsible for) + the other staff sharing the room.
  */
-staff.get("/:id/detail", requireRole("admin", "staff", "health_staff"), async (c) => {
+staff.get("/:id/detail", requireRole("admin", "staff"), async (c) => {
   const s = await findStaffById(c.req.param("id"));
   const scope = await resolveScope(c.get("user"));
   // the full detail (schedule, kids) is only for the admin or the person themself
@@ -395,12 +266,12 @@ interface SelfCheckinWindow {
 }
 
 async function selfCheckinGate(user: SessionUser): Promise<({ ok: true; me: Staff } | { ok: false; code: SelfCheckinBlock; message: string }) & SelfCheckinWindow> {
-  const [me, events] = await Promise.all([findStaffByPhone(user.phone), listEvents()]);
+  const [me, events] = await Promise.all([findStaffById(user.personId), listEvents()]);
   const first = events[0] ?? null; // listEvents() sorts by (date, startTime)
   const date = first?.date ?? null;
   const opensWall = first ? saoPauloWallClock(first.date, first.startTime) - SELF_CHECKIN_OPENS_MINUTES_BEFORE * 60_000 : null;
   const window: SelfCheckinWindow = { date, opensAt: opensWall === null ? null : saoPauloWallClockToIso(opensWall) };
-  if (!me) return { ok: false, code: "NOT_LINKED", message: "Seu celular não está vinculado a um cadastro da equipe.", ...window };
+  if (!me) return { ok: false, code: "NOT_LINKED", message: "Você não está na equipe deste acampamento.", ...window };
   if (!me.active) return { ok: false, code: "INACTIVE", message: "Seu cadastro na equipe está inativo.", ...window };
   if (!first || opensWall === null) return { ok: false, code: "NO_SCHEDULE", message: "A programação ainda não foi cadastrada.", ...window };
   if (todayInSaoPaulo() !== first.date) return { ok: false, code: "NOT_TODAY", message: "O check-in só abre no dia da saída.", ...window };
@@ -417,7 +288,7 @@ async function selfCheckinGate(user: SessionUser): Promise<({ ok: true; me: Staf
  * status + the target spot so the phone can show "você está a 120 m", and
  * `opensAt` so it can re-ask when the window opens.
  */
-staff.get("/me/checkin", requireRole("staff", "health_staff", "admin"), async (c) => {
+staff.get("/me/checkin", requireRole("staff", "admin"), async (c) => {
   const [gate, settings] = await Promise.all([selfCheckinGate(c.get("user")), getSettings()]);
   return c.json({
     allowed: gate.ok,
@@ -430,7 +301,7 @@ staff.get("/me/checkin", requireRole("staff", "health_staff", "admin"), async (c
 });
 
 /** POST /api/staff/me/checkin  { lat, lng, accuracyM? } — marks the logged-in member as arrived. */
-staff.post("/me/checkin", requireRole("staff", "health_staff", "admin"), async (c) => {
+staff.post("/me/checkin", requireRole("staff", "admin"), async (c) => {
   const user = c.get("user");
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   const lat = Number(body?.lat);
@@ -456,9 +327,9 @@ staff.post("/me/checkin", requireRole("staff", "health_staff", "admin"), async (
     );
   }
 
-  const stamp = { at: new Date(), byUserId: user.id, byName: user.name, byRole: user.activeRole };
+  const stamp = { at: new Date(), byPersonId: user.id, byRole: user.coreRole };
   const updated = await setStaffCheckin(gate.me._id, stamp);
-  await logCheckin({ who: "staff", camperId: gate.me._id, camperName: gate.me.name, kind: "church", action: "checkin", ...stamp, note: hit.spot.name });
+  await logCheckin({ who: "staff", personId: gate.me._id, kind: "church", action: "checkin", ...stamp, note: hit.spot.name });
   publish("staff");
   void notifyCheckin(updated!); // fire-and-forget: the SMS never delays or fails the check-in
   return c.json({ staff: serialize(updated!), distanceM: hit.distance, location: hit.spot });
@@ -468,13 +339,13 @@ staff.post("/me/checkin", requireRole("staff", "health_staff", "admin"), async (
  * PUT /api/staff/me/prep/:key  { done: boolean } — ticks / unticks one item of
  * the person's Preparação checklist. `key` is "section:<id>" or "role:<id>".
  */
-staff.put("/me/prep/:key", requireRole("staff", "health_staff", "admin"), async (c) => {
+staff.put("/me/prep/:key", requireRole("staff", "admin"), async (c) => {
   const key = c.req.param("key");
   if (!/^(section|role):[a-f0-9]{24}$/.test(key)) return fail(c, "KEY_INVALID", "Item inválido.");
   const body = await c.req.json<{ done?: unknown }>().catch(() => null);
   if (!body || typeof body.done !== "boolean") return fail(c, "BODY_INVALID", "Envie { done: true | false }.");
-  const me = await findStaffByPhone(c.get("user").phone);
-  if (!me) return fail(c, "NOT_LINKED", "Seu celular não está vinculado a um cadastro da equipe.", 404);
+  const me = await findStaffById(c.get("user").personId);
+  if (!me) return fail(c, "NOT_LINKED", "Você não está na equipe deste acampamento.", 404);
   const updated = await setStaffPrepDone(me._id, key, body.done);
   publish("staff");
   return c.json({ staff: serialize(updated!) });
@@ -492,12 +363,12 @@ const canCheckin = requireManager;
 async function doCheckin(c: Context<Env>, action: "checkin" | "undo") {
   const existing = await findStaffById(c.req.param("id") ?? "");
   if (!existing) return fail(c, "STAFF_NOT_FOUND", "Pessoa não encontrada.", 404);
-  if (action === "checkin" && existing.checkin) return fail(c, "ALREADY_CHECKED_IN", `${existing.name} já fez check-in.`, 409);
-  if (action === "undo" && !existing.checkin) return fail(c, "NOT_CHECKED_IN", `${existing.name} ainda não fez check-in.`, 409);
+  if (action === "checkin" && existing.checkin) return fail(c, "ALREADY_CHECKED_IN", "Esta pessoa já fez check-in.", 409);
+  if (action === "undo" && !existing.checkin) return fail(c, "NOT_CHECKED_IN", "Esta pessoa ainda não fez check-in.", 409);
   const user = c.get("user");
-  const stamp = { at: new Date(), byUserId: user.id, byName: user.name, byRole: user.activeRole };
+  const stamp = { at: new Date(), byPersonId: user.id, byRole: user.coreRole };
   const updated = await setStaffCheckin(existing._id, action === "checkin" ? stamp : null);
-  await logCheckin({ who: "staff", camperId: existing._id, camperName: existing.name, kind: "church", action, ...stamp });
+  await logCheckin({ who: "staff", personId: existing._id, kind: "church", action, ...stamp });
   publish("staff");
   if (action === "checkin") void notifyCheckin(updated!); // the person gets the same receipt when the admin marks them
   return c.json({ staff: serialize(updated!) });
@@ -521,10 +392,10 @@ type VestAction = "deliver" | "undo-deliver" | "return" | "undo-return";
 async function doVest(c: Context<Env>, action: VestAction) {
   const existing = await findStaffById(c.req.param("id") ?? "");
   if (!existing) return fail(c, "STAFF_NOT_FOUND", "Pessoa não encontrada.", 404);
-  const first = existing.name.split(" ")[0];
+  const first = "Esta pessoa";
   const { delivered, returned } = existing.vest;
   const user = c.get("user");
-  const stamp = { at: new Date(), byUserId: user.id, byName: user.name, byRole: user.activeRole };
+  const stamp = { at: new Date(), byPersonId: user.id, byRole: user.coreRole };
   let next: Staff["vest"];
   switch (action) {
     case "deliver":
@@ -551,113 +422,88 @@ async function doVest(c: Context<Env>, action: VestAction) {
 }
 
 /** POST /api/staff/:id/vest/delivery — the person received the vest. DELETE undoes. */
-staff.post("/:id/vest/delivery", requireRole("admin", "staff", "health_staff"), requireVestHandler, (c) => doVest(c, "deliver"));
-staff.delete("/:id/vest/delivery", requireRole("admin", "staff", "health_staff"), requireVestHandler, (c) => doVest(c, "undo-deliver"));
+staff.post("/:id/vest/delivery", requireRole("admin", "staff"), requireVestHandler, (c) => doVest(c, "deliver"));
+staff.delete("/:id/vest/delivery", requireRole("admin", "staff"), requireVestHandler, (c) => doVest(c, "undo-deliver"));
 /** POST /api/staff/:id/vest/return — the person handed the vest back. DELETE undoes. */
-staff.post("/:id/vest/return", requireRole("admin", "staff", "health_staff"), requireVestHandler, (c) => doVest(c, "return"));
-staff.delete("/:id/vest/return", requireRole("admin", "staff", "health_staff"), requireVestHandler, (c) => doVest(c, "undo-return"));
+staff.post("/:id/vest/return", requireRole("admin", "staff"), requireVestHandler, (c) => doVest(c, "return"));
+staff.delete("/:id/vest/return", requireRole("admin", "staff"), requireVestHandler, (c) => doVest(c, "undo-return"));
 
 // ── write: admin or organizer ──────────────────────────────────────────────────────
 
 staff.use("/*", requireManager);
 
 /**
- * POST /api/staff
- * { name, phone, active?, team?, bedroom?, transportation?, allergies?, foodRestrictions?, healthIssues?, medications? }
+ * POST /api/staff/register { name, phone, sex?, homeChurch?, school?, emergencyContact?, ...camp ops } — a NEW team member
+ * through core with the coordenação token: persons registration (adult, the optional person fields in it) +
+ * `equipe` membership in the camp's edition, then the participant row.
  */
+staff.post("/register", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
+  const name = typeof body.name === "string" ? titleCaseName(body.name) : "";
+  if (!name || name.length > NAME_MAX) return fail(c, "NAME_INVALID", `Informe um nome com até ${NAME_MAX} caracteres.`);
+  const phone = typeof body.phone === "string" ? normalizeBrazilPhone(body.phone) : null;
+  if (!phone) return fail(c, "PHONE_INVALID", "Informe um celular brasileiro válido com DDD: é por ele que a pessoa entra no app.");
+  const result = await buildPatch(body);
+  if (!("patch" in result)) return fail(c, result.code, result.message, result.status);
+  const extras = registrationExtras(body);
+  if (!extras.ok) return fail(c, extras.code, extras.message);
+  const session = c.get("session");
+  const personsToken = coordinationToken(session, PERSONS_RESOURCE);
+  const projectsToken = coordinationToken(session, PROJECTS_RESOURCE);
+  if (!personsToken || !projectsToken) return fail(c, "COORDINATION_REQUIRED", "Só a coordenação cadastra pessoas.", 403);
+  const editionId = await campEditionId();
+  if (!editionId) return fail(c, "EDITION_UNKNOWN", "A edição deste acampamento ainda não existe no IPAlpha.", 409);
+  const full = await bedroomFullMessage(result.patch.bedroom ?? null, null);
+  if (full) return fail(c, "BEDROOM_FULL", full, 409);
+  const data = registrationData(extras.data);
+  const reg = await coreClient().register(personsToken, { role: TEAM_ROLE, people: [{ name, phone, ...registrationProfile(extras), ...(data ? { data } : {}) }] });
+  const person = reg.people[0];
+  if (!person) return fail(c, "REGISTRATION_FAILED", "O IPAlpha não confirmou o cadastro.", 502);
+  if (await participantKind(person.personId)) return fail(c, "ALREADY_IN_CAMP", "Esta pessoa já está neste acampamento.", 409);
+  await coreClient().addMembership(projectsToken, { personId: person.personId, role: TEAM_ROLE, editionId });
+  const created = await insertStaff(person.personId, { ...EMPTY_STAFF, ...result.patch });
+  publish("staff", "bedrooms");
+  void syncWelcomes();
+  return c.json({ staff: { ...serialize(created), name }, created: person.created }, 201);
+});
+
+/** POST /api/staff { personId, ...camp ops } — an existing IPAlpha person joins this camp's team. */
 staff.post("/", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
-
-  const result = await buildPatch(body, false);
+  const personId = typeof body.personId === "string" ? body.personId.trim() : "";
+  if (!personId) return fail(c, "PERSON_REQUIRED", "Escolha a pessoa no IPAlpha.");
+  if (await participantKind(personId)) return fail(c, "ALREADY_IN_CAMP", "Esta pessoa já está neste acampamento.", 409);
+  // only someone serving in THIS camp's edition (equipe or a helper role) becomes a team row
+  if (!(await editionRolesOf(personId)).some((r) => r !== PARTICIPANT_ROLE && r !== RESPONSIBLE_ROLE)) return fail(c, "NOT_IN_EDITION", "Esta pessoa ainda não serve nesta edição no IPAlpha.", 409);
+  const result = await buildPatch(body);
   if (!("patch" in result)) return fail(c, result.code, result.message, result.status);
-
-  const data = result.patch as StaffData;
-  if (data.phone && (await findStaffByPhone(data.phone))) {
-    return fail(c, "PHONE_DUPLICATE", "Já existe alguém na equipe com este celular.", 409);
-  }
-  const full = await bedroomFullMessage(data.bedroom, null);
+  const full = await bedroomFullMessage(result.patch.bedroom ?? null, null);
   if (full) return fail(c, "BEDROOM_FULL", full, 409);
-
-  const gender = await resolveWriteGender({
-    name: data.name,
-    bedroomId: data.bedroom,
-    sexTouched: true,
-    sexValue: data.sex,
-    guessTouched: data.probableGender !== undefined,
-    guessValue: data.probableGender,
-    existingSex: null,
-    existingGuess: null,
-    nameOrRoomChanged: true,
-    signal: c.req.raw.signal,
-    userId: c.get("userId"),
-  });
-  data.sex = gender.sex;
-  data.probableGender = gender.probableGender;
-
-  const created = await insertStaff(data);
-  if (created.phone) void ensureLoginAccount(created.name, created.phone, "staff");
+  const created = await insertStaff(personId, { ...EMPTY_STAFF, ...result.patch });
   publish("staff", "bedrooms");
-  void syncWelcomes(); // welcome SMS with the app link — only if the team window is already open, never twice
+  void syncWelcomes();
   return c.json({ staff: serialize(created) }, 201);
 });
 
-/** PUT /api/staff/:id — partial update. */
+/** PUT /api/staff/:id — camp ops (active, room, room role, team, transport, notes). */
 staff.put("/:id", async (c) => {
   const existing = await findStaffById(c.req.param("id"));
   if (!existing) return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
-
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
-
-  const result = await buildPatch(body, true);
+  const result = await buildPatch(body);
   if (!("patch" in result)) return fail(c, result.code, result.message, result.status);
-
-  if (result.patch.phone && result.patch.phone !== existing.phone) {
-    const clash = await findStaffByPhone(result.patch.phone);
-    if (clash && clash._id !== existing._id) {
-      return fail(c, "PHONE_DUPLICATE", "Já existe alguém na equipe com este celular.", 409);
-    }
-  }
-
   if (result.patch.bedroom !== undefined && result.patch.bedroom !== existing.bedroom) {
     const full = await bedroomFullMessage(result.patch.bedroom, existing.bedroom);
     if (full) return fail(c, "BEDROOM_FULL", full, 409);
   }
-
-  const name = result.patch.name ?? existing.name;
-  const bedroom = result.patch.bedroom !== undefined ? result.patch.bedroom : existing.bedroom;
-  const bedroomChanged = result.patch.bedroom !== undefined && result.patch.bedroom !== existing.bedroom;
-  const nameChanged = result.patch.name !== undefined && result.patch.name !== existing.name;
-  const sexTouched = result.patch.sex !== undefined;
-  if (bedroomChanged || nameChanged || sexTouched || result.patch.probableGender !== undefined) {
-    const gender = await resolveWriteGender({
-      name,
-      bedroomId: bedroom,
-      sexTouched,
-      sexValue: result.patch.sex,
-      guessTouched: result.patch.probableGender !== undefined,
-      guessValue: result.patch.probableGender,
-      existingSex: existing.sex,
-      existingGuess: existing.probableGender,
-      nameOrRoomChanged: bedroomChanged || nameChanged,
-      signal: c.req.raw.signal,
-      userId: c.get("userId"),
-    });
-    result.patch.sex = gender.sex;
-    result.patch.probableGender = gender.probableGender;
-  }
-
   const updated = await updateStaff(existing._id, result.patch);
-  if (updated?.phone && (result.patch.phone !== undefined || result.patch.name !== undefined)) {
-    void ensureLoginAccount(updated.name, updated.phone, "staff");
-  }
   // left the room, or stopped being a caretaker there → their kids are orphans now
-  // (deactivation only removes app access / notifications — the kids stay with them)
   const lostKids = (updated!.bedroom !== existing.bedroom || updated!.roomRole !== "caretaker") && existing.roomRole === "caretaker";
   const orphaned = lostKids ? await reassignCampers(existing._id, null) : 0;
   publish("staff", "bedrooms", ...(orphaned ? ["campers" as const] : []), ...(updated!.roomRole !== existing.roomRole ? ["instructions" as const, "preparation" as const] : []));
-  // fire-and-forget: the SMS never delays the write (deactivation is silent)
   if (!existing.active && updated!.active) void syncWelcomes();
   else if (updated!.active) void notifyStaffChange(existing, updated!);
   return c.json({ staff: serialize(updated!) });
@@ -695,8 +541,8 @@ staff.post("/:id/move", async (c) => {
     if (!other || !target || other.bedroom !== target) return fail(c, "SWAP_INVALID", "Escolha alguém que durma no quarto de destino para trocar.", 409);
     const theirKids = await listCampers({ caretakerId: other._id });
     // capacities are unaffected (one person out, one in) — only the kids swap hands
-    await setStaffBedroom(me._id, me.name, target, { roomRole: "caretaker" }, c);
-    await setStaffBedroom(other._id, other.name, me.bedroom, { roomRole: me.roomRole === "caretaker" ? "caretaker" : other.roomRole }, c);
+    await setStaffBedroom(me._id, target, { roomRole: "caretaker" });
+    await setStaffBedroom(other._id, me.bedroom, { roomRole: me.roomRole === "caretaker" ? "caretaker" : other.roomRole });
     // kids stay in their rooms and get the caretaker who arrived
     await setCaretakerOf(myKids.map((k) => k._id), other._id);
     await setCaretakerOf(theirKids.map((k) => k._id), me._id);
@@ -708,7 +554,7 @@ staff.post("/:id/move", async (c) => {
     if (target !== me.bedroom) {
       const full = await bedroomFullMessage(target, me.bedroom);
       if (full) return fail(c, "BEDROOM_FULL", full, 409);
-      await setStaffBedroom(me._id, me.name, target, {}, c);
+      await setStaffBedroom(me._id, target, {});
     }
     if (other.roomRole !== "caretaker") await updateStaff(other._id, { roomRole: "caretaker" });
     await reassignCampers(me._id, other._id);
@@ -719,24 +565,16 @@ staff.post("/:id/move", async (c) => {
     const room = await findBedroomById(target);
     const [st, ca] = await Promise.all([countStaffPerBedroom(), countCampersPerBedroom()]);
     const occupied = (st.get(target) ?? 0) + (ca.get(target) ?? 0);
-    if (room && occupied + 1 + myKids.length > bedroomCapacity(room)) return fail(c, "BEDROOM_FULL", `O quarto ${room.name} não tem lugar para você e ${myKids.length} crianças.`, 409);
-    await setStaffBedroom(me._id, me.name, target, { roomRole: "caretaker" }, c);
+    if (room && occupied + 1 + myKids.length > bedroomCapacity(room)) return fail(c, "BEDROOM_FULL", `O quarto ${room.name} não tem lugar para esta pessoa e ${myKids.length} crianças.`, 409);
+    await setStaffBedroom(me._id, target, { roomRole: "caretaker" });
     for (const k of myKids) {
-      const gender = await resolveGender({
-        name: k.name,
-        bedroomId: target,
-        requested: k.probableGender,
-        guessIfMissing: true,
-        signal: c.req.raw.signal,
-        userId: c.get("userId"),
-      });
-      await updateCamper(k._id, { bedroom: target, bed: null, caretakerId: me._id, sex: gender.sex, probableGender: gender.probableGender });
+      await updateCamper(k._id, { bedroom: target, bed: null, caretakerId: me._id });
       touched.add(k._id);
     }
   } else {
     const full = await bedroomFullMessage(target, me.bedroom);
     if (full) return fail(c, "BEDROOM_FULL", full, 409);
-    await setStaffBedroom(me._id, me.name, target, {}, c);
+    await setStaffBedroom(me._id, target, {});
     await reassignCampers(me._id, null);
     for (const k of myKids) touched.add(k._id);
     void notifyCaretakerChange(myKids, me, null);
@@ -749,13 +587,28 @@ staff.post("/:id/move", async (c) => {
   return c.json({ staff: serialize(after), movedKids: touched.size });
 });
 
+/**
+ * DELETE /api/staff/:id — the person leaves this camp's operations; the
+ * `equipe` membership is removed in projects-api when the coordenação token
+ * may (best effort, `membershipRemoved`). Their other project roles are
+ * managed in Mordomia.
+ */
 staff.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const ok = await deleteStaff(id);
   if (!ok) return fail(c, "STAFF_NOT_FOUND", "Membro da equipe não encontrado.", 404);
   const [, orphaned] = await Promise.all([unassignStaffEverywhere(id), reassignCampers(id, null)]);
   publish("staff", "bedrooms", "events", ...(orphaned ? ["campers" as const] : []));
-  return c.json({ success: true });
+  let membershipRemoved = false;
+  const token = coordinationToken(c.get("session"), PROJECTS_RESOURCE);
+  const editionId = await campEditionId();
+  if (token && editionId) {
+    membershipRemoved = await coreClient()
+      .removeMembership(token, { personId: id, role: TEAM_ROLE, editionId })
+      .then(() => true)
+      .catch(() => false);
+  }
+  return c.json({ success: true, membershipRemoved });
 });
 
 export default staff;

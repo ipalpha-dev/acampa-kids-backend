@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db";
-import { MEDICATION_SOS_SLOT, type MedicationDose } from "../types";
+import type { MedicationDose } from "../types";
+import { ensureIndex } from "../services/indexes";
 
 /**
  * The medical team's checklist of doses actually GIVEN (Medicações tab).
@@ -17,8 +18,12 @@ const COLLECTION = "medicationDoses";
  */
 const SCHEDULED_FIELD = "scheduled";
 
-/** Explicit name for the uniqueness index, so a change of filter never collides with the auto-generated one. */
-const SCHEDULED_UNIQUE_INDEX = "dose_scheduled_unique";
+/**
+ * Explicit index names (decision 91): the keys moved from `camperId` to `personId`, so the
+ * names are new (`_v2`) and never collide with an index an older version left behind.
+ */
+const SCHEDULED_UNIQUE_INDEX = "dose_scheduled_unique_v2";
+const PERSON_DAY_INDEX = "personId_day_v2";
 
 /** Medicine name → a stable key, so a re-ordered / re-typed list still matches its ticks. */
 export function medKeyOf(name: string): string {
@@ -34,16 +39,14 @@ function toDose(doc: Record<string, unknown> | null): MedicationDose | null {
   if (!doc) return null;
   return {
     _id: (doc._id as ObjectId).toString(),
-    camperId: (doc.camperId as string) ?? "",
-    camperName: (doc.camperName as string) ?? "",
+    personId: (doc.personId as string) ?? "",
     medKey: (doc.medKey as string) ?? "",
     medName: (doc.medName as string) ?? "",
     dose: (doc.dose as string) ?? "",
     day: (doc.day as string) ?? "",
     slot: (doc.slot as string) ?? "",
     givenAt: doc.givenAt as Date,
-    byUserId: (doc.byUserId as string) ?? "",
-    byName: (doc.byName as string) ?? "",
+    byPersonId: (doc.byPersonId as string) ?? "",
     note: (doc.note as string) ?? "",
   };
 }
@@ -66,7 +69,7 @@ export async function listMedicationDoses(): Promise<MedicationDose[]> {
 export async function insertMedicationDose(data: MedicationDoseData, unique: boolean): Promise<MedicationDose> {
   const db = await getDb();
   const givenAt = new Date();
-  const key = { camperId: data.camperId, medKey: data.medKey, day: data.day, slot: data.slot };
+  const key = { personId: data.personId, medKey: data.medKey, day: data.day, slot: data.slot };
   if (unique) {
     const existing = await db.collection(COLLECTION).findOne(key);
     if (existing) return toDose(existing as Record<string, unknown>)!;
@@ -101,21 +104,13 @@ export async function deleteMedicationDose(id: string): Promise<boolean> {
 
 export async function ensureMedicationIndexes(): Promise<void> {
   const db = await getDb();
-  // ticks written before `scheduled` existed: a fixed "HH:MM" is a scheduled dose, "sos" is not
-  await db.collection(COLLECTION).updateMany({ [SCHEDULED_FIELD]: { $exists: false } }, [
-    { $set: { [SCHEDULED_FIELD]: { $ne: ["$slot", MEDICATION_SOS_SLOT] } } },
-  ]);
-  try {
-    await db.collection(COLLECTION).dropIndex("camperId_1_medKey_1_day_1_slot_1"); // legacy (auto-named, filtered on `slot`)
-  } catch {
-    // may not exist
-  }
   await Promise.all([
-    db.collection(COLLECTION).createIndex({ day: -1, slot: 1 }),
-    db.collection(COLLECTION).createIndex({ camperId: 1, day: -1 }),
+    ensureIndex(db.collection(COLLECTION), { day: -1, slot: 1 }),
+    ensureIndex(db.collection(COLLECTION), { personId: 1, day: -1 }, { name: PERSON_DAY_INDEX }),
     // a scheduled dose exists once per kid / medicine / day; "quando necessário" doses repeat, so they stay out of it
-    db.collection(COLLECTION).createIndex(
-      { camperId: 1, medKey: 1, day: 1, slot: 1 },
+    ensureIndex(
+      db.collection(COLLECTION),
+      { personId: 1, medKey: 1, day: 1, slot: 1 },
       { name: SCHEDULED_UNIQUE_INDEX, unique: true, partialFilterExpression: { [SCHEDULED_FIELD]: true } },
     ),
   ]);

@@ -1,53 +1,51 @@
-export const ROLES = ["parent", "staff", "health_staff", "admin"] as const;
+/**
+ * Acampa AUDIENCES — what a session looks like to the camp-ops code: the
+ * coordenação (admin), a team member with some helper role (staff) or a
+ * parent. The role itself comes from IPAlpha (`CoreRole`, CONTRACTS §10);
+ * `audienceOf` maps one onto the other.
+ */
+export const ROLES = ["parent", "staff", "admin"] as const;
 export type Role = (typeof ROLES)[number];
 
-export interface OtpState {
-  /** how the code was delivered: "comtele" (real SMS) or "local" (dev mock — console only) */
-  provider: "comtele" | "local";
-  /** sha256 hash of the code (always generated server-side) */
-  codeHash?: string;
-  /** the role the user picked when requesting the code */
-  requestedRole: Role;
-  requestedAt: Date;
-  expiresAt: Date;
-  attempts: number;
+/**
+ * The Acampa project's role keys in projects-api (CONTRACTS §10). Per edition
+ * except `coordenacao` (project-wide, sees every edition). `participante` never
+ * signs in. Future helpers are new keys: unknown keys behave as `equipe`.
+ */
+export const CORE_ROLES = ["coordenacao", "organizacao", "organizacao-jogos", "pontuacao", "saude", "coletes", "fotografia", "checkin", "checkin-onibus", "equipe", "responsavel"] as const;
+export type CoreRole = (typeof CORE_ROLES)[number] | (string & {});
+export const PARTICIPANT_ROLE = "participante";
+export const RESPONSIBLE_ROLE = "responsavel";
+export const TEAM_ROLE = "equipe";
+export const COORDINATION_ROLE = "coordenacao";
+
+/** The audience a core role lands on. */
+export function audienceOf(role: CoreRole): Role {
+  if (role === COORDINATION_ROLE) return "admin";
+  if (role === RESPONSIBLE_ROLE) return "parent";
+  return "staff";
 }
 
-/** UI + SMS language for this account — refreshed from the device on every login. */
-export type AppLocale = "pt" | "en" | "es" | "fr";
+/** UI language — the device's (the session keeps nothing about the person). */
+export type AppLocale = "pt" | "en" | "es" | "fr" | "de";
 
-export interface User {
-  _id: string;
-  name: string;
-  phone: string; // E.164, e.g. +5511981234567 (always Brazilian mobile)
-  /** optional contact address; admins created by the handover keep it here */
-  email: string | null;
-  /** the SAME person can hold multiple roles (e.g. parent + staff + admin) */
-  roles: Role[];
-  /** last device language seen at login — SMS and UI follow this */
-  locale: AppLocale;
-  createdAt: Date;
-  updatedAt: Date;
-  otp?: OtpState;
-  /** set when the account is frozen after too many wrong OTP attempts */
-  frozenUntil?: Date;
-  /** PARENTS: the Preparação items they ticked as done ("section:<id>") — the team's equivalent lives on `staff.prepDone` */
-  prepDone: string[];
-  /** PARENTS: when the welcome SMS (app link) went out — null until then; sent ONCE, ever (services/notify.ts syncParentWelcomes) */
-  welcomeSentAt: Date | null;
-}
-
-/** User shape returned to the client (never leaks OTP internals) */
-export interface PublicUser {
+/**
+ * Who is behind a request: an IPAlpha person id + the roles of this session.
+ * No name, phone or e-mail is kept (names are read live from core when shown).
+ */
+export interface SessionUser {
+  /** the IPAlpha person id (also `personId`, kept as `id` for the many `byPersonId: user.id` stamps) */
   id: string;
-  name: string;
-  phone: string;
-  roles: Role[];
-  locale: AppLocale;
+  personId: string;
+  /** every live project role of the person at login (the profile chooser) */
+  roles: CoreRole[];
+  /** the role the session acts as */
+  coreRole: CoreRole;
+  /** the audience of `coreRole` (forced to admin on a history session) */
+  activeRole: Role;
+  /** SUPER_ADMIN_PERSON_IDS member (deployment owner) */
+  superAdmin: boolean;
 }
-
-/** PublicUser + the role chosen at login (the "active" one for this session) */
-export type SessionUser = PublicUser & { activeRole: Role };
 
 // ── Categories (admin-managed enumerations) ──────────────────────────────
 
@@ -175,11 +173,12 @@ export function bedroomCapacity(b: Pick<Bedroom, "bunkBeds" | "singleBeds">): nu
   return b.bunkBeds * 2 + b.singleBeds;
 }
 
-// ── Staff (equipe / voluntários) ────────────────────────────────────────
+// ── Participants (campers + team, camp operations only) ─────────────────
 
 /**
- * Category keys that feed each staff field.
- * The staff record stores the chosen OPTION ids; labels come from the category.
+ * Health category keys — the persons-api health lists (`GET /health-lists`,
+ * church-wide, managed in Mordomia). Health itself lives in persons-api
+ * (kind `medical`); Acampa only references the option ids.
  */
 export const STAFF_CATEGORY_KEYS = {
   allergies: "alergias",
@@ -187,104 +186,81 @@ export const STAFF_CATEGORY_KEYS = {
   healthIssues: "condicao-cronica",
 } as const;
 
-/**
- * One medicine a person (kid or team member) takes during the camp. `times` are the fixed "HH:MM"
- * moments of the day it is given (the medical checklist ticks each one);
- * `asNeeded` = no fixed time ("quando necessário"). Both empty = schedule
- * not informed yet — the medical team should confirm with the parents.
- */
+/** One medicine (persons-api `medical.medications[]`) — kept here for the medication checklist. */
 export interface Medication {
-  /** "Ritalina", "Colírio Hyabak" */
   name: string;
-  /** "10mg", "1 comprimido", "1 gota em cada olho" */
   dose: string;
-  /** "HH:MM", sorted, unique */
   times: string[];
   asNeeded: boolean;
-  /** "junto com o café", "quando o olho estiver seco" */
   notes: string;
 }
 export const MEDICATIONS_MAX = 20;
 export const MEDICATION_TIMES_MAX = 12;
 
-export interface Staff {
+/** The health block of a person (persons-api kind `medical`, storage field `health`). Never stored in Acampa. */
+export interface HealthInfo {
+  allergies: string[];
+  drugAllergies: string[];
+  healthIssues: string[];
+  neurodivergent: boolean;
+  medications: Medication[];
+  foodRestrictions: string;
+  healthNotes: string;
+  weightKg: number | null;
+  insurance: string;
+  insuranceCard: string;
+}
+
+export const EMPTY_HEALTH: HealthInfo = { allergies: [], drugAllergies: [], healthIssues: [], neurodivergent: false, medications: [], foodRestrictions: "", healthNotes: "", weightKg: null, insurance: "", insuranceCard: "" };
+
+/** Shared by campers and team members: the participant row of one person in one camp (CONTRACTS §15). */
+interface ParticipantBase {
+  /** = personId (the IPAlpha person id) — every reference in camp ops uses it */
   _id: string;
-  /** leader created during an import review; hidden until apply */
-  draft?: boolean;
-  importId?: string;
-  /** bulk AI health-note triage for spreadsheet imports */
-  aiReviewStatus?: CamperAiReviewStatus | null;
-  aiReviewError?: string;
-  aiReviewStartedAt?: Date | null;
-  aiReviewFinishedAt?: Date | null;
-  /** failed AI-review tries; retries stop at AI_REVIEW_MAX_ATTEMPTS */
-  aiReviewAttempts?: number;
-  /** when a failed review may be retried (cooldown); null when due now */
-  aiReviewNextRetryAt?: Date | null;
-  /** true once the fast Jev pass already wrote the structured health fields; cleanup retries skip Jev */
-  aiReviewStructured?: boolean;
-  name: string;
-  /** "F" | "M" | null — from the room (girls/boys); never collected on the form */
-  sex: CamperSex | null;
-  /** "F" | "M" | null — Jev guess on the name; internal, never shown; icon + ordering fallback when the room has no wing */
-  probableGender: CamperSex | null;
-  /** E.164 — null while the person hasn't registered a phone yet */
-  phone: string | null;
-  /** optional — notification emails; null/empty = skip email, never block login */
-  email: string | null;
-  /** unstructured identity document (CPF, RG, identidade, CDIN, passport…) */
-  document: string;
-  /** ISO date (YYYY-MM-DD); null when unknown */
-  birthDate: string | null;
-  /** inactive members are kept for history but hidden from the default lists */
-  active: boolean;
+  personId: string;
   /** id of a Team document (not a category) */
   team: string | null;
-  /** id of a Transport document (bus / car), not a category option */
+  /** id of a Transport document (bus / car) */
   transportation: string | null;
-  /** id of a Bedroom document (not a category) */
+  /** id of a Bedroom document */
   bedroom: string | null;
-  /**
-   * What the person does in the room: a CARETAKER ("líder") is responsible
-   * for specific kids (Camper.caretakerId), a HELPER ("auxiliar") only helps
-   * out. Only caretakers receive kids and their SMS.
-   */
-  roomRole: RoomRole;
-  /** "observações": multi-choice option ids + free text */
-  allergies: string[];
-  /** category option ids (alergia-medicamentos) */
-  drugAllergies: string[];
-  foodRestrictions: string;
-  healthIssues: string[];
-  /** medicines the person takes, each with its schedule */
-  medications: Medication[];
-  /** free-text health/allergy remarks (e.g. from the registration form) */
-  healthNotes: string;
   /** set when the person arrived on departure day */
   checkin: CamperCheckin | null;
-  /** the camp VEST (colete) the person wears during the camp: handed out, then taken back (see routes/staff.ts vest) */
-  vest: VestStatus;
+  /** free camp-ops notes (Acampa keeps them — decision 33) */
+  generalNotes: string;
+  /** the persons-api import (§20) whose batch created / last filled this row; null for regular records */
+  importId: string | null;
   /**
-   * Preparação items the person ticked as done: "section:<id>" for a general
-   * section, "role:<id>" for a role's preparation. Their own checklist —
-   * only they (and the admin) see it.
+   * Import-fillable fields (keys only) a person changed by hand since an import last wrote them (decision 78):
+   * a later import never overwrites them — it records an `importConflicts` entry the coordenação decides.
    */
-  prepDone: string[];
-  /** when the welcome SMS (app link) went out — null until then; it is sent ONCE, ever (see services/notify.ts syncWelcomes) */
-  welcomeSentAt: Date | null;
-  /**
-   * Emergency QR lookups of kids OUTSIDE this person's normal scope
-   * (GET /api/campers/lookup/:id). Distinct kids only. ≥3 texts the admins;
-   * ≥5 blocks further out-of-scope lookups until the admin zeroes the counter
-   * (Settings → Geral). Belonging-to-me scans never increment this.
-   */
-  foreignLookupCount: number;
-  /** names of the distinct out-of-scope kids already counted (newest last; capped) */
-  foreignLookupNames: string[];
-  /** when the admins were SMS'd about the 3rd out-of-scope scan (once until reset) */
-  foreignLookupAlertedAt: Date | null;
+  importEdited: string[];
+  /** import dry-run row; hidden until apply */
+  draft?: boolean;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface Staff extends ParticipantBase {
+  kind: "team";
+  /** inactive members are kept for history but hidden from the default lists */
+  active: boolean;
+  /**
+   * What the person does in the room: a CARETAKER ("líder") is responsible
+   * for specific kids (Camper.caretakerId), a HELPER ("auxiliar") only helps.
+   */
+  roomRole: RoomRole;
+  /** the camp VEST (colete): handed out, then taken back */
+  vest: VestStatus;
+  /** Preparação items ticked as done: "section:<id>" / "role:<id>" */
+  prepDone: string[];
+  /** when the welcome message went out — null until then; sent ONCE */
+  welcomeSentAt: Date | null;
+  /** out-of-scope emergency QR lookups (distinct kids); ≥3 alerts the coordenação, ≥5 blocks */
+  foreignLookupCount: number;
+  /** person ids of the distinct out-of-scope kids already counted */
+  foreignLookupCamperIds: string[];
+  foreignLookupAlertedAt: Date | null;
 }
 
 // ── Teams (times) + scoreboard (placar) ──
@@ -321,13 +297,12 @@ export interface ScoreEntry {
   kind: "add" | "remove" | "reset";
   /** optional: why ("Gincana da piscina — 1º lugar") */
   note: string;
-  /** set when the line came from scanning a kid's QR code (POST /api/scores/scan): the kid whose team earned the points */
+  /** set when the line came from scanning a kid's QR code: the kid's person id */
   camperId: string | null;
-  camperName: string;
-  /** the programme event the scan belongs to — a kid counts only once per event (across every device), and every scan of an event carries the same points */
+  /** the programme event the scan belongs to */
   eventId: string | null;
-  byUserId: string;
-  byName: string;
+  /** who launched it (person id) */
+  byPersonId: string;
   createdAt: Date;
 }
 
@@ -340,154 +315,28 @@ export const CAMPER_CATEGORY_KEYS = {
   healthIssues: "condicao-cronica",
 } as const;
 
-export interface Camper {
-  _id: string;
-  name: string;
-  /** "YYYY-MM-DD" or null */
-  birthDate: string | null;
-  /** "F" | "M" | null — from the room (girls/boys); never collected on the form */
-  sex: CamperSex | null;
-  /** "F" | "M" | null — Jev guess on the name; internal, never shown; icon + ordering fallback when the room has no wing */
-  probableGender: CamperSex | null;
-  cpf: string;
-  rg: string;
-  school: string;
-  schoolGrade: string;
-  /** which church the kid attends (free text) */
-  church: string;
-  /** who invited the kid (free text) */
+/** A kid's participant row: camp operations only (no name, birth date, documents, guardian or health — those live in core). */
+export interface Camper extends ParticipantBase {
+  kind: "camper";
+  /** who invited the kid (free text — decision 33) */
   invitedBy: string;
-  /**
-   * The team member (staff id) who LOOKS AFTER this kid — always someone
-   * sleeping in the same room with `roomRole: "caretaker"`. Null = the kid
-   * has no caretaker yet ("órfão": listed first on the admin page).
-   */
+  /** the team member (person id) who LOOKS AFTER this kid; null = no caretaker yet */
   caretakerId: string | null;
-  /** token printed on the kid's QR badge (from the registration system) */
+  /** token printed on the kid's QR badge */
   qrToken: string;
-  /** id of the kid in the registration system (Supabase) — for re-syncs */
-  externalId: string;
-  /** id of a Team document (not a category) */
-  team: string | null;
-  /** id of a Transport document (bus / car), not a category option */
-  transportation: string | null;
+  /** bunk position (category option id) */
   bed: string | null;
-  /** Bedroom id */
-  bedroom: string | null;
-  /** kilograms (e.g. 28.5) or null */
-  weightKg: number | null;
-  allergies: string[];
-  /** category option ids (alergia-medicamentos) */
-  drugAllergies: string[];
-  healthIssues: string[];
-  /** neurodivergent (TEA, TDAH…) — ADMIN and MEDICAL team only; never sent to room staff */
-  neurodivergent: boolean;
-  /** medicines the kid takes, each with its schedule (drives the medical checklist) */
-  medications: Medication[];
-  foodRestrictions: string;
-  healthNotes: string;
-  generalNotes: string;
-  /** who the kid would like to share the room with (free text from the form) */
+  /** who the kid would like to share the room with (free text) */
   bedroomPreference: string;
-  insurance: string;
-  insuranceCard: string;
-  emergencyContact: string;
-  guardianName: string;
-  /** E.164 or null */
-  guardianPhone: string | null;
-  guardianCpf: string;
-  guardianEmail: string;
-  /** set when the kid arrived at the church and the parent confirmed the registration data */
-  checkin: CamperCheckin | null;
-  /** set when the kid boarded the bus going to the camp */
+  /** boarded the bus to the camp */
   busCheckin: CamperCheckin | null;
-  /** set when the kid boarded the bus returning to the church */
+  /** boarded the bus back to the church */
   busReturnCheckin: CamperCheckin | null;
-  /** when a PARENT last edited the "Informações de saúde" (see CamperChangeLog) — null until they do */
+  /** when a PARENT last edited the kid's health (change log) — null until they do */
   parentEditedAt: Date | null;
-  /** spreadsheet import process that created this camper; null for regular records */
-  importId: string | null;
-  /** bulk AI observation triage, shown as a subtle pulse while pending */
-  aiReviewStatus: CamperAiReviewStatus | null;
-  aiReviewError: string;
-  aiReviewStartedAt: Date | null;
-  aiReviewFinishedAt: Date | null;
-  /** failed AI-review tries; retries stop at AI_REVIEW_MAX_ATTEMPTS */
-  aiReviewAttempts?: number;
-  /** when a failed review may be retried (cooldown); null when due now */
-  aiReviewNextRetryAt?: Date | null;
-  /** true once the fast Jev pass already wrote the structured health fields; cleanup retries skip Jev */
-  aiReviewStructured?: boolean;
-  createdAt: Date;
-  updatedAt: Date;
 }
 
 export type CamperSex = "F" | "M";
-
-/** Background AI triage state for campers created by a spreadsheet import. "structured" = the fast Jev pass finished (health fields already updated); the slow cleanup pass is still pending. */
-export type CamperAiReviewStatus = "pending" | "processing" | "structured" | "reviewed" | "error";
-
-/** One reusable raw spreadsheet value → resolved system value mapping. */
-export interface CamperImportDictionaryEntry {
-  field: string;
-  raw: string;
-  normalized: string;
-  value: unknown;
-  label: string;
-  draft: boolean;
-  kind: "column" | "text" | "boolean" | "date" | "bedroom" | "transportation" | "team" | "staff" | "category";
-}
-
-export type CamperImportStatus = "needs_mapping" | "analyzing" | "panic" | "review" | "ready" | "importing" | "completed" | "error";
-export type CamperImportReviewKind = "leader" | "date" | "guardianName" | "phone" | "cpf" | "email" | "duplicate";
-
-export interface CamperImportReviewItem {
-  id: string;
-  row: number;
-  kind: CamperImportReviewKind;
-  field: string;
-  kidName: string;
-  guardianName: string;
-  birthDate: string;
-  age: number | null;
-  emergencyContact: string;
-  original: string;
-  value: string;
-  skip: boolean;
-  resolved: boolean;
-  /** A grouped review (notably one missing leader) can affect several spreadsheet rows. */
-  affectedRows?: number[];
-  options?: { id: string; label: string }[];
-  /** Existing registry record matched by the deterministic camper identity key. */
-  existingId?: string;
-  existingData?: Record<string, unknown>;
-  incomingData?: Record<string, unknown>;
-  mergedData?: Record<string, unknown>;
-  /** True when the two versions have complementary information to combine. */
-  mergeAvailable?: boolean;
-}
-
-export type StaffImportReviewKind = "phone" | "duplicate" | "bedroom" | "roomRole" | "inactive";
-export interface StaffImportReviewItem {
-  id: string;
-  row: number;
-  kind: StaffImportReviewKind;
-  field: string;
-  memberName: string;
-  original: string;
-  value: string;
-  skip: boolean;
-  resolved: boolean;
-  context?: string;
-  existingId?: string;
-  existingName?: string;
-  existingPhone?: string | null;
-  options?: { id: string; label: string }[];
-  existingData?: Record<string, unknown>;
-  incomingData?: Record<string, unknown>;
-  mergedData?: Record<string, unknown>;
-  mergeAvailable?: boolean;
-}
 
 export type RoomRole = "caretaker" | "helper";
 export const ROOM_ROLES: readonly RoomRole[] = ["caretaker", "helper"];
@@ -504,40 +353,34 @@ export interface VestStatus {
 
 export interface CamperCheckin {
   at: Date;
-  byUserId: string;
-  byName: string;
-  byRole: Role;
-  /** how it happened when nobody did it by hand — e.g. the system checked the kid in when their wristband scored points */
+  /** who did it (person id) */
+  byPersonId: string;
+  /** the acting core role */
+  byRole: CoreRole;
+  /** how it happened when nobody did it by hand */
   note?: string;
 }
 
 // ── Occurrences (incident / situation records) ──────────────────────────
 
-/** Name snapshot kept with an occurrence so its history survives later renames or deletions. */
-export interface OccurrencePerson {
-  id: string;
-  name: string;
-}
-
-/** Who wrote the occurrence — medical and organizers only see their own group; the admin sees all. */
+/** Who wrote the occurrence — medical and organizers only see their own group; the coordenação sees all. */
 export type OccurrenceGroup = "admin" | "organizer" | "medical";
 
 /**
- * A record of something that happened during camp. Admins, organizers and the
- * medical team create them. Each group only reads records it created; the
- * admin reads every group. An occurrence may involve staff, campers, both, or neither.
+ * A record of something that happened during camp. Person references are
+ * person ids — names are read live when displayed.
  */
 export interface Occurrence {
   _id: string;
-  campers: OccurrencePerson[];
-  staff: OccurrencePerson[];
+  /** kids involved (person ids) */
+  campers: string[];
+  /** team members involved (person ids) */
+  staff: string[];
   /** sanitized HTML, including uploaded images */
   description: string;
-  createdByUserId: string;
-  createdByName: string;
-  createdByRole: Role;
-  /** missing on records written before groups existed — inferred on read */
-  createdByGroup?: OccurrenceGroup;
+  createdByPersonId: string;
+  createdByRole: CoreRole;
+  createdByGroup: OccurrenceGroup;
   createdAt: Date;
 }
 
@@ -555,22 +398,19 @@ export interface Occurrence {
  */
 export interface MedicationDose {
   _id: string;
-  camperId: string;
-  /** name snapshot, so the history survives a rename / deletion */
-  camperName: string;
-  /** normalized medicine name — links the tick to the prescription even if the list is re-ordered */
+  /** the kid (person id) */
+  personId: string;
+  /** normalized medicine name — links the tick to the prescription */
   medKey: string;
   medName: string;
   dose: string;
-  /** "YYYY-MM-DD" the dose belongs to (the camp's day, not the instant) */
+  /** "YYYY-MM-DD" the dose belongs to */
   day: string;
   /** "HH:MM" of the prescribed moment, or "sos" */
   slot: string;
-  /** when the tick was made */
   givenAt: Date;
-  byUserId: string;
-  byName: string;
-  /** optional remark ("tomou meia dose", "vomitou depois") */
+  byPersonId: string;
+  /** optional remark */
   note: string;
 }
 
@@ -578,50 +418,28 @@ export interface MedicationDose {
 export const MEDICATION_SOS_SLOT = "sos";
 
 /**
- * Fields a PARENT may edit on their own kid (Início → Informações de saúde).
- * Every one of them but `generalNotes` counts as MEDICAL: a change there is
- * texted to the medical team, the admins and the caretaker; a change to the
- * observations alone only to the caretaker (see services/notify.ts).
+ * Health fields a PARENT may edit on their own kid (written to persons-api
+ * with the responsável token) + `generalNotes` (Acampa). Every one but
+ * `generalNotes` counts as MEDICAL for the notifications.
  */
 export const PARENT_EDITABLE_FIELDS = ["allergies", "drugAllergies", "healthIssues", "medications", "foodRestrictions", "healthNotes", "weightKg", "insurance", "insuranceCard", "generalNotes"] as const;
 export type ParentEditableField = (typeof PARENT_EDITABLE_FIELDS)[number];
-/** a field that can appear in a kid's change log (parent or medical edits) */
 export type CamperChangeField = ParentEditableField | MedicalEditableField;
-export const PARENT_FIELD_LABEL: Record<CamperChangeField, string> = {
-  allergies: "alergias",
-  drugAllergies: "alergia a medicamentos",
-  healthIssues: "condição de saúde",
-  medications: "medicação",
-  foodRestrictions: "alimentação",
-  healthNotes: "observações médicas",
-  weightKg: "peso",
-  insurance: "convênio",
-  insuranceCard: "carteirinha do convênio",
-  generalNotes: "observações",
-  neurodivergent: "neurodivergente",
-};
 
-/**
- * Fields the MEDICAL team (and the organization) may edit on any kid
- * (PUT /api/campers/:id/health): the health block the parents fill in, plus
- * `neurodivergent` (a diagnosis only admin + medical see anyway). Every
- * change is logged in the kid's change history with who did it.
- */
+/** Health fields the medical team / coordenação may edit (written to persons-api with their role token). */
 export const MEDICAL_EDITABLE_FIELDS = ["allergies", "drugAllergies", "healthIssues", "neurodivergent", "medications", "foodRestrictions", "healthNotes", "weightKg", "insurance", "insuranceCard"] as const;
 export type MedicalEditableField = (typeof MEDICAL_EDITABLE_FIELDS)[number];
 
-/** One edit to a kid's record (parent or medical team) — permanent history, read by the admin. */
+/** One edit to a kid's record — which FIELDS changed and who did it (values live in persons-api, never here). */
 export interface CamperChangeLog {
   _id: string;
-  camperId: string;
-  camperName: string;
+  personId: string;
   at: Date;
-  byUserId: string;
-  byName: string;
-  byRole: Role;
+  byPersonId: string;
+  byRole: CoreRole;
   /** true when at least one MEDICAL field changed (anything but `generalNotes`) */
   medical: boolean;
-  changes: { field: CamperChangeField; before: unknown; after: unknown }[];
+  fields: CamperChangeField[];
 }
 
 /** The kids' roll calls: church arrival, bus to camp, and bus back to church. */
@@ -631,17 +449,15 @@ export type CheckinKind = (typeof CHECKIN_KINDS)[number];
 /** Permanent audit trail of every check-in and undo (survives the undo itself). */
 export interface CheckinLog {
   _id: string;
-  /** "camper" (default) or "staff" — which collection `camperId` points at */
+  /** "camper" (default) or "staff" */
   who?: "camper" | "staff";
-  camperId: string;
-  camperName: string;
+  personId: string;
   kind: CheckinKind;
   action: "checkin" | "undo";
   at: Date;
-  byUserId: string;
-  byName: string;
-  byRole: Role;
-  /** self check-in: the meeting point (Settings → Check-in) the person was at */
+  byPersonId: string;
+  byRole: CoreRole;
+  /** self check-in: the meeting point the person was at */
   note?: string;
 }
 
@@ -697,6 +513,7 @@ export interface ScheduleRole {
  *  Both stay EMPTY when the role's `detailFromTeam` is on: the detail is then
  *  derived from `Staff.team` (see services/schedule.ts#assignmentDetail). */
 export interface EventAssignment {
+  /** the team member's person id */
   staffId: string;
   roleId: string;
   detail: string;
@@ -780,7 +597,7 @@ export interface StoredFile {
   /** MIME type, e.g. image/jpeg */
   type: string;
   size: number;
-  byUserId: string;
+  byPersonId: string;
   createdAt: Date;
 }
 
@@ -805,8 +622,7 @@ export interface GalleryPhoto {
   caption: string;
   /** id of a CampEvent this photo belongs to; null = a general camp photo */
   eventId: string | null;
-  byUserId: string;
-  byName: string;
+  byPersonId: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -875,30 +691,11 @@ export interface CheckinWindow {
 }
 
 /**
- * Team members allowed to run one of the KIDS' roll calls (normally an admin
- * job) while `checkinWindow` is open:
- *
- *   checkinHelpers — church check-in: each listed person receives every
- *                    camper (health included — they confirm it with the parents)
- *                    and every bedroom.
- *   busHelpers     — bus roll call: each entry links a person to ONE vehicle
- *                    (a Transport document). The person stands at the DOOR
- *                    of that vehicle confirming the kid the parents handed over
- *                    is now with our team — they do not necessarily ride in it,
- *                    so this link is independent from `staff.transportation`.
- *                    They receive the campers of THAT vehicle as NAME-ONLY
- *                    records (name, age, room, team, check-in stamps). Never
- *                    health data.
- *
- * Outside the window they are back to their own room.
+ * One bus helper (core role `checkin-onibus`) at the door of one vehicle. The
+ * role comes from projects-api; WHICH vehicle is camp ops, kept here.
  */
-export interface StaffList {
-  staffIds: string[];
-}
-
-/** One bus helper at the door of one vehicle (a Transport document id). */
 export interface BusHelper {
-  staffId: string;
+  personId: string;
   vehicleId: string;
 }
 
@@ -906,13 +703,12 @@ export interface BusHelperList {
   helpers: BusHelper[];
 }
 
-/** A staff member and the purpose shown beside them on the future parent contacts screen. */
+/** A team member and the purpose shown beside them on the parents' contacts screen. */
 export interface ParentContact {
-  /** stable client-generated id so entries can be edited without relying on their position */
   id: string;
   /** purpose shown to parents, e.g. "Coordenação do acampamento" */
   title: string;
-  staffId: string;
+  personId: string;
 }
 
 export interface Settings {
@@ -922,49 +718,10 @@ export interface Settings {
   checkinWindow: CheckinWindow;
   /** return-trip bus roll call window; separate because it happens days after departure */
   busReturnWindow: CheckinWindow;
-  checkinHelpers: StaffList;
+  /** which vehicle each `checkin-onibus` person stands at */
   busHelpers: BusHelperList;
-  /**
-   * Team members who ORGANIZE the programme (no time window): they may
-   * create / edit / delete events and roles and assign anyone to a função,
-   * and they see every staff member in full (health included) — but they
-   * cannot add, edit or remove staff, nor download the list.
-   */
-  organizers: StaffList;
-  /**
-   * GAME organizers (no time window): everything an organizer may do PLUS
-   * the scoreboard (Placar): give / take points from any team, zero a team.
-   */
-  gameOrganizers: StaffList;
-  /**
-   * SCORE helpers (no time window): they only run the bulk QR scan tied to
-   * a programme event — scanning the kids' QR codes at a door (POST
-   * /api/scores/scan). Never per-team points, never zero, delete only
-   * their own scan lines. No organizer rights.
-   */
-  scoreHelpers: StaffList;
-  /**
-   * MEDICAL team (no time window): they see EVERY camper in full (health
-   * included), every bedroom and every vehicle, the whole time — before,
-   * during and after the camp. Read-only: they never write campers, rooms or
-   * check-ins.
-   */
-  medicalStaff: StaffList;
-  /** ordered contacts that will be shared with parents */
+  /** ordered contacts shared with parents */
   parentContacts: ParentContact[];
-  /**
-   * VEST helpers (no time window): the people who hand out and take back the
-   * team vests (coletes). They see EVERY staff member as NAME + PHONE only
-   * (plus the vest status) — never health, room, team or anything else — and
-   * may stamp the vest delivery / return. Nothing else changes for them.
-   */
-  vestHelpers: StaffList;
-  /**
-   * PHOTOGRAPHERS (no time window): team members who upload the camp's
-   * photos and decide when each one is published. Everyone — parents and
-   * team — sees the published photos on the Fotos tab.
-   */
-  photographers: StaffList;
   /**
    * When ORDINARY team members (not organizers, check-in helpers, medical
    * team or parent contacts) may use the app. Both ends null = always. Outside
@@ -1014,37 +771,30 @@ export interface Settings {
    * property of the album, never of a single photo.
    */
   galleryPublished: boolean;
-  /** the "do your check-in" SMS to the whole team, scheduled for one instant */
+  /** the "do your check-in" message to the whole team, scheduled for one instant */
   checkinReminder: CheckinReminder;
-  /**
-   * SMS REDIRECT (Settings → Testes): while `enabled`, every text meant for a
-   * team member (login code + notifications) goes to `staffPhone` and every
-   * text meant for a parent / guardian goes to `parentPhone` instead of the
-   * real number — so the admin can rehearse the whole flow without texting
-   * anyone. A null phone for an audience means that audience's texts are
-   * simply dropped. MUST be switched off before the camp.
-   */
-  smsRedirect: SmsRedirect;
   updatedAt: Date | null;
 }
 
-export interface SmsRedirect {
-  enabled: boolean;
-  /** E.164 — receives everything meant for the team (OTP + notifications) */
-  staffPhone: string | null;
-  /** E.164 — receives everything meant for the parents (OTP + notifications) */
-  parentPhone: string | null;
-}
-
+/** An Acampa session (collection `sessions`). The browser holds only the opaque session token. */
 export interface Session {
+  /** sha256 (hex) of the opaque session token */
   _id: string;
-  userId: string;
-  /** the role selected by the user at login */
-  role: Role;
-  /** the camp this session is scoped to (see services/campContext.ts) */
+  personId: string;
+  /** every live project role at login (role switch picks from it) */
+  roles: CoreRole[];
+  activeRole: CoreRole;
+  /** the camp this session is scoped to */
   campId: string;
+  /** AES-256-GCM sealed `{role: {tokens, expiresAt, editionId}}` (SESSION_TOKEN_KEY) */
+  roleTokens: string;
+  /** AES-256-GCM sealed per-session key for the offline copy (rotated with every new session / role switch) */
+  offlineKey: string;
   createdAt: Date;
+  /** sliding: now + `hours` on use */
   expiresAt: Date;
+  /** sessionIdleHours fixed at login */
+  hours: number;
 }
 
 // ── Seeds (super-admin maintained templates the setup wizard imports) ──────

@@ -1,10 +1,11 @@
-import { listCampersOfGuardian } from "../models/campers";
+import { listCampers } from "../models/campers";
 import { listEvents } from "../models/schedule";
 import { checkinWindowOpen, getSettings, scoreHidden, staffAccessOpen } from "../models/settings";
-import { findStaffByPhone } from "../models/staff";
-import { findByPhone } from "../models/users";
-import type { CampEvent, Camper, DocAudience, OccurrenceGroup, PrepAudience, Role, RoomRole, ScheduleRole, Settings, Staff } from "../types";
+import { findStaffById } from "../models/staff";
+import { findUserCampState } from "../models/userCampState";
+import { COORDINATION_ROLE, type CampEvent, type Camper, type CoreRole, type DocAudience, type OccurrenceGroup, type PrepAudience, type Role, type RoomRole, type ScheduleRole, type Settings, type Staff } from "../types";
 import { campInProgress, campPeriod, parentWindowOf, parentWindowOpen, vestWindowOpen } from "./camp";
+import { kidsOfResponsible } from "./members";
 import { autoRoleCovers } from "./schedule";
 
 /**
@@ -12,7 +13,7 @@ import { autoRoleCovers } from "./schedule";
  * read. Every read path (REST lists/details and the realtime snapshot) filters
  * through here, so the frontend never receives what it must not show.
  *
- *   admin        → everything
+ *   coordenacao  → everything (`admin` audience; project-wide role, every edition)
  *   staff /      → only their own room. A CARETAKER (staff.roomRole) gets the
  *   health_staff   kids under THEIR care (Camper.caretakerId) any time, and the
  *                  other kids of the room only WHILE THE CAMP IS HAPPENING
@@ -26,13 +27,13 @@ import { autoRoleCovers } from "./schedule";
  *                  in the same room.
  *                  The programme: every event, but only the roles that apply
  *                  to THEM (see scopeEvent) — never who does what elsewhere.
- *   check-in     → a staff member the admin listed as a check-in helper, WHILE
+ *   check-in     → role `checkin`, WHILE
  *   helper         the check-in window is open: additionally every camper
  *                  (full record, health included — they confirm it with the
  *                  parents) and every bedroom. Other staff stay invisible.
  *                  The moment the window closes the extra data stops being
  *                  sent (snapshot, updates and REST alike).
- *   bus helper   → same window, for the bus roll call. The admin links the
+ *   bus helper   → role `checkin-onibus`, same window. The coordenação links the
  *                  helper to ONE vehicle (Settings → busHelpers, independent
  *                  from staff.transportation: they stand at the DOOR of that
  *                  vehicle, they need not ride in it). They get the campers of
@@ -40,44 +41,44 @@ import { autoRoleCovers } from "./schedule";
  *                  check-in stamps) — never health, contacts or notes — plus
  *                  every bedroom (for the labels). Kids in their own room stay
  *                  full (they look after them).
- *   organizer    → a staff member the admin listed as an ORGANIZER (no time
+ *   organizer    → role `organizacao` (no time
  *                  window): the ADMIN'S data scope (`all: true`) — every
  *                  camper, staff member, bedroom and the whole programme —
  *                  and the admin's writes, EXCEPT the four admin-only areas:
  *                  the organizers list itself, categories, notifications and
  *                  the "about" page (`admin: false`). Occurrences: only the
  *                  ones the organizers themselves registered (the admin sees all).
- *   game         → a staff member the admin listed as a GAME organizer (no
+ *   game         → role `organizacao-jogos` (no
  *   organizer      window): writes the programme (events, roles, assignments)
  *                  and the scoreboard (Placar): give / take / zero points of
  *                  any team. Sees every staff member in FULL and the whole
  *                  programme. NOT an organizer: campers / bedrooms as any team
  *                  member, no settings.
- *   score helper → a staff member the admin listed as a SCORE helper (no
+ *   score helper → role `pontuacao` (no
  *                  window): ONLY the bulk QR scan tied to a programme event
  *                  (the kid's team gets the event's points). Never gives /
  *                  takes points by team, never zeroes, deletes only their
  *                  own scan lines, no organizer rights. Every camper reaches
  *                  them as a "name" record (name + team) so the scan can be
  *                  resolved and shown. Everything else: as any team member.
- *   medical      → a staff member the admin listed as MEDICAL team (no time
+ *   medical      → role `saude` (no time
  *                  window): every camper in FULL (health included), every
  *                  bedroom — hence every vehicle — the whole time. They may
  *                  edit the kids' HEALTH block (PUT /api/campers/:id/health),
  *                  never rooms or check-ins. Occurrences: only the ones the
  *                  medical team registered. Staff / programme: as any team
  *                  member.
- *   vest helper  → a staff member the admin listed as a VEST (colete) helper,
+ *   vest helper  → role `coletes`,
  *                  until VEST_GRACE_DAYS after the camp ends (they collect the
  *                  vests back in the days after): every staff member as NAME + PHONE +
  *                  vest status ("contact" visibility) — never health, room,
  *                  team or check-in — and may stamp the vest delivery /
  *                  return. Everything else: as any team member.
-  *   photographer → a staff member the admin listed as a PHOTOGRAPHER (no
+ *   photographer → role `fotografia` (no
  *   window): uploads the camp's photos (POST /api/gallery), edits and
  *   publishes them, and sees the drafts on the Fotos tab. Everything else:
  *   as any team member.
-*   parent       → their OWN kids (matched by the guardian phone), in full,
+ *   parent       → role `responsavel`: their OWN kids (participante memberships naming them as involved), in full,
  *                  and the kids' rooms. The "important contacts"
  *                  (Settings → Contatos) as NAME + PHONE records the WHOLE
  *                  time the parent may use the app (their access window —
@@ -91,16 +92,41 @@ import { autoRoleCovers } from "./schedule";
  *                  They may edit their kid's health block
  *                  (PUT /api/campers/:id/parent).
  *
- * ORDINARY team members (on none of the lists above, nor a parent contact)
+ * The scope follows the ACTING role only (role switch = another scope). Health
+ * itself is read from persons-api with the acting role token, so core's role
+ * rules have the last word; this scope decides camp-ops visibility.
+ *
+ * ORDINARY team members (role `equipe`, not a parent contact)
  * are further gated by `settings.staffAccessWindow`: outside it they get
  * NO_ACCESS. `settings.checkinTestMode` makes the check-in window count as
  * open for the church / bus helpers (testing before the real day).
  */
 export interface Viewer {
+  sessionId?: string;
+  /** the audience of the acting role (admin on a history session) */
   activeRole: Role;
-  /** the person's login phone — how the session is matched to a staff record */
-  phone: string;
+  /** the acting IPAlpha project role (§10) */
+  coreRole: CoreRole;
+  /** the IPAlpha person id — how the session is matched to a participant row */
+  personId: string;
 }
+
+/**
+ * §10 role keys → what the role adds on top of an ordinary team member.
+ * Roles are per edition and live in projects-api; the WINDOWS (check-in,
+ * bus trips, vests, staff / parent access) stay camp ops in settings.
+ */
+export const ROLE_FLAGS: Record<string, "organizer" | "gameOrganizer" | "scoreHelper" | "medical" | "vestHelper" | "photographer" | "checkinHelper" | "busHelper" | "team"> = {
+  organizacao: "organizer",
+  "organizacao-jogos": "gameOrganizer",
+  pontuacao: "scoreHelper",
+  saude: "medical",
+  coletes: "vestHelper",
+  fotografia: "photographer",
+  checkin: "checkinHelper",
+  "checkin-onibus": "busHelper",
+  equipe: "team",
+};
 
 export type Scope =
   | {
@@ -110,7 +136,7 @@ export type Scope =
     }
   | {
       all: false;
-      /** the viewer's own staff record id (null when the phone isn't linked to one) */
+      /** the viewer's own team row (= person id; null when not on this camp's team) */
       staffId: string | null;
       /** the viewer's bedroom id (null when unassigned) */
       bedroom: string | null;
@@ -146,9 +172,9 @@ export type Scope =
       parentBedrooms: string[];
       /** PARENT session: true while the parents' window is open — the team of their kids' ROOMS is sent (name + phone) */
       parentRoomStaff: boolean;
-      /** PARENT session: staff ids listed as important contacts (Settings → Contatos) — sent the whole time the parent has access */
+      /** PARENT session: person ids listed as important contacts (Settings → Contatos) — sent the whole time the parent has access */
       parentContactIds: string[];
-      /** PARENT session: the Preparação items they ticked as done ("section:<id>" — stored on their user record) */
+      /** PARENT session: the Preparação items they ticked as done ("section:<id>" — userCampState) */
       parentPrepDone: string[];
     };
 
@@ -164,33 +190,33 @@ function asParent(scope: Scope): Extract<Scope, { all: false }> {
   return scope as Extract<Scope, { all: false }>;
 }
 
-/** On some admin list (organizer, church / bus helper, medical, vest helper, photographer, parent contact)? These people are never gated by the staff access window. */
-export function isPrivilegedStaff(staffId: string, s: Settings): boolean {
-  return (
-    s.organizers.staffIds.includes(staffId) ||
-    s.gameOrganizers.staffIds.includes(staffId) ||
-    s.scoreHelpers.staffIds.includes(staffId) ||
-    s.medicalStaff.staffIds.includes(staffId) ||
-    s.vestHelpers.staffIds.includes(staffId) ||
-    s.photographers.staffIds.includes(staffId) ||
-    s.checkinHelpers.staffIds.includes(staffId) ||
-    s.busHelpers.helpers.some((h) => h.staffId === staffId) ||
-    s.parentContacts.some((p) => p.staffId === staffId)
-  );
+/**
+ * A KNOWN helper role (a ROLE_FLAGS key other than `equipe`) or the
+ * coordenação, or a person listed as a parent contact: never gated by the
+ * staff access window. An unknown role key (a future helper core already
+ * grants, without a flag here yet) behaves EXACTLY as `equipe` — window
+ * included; `responsavel` has its own window.
+ */
+export function isPrivilegedStaff(personId: string, coreRole: CoreRole, s: Settings): boolean {
+  if (coreRole === COORDINATION_ROLE) return true;
+  const flag = Object.hasOwn(ROLE_FLAGS, coreRole) ? ROLE_FLAGS[coreRole] : undefined;
+  return (flag !== undefined && flag !== "team") || s.parentContacts.some((p) => p.personId === personId);
 }
 
 /** May this team member use the app (and be notified) right now? Ordinary members only inside `staffAccessWindow`. */
-export function staffHasAccess(staffId: string, s: Settings, now = new Date()): boolean {
-  return isPrivilegedStaff(staffId, s) || staffAccessOpen(s.staffAccessWindow, now);
+export function staffHasAccess(personId: string, coreRole: CoreRole, s: Settings, now = new Date()): boolean {
+  return isPrivilegedStaff(personId, coreRole, s) || staffAccessOpen(s.staffAccessWindow, now);
 }
 
 /**
- * The parent's scope: their kids (by guardian phone), the kids' rooms, the
- * important contacts (always — they are the numbers to call) and, inside the
- * parents' window, the team of those rooms.
+ * The parent's scope: their kids (the `participante` memberships naming them
+ * as involved responsável, ∩ this camp's kids), the kids' rooms, the important
+ * contacts (always) and, inside the parents' window, the team of those rooms.
  */
-async function resolveParentScope(phone: string): Promise<Scope> {
-  const [kids, settings, events, user] = await Promise.all([listCampersOfGuardian(phone), getSettings(), listEvents(), findByPhone(phone)]);
+async function resolveParentScope(personId: string): Promise<Scope> {
+  const kidIds = await kidsOfResponsible(personId);
+  if (kidIds.length === 0) return NO_ACCESS;
+  const [kids, settings, events, state] = await Promise.all([listCampers({ personIds: kidIds }), getSettings(), listEvents(), findUserCampState(personId)]);
   if (kids.length === 0) return NO_ACCESS;
   const open = parentWindowOpen(parentWindowOf(settings, events));
   return {
@@ -199,46 +225,56 @@ async function resolveParentScope(phone: string): Promise<Scope> {
     parentKids: kids.map((k) => k._id),
     parentBedrooms: settings.kidsRoomsDraft ? [] : [...new Set(kids.map((k) => k.bedroom).filter((b): b is string => !!b))],
     parentRoomStaff: open,
-    parentContactIds: settings.parentContacts.map((p) => p.staffId),
-    parentPrepDone: user?.prepDone ?? [],
+    parentContactIds: settings.parentContacts.map((p) => p.personId),
+    parentPrepDone: state?.prepDone ?? [],
   };
 }
 
 export const ADMIN: Extract<Scope, { all: true }> = { all: true, admin: true };
 export const ORGANIZER: Extract<Scope, { all: true }> = { all: true, admin: false };
 
+/**
+ * The scope of the ACTING role (§10 → flags). A helper role keeps the
+ * person's own team row (room, room role) when they are on this camp's team.
+ */
 export async function resolveScope(viewer: Viewer): Promise<Scope> {
   if (viewer.activeRole === "admin") return ADMIN;
-  if (viewer.activeRole === "parent") return resolveParentScope(viewer.phone);
-  if (viewer.activeRole !== "staff" && viewer.activeRole !== "health_staff") return NO_ACCESS;
-  const me = await findStaffByPhone(viewer.phone);
-  if (!me || !me.active) return NO_ACCESS;
-  const settings = await getSettings();
-  // ORDINARY team members (on no list at all) only get in during the staff access window
-  if (!staffHasAccess(me._id, settings)) return NO_ACCESS;
-  const { checkinWindow, busReturnWindow, checkinTestMode, checkinHelpers, busHelpers, organizers, gameOrganizers, scoreHelpers, medicalStaff, vestHelpers, photographers, kidsRoomsDraft } = settings;
-  // an ORGANIZER is an admin minus a few settings: same data scope
-  if (organizers.staffIds.includes(me._id)) return ORGANIZER;
-  const gameOrganizer = gameOrganizers.staffIds.includes(me._id);
-  const scoreHelper = scoreHelpers.staffIds.includes(me._id);
-  // a game organizer also writes the programme (and sees the whole team for the roster)
-  const organizer = gameOrganizer;
-  const medical = medicalStaff.staffIds.includes(me._id);
+  if (viewer.activeRole === "parent") return resolveParentScope(viewer.personId);
+  if (viewer.coreRole === COORDINATION_ROLE) return ADMIN;
+  const flag = Object.hasOwn(ROLE_FLAGS, viewer.coreRole) ? ROLE_FLAGS[viewer.coreRole] : "team";
+  const [me, settings] = await Promise.all([findStaffById(viewer.personId), getSettings()]);
+  // a plain team member must be on this camp's (active) team; a helper role works without a room
+  if (flag === "team" && (!me || !me.active)) return NO_ACCESS;
+  if (me && !me.active && flag !== "team") return NO_ACCESS;
+  // ORDINARY team members only get in during the staff access window
+  if (!staffHasAccess(viewer.personId, viewer.coreRole, settings)) return NO_ACCESS;
+  if (flag === "organizer") return ORGANIZER;
+  const { checkinWindow, busReturnWindow, checkinTestMode, busHelpers, kidsRoomsDraft } = settings;
   const period = await campPeriod();
-  // the vest helper keeps the tab for a few days after the camp (vests come back then), not forever
-  const vestHelper = vestHelpers.staffIds.includes(me._id) && vestWindowOpen(period);
-  const photographer = photographers.staffIds.includes(me._id);
-  const listedChurch = checkinHelpers.staffIds.includes(me._id);
-  const linkedVehicle = busHelpers.helpers.find((h) => h.staffId === me._id)?.vehicleId ?? null;
+  const gameOrganizer = flag === "gameOrganizer";
+  const linkedVehicle = flag === "busHelper" ? (busHelpers.helpers.find((h) => h.personId === viewer.personId)?.vehicleId ?? null) : null;
   // test mode opens every kids' roll call; bus helpers stay active in either trip's window
   const departureWindowOpen = checkinTestMode || checkinWindowOpen(checkinWindow);
   const busWindowOpen = departureWindowOpen || checkinWindowOpen(busReturnWindow);
-  const checkinHelper = departureWindowOpen && listedChurch;
-  const busHelperVehicle = busWindowOpen ? linkedVehicle : null;
-  const busOutboundHelper = linkedVehicle !== null && departureWindowOpen;
-  const busReturnHelper = linkedVehicle !== null && (checkinTestMode || checkinWindowOpen(busReturnWindow));
-  const campActive = campInProgress(period);
-  return { ...NO_ACCESS, staffId: me._id, bedroom: me.bedroom, checkinHelper, busHelperVehicle, busOutboundHelper, busReturnHelper, organizer, gameOrganizer, scoreHelper, medical, vestHelper, photographer, kidsRoomsDraft, campActive, roomRole: me.roomRole };
+  return {
+    ...NO_ACCESS,
+    staffId: me?._id ?? null,
+    bedroom: me?.bedroom ?? null,
+    checkinHelper: flag === "checkinHelper" && departureWindowOpen,
+    busHelperVehicle: busWindowOpen ? linkedVehicle : null,
+    busOutboundHelper: linkedVehicle !== null && departureWindowOpen,
+    busReturnHelper: linkedVehicle !== null && (checkinTestMode || checkinWindowOpen(busReturnWindow)),
+    organizer: gameOrganizer,
+    gameOrganizer,
+    scoreHelper: flag === "scoreHelper",
+    medical: flag === "medical",
+    // the vest helper keeps the tab for a few days after the camp (vests come back then), not forever
+    vestHelper: flag === "vestHelper" && vestWindowOpen(period),
+    photographer: flag === "photographer",
+    kidsRoomsDraft,
+    campActive: campInProgress(period),
+    roomRole: me?.roomRole ?? "helper",
+  };
 }
 
 /** The Preparação items this session has already ticked (parents; the team's live on their staff record). */
