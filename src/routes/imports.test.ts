@@ -10,7 +10,9 @@ import { EMPTY_STAFF, findStaffById, insertStaff } from "../models/staff";
 import { insertTeam } from "../models/teams";
 import { insertTransport } from "../models/transports";
 import { addClient, removeClient, type RealtimeClient } from "../services/realtime";
-import { catchUpUnfinished } from "../services/personImports";
+import { catchUpUnfinished, enqueueAppMessage } from "../services/personImports";
+import { findSessionByToken, openRoleTokens, seal, switchSessionRole } from "../services/session";
+import { signRoleToken } from "../testing/ipalphaHarness";
 import { activeCampId, withCamp } from "../services/campContext";
 
 const call = testApp();
@@ -421,6 +423,36 @@ describe("decision 77: unfinished imports are caught up (boot, reconnect, the im
     batches = [{ batch: 1, rows: [row(2, KID_A, { team: teamId })] }];
     await catchUpUnfinished();
     expect(await findImportJob(IMPORT_ID)).toMatchObject({ status: "applying", lastBatch: 1 });
+  });
+
+  test("a message with no session is remembered; a later coordenação session adopts it and applies the batches once", async () => {
+    job = { ...job!, status: "done", counts: { ...(job!.counts as object), batches: 1 } };
+    batches = [{ batch: 1, rows: [row(2, KID_A, { transportation: busId })] }];
+    await enqueueAppMessage(batchMessage(1, batches[0].rows) as never, TEST_PROJECT);
+    await settle();
+    expect(await findImportJob(IMPORT_ID)).toBeNull();
+    expect(await findCamperById(KID_A)).toBeNull();
+    expect(core.callsTo(`GET /imports/${IMPORT_ID}`)).toHaveLength(0);
+    const token = await sessionFor(keys, ADMIN, ["equipe"]);
+    await settle();
+    expect(await findImportJob(IMPORT_ID)).toBeNull();
+    const session = (await findSessionByToken(token))!;
+    const grants = openRoleTokens(session);
+    grants.coordenacao = {
+      tokens: { "ipalpha:persons": await signRoleToken(keys, ADMIN, "coordenacao", "ipalpha:persons"), "ipalpha:projects": await signRoleToken(keys, ADMIN, "coordenacao", "ipalpha:projects") },
+      expiresAt: Date.now() + 3600_000,
+      editionId: TEST_EDITION,
+    };
+    await (await rawDb()).collection("sessions").updateOne({ _id: session._id as never }, { $set: { roles: ["equipe", "coordenacao"], roleTokens: seal(JSON.stringify(grants)) } });
+    await switchSessionRole(session._id, "coordenacao");
+    for (let i = 0; i < 20 && !(await findImportJob(IMPORT_ID)); i++) await settle();
+    expect(await findCamperById(KID_A)).toMatchObject({ transportation: busId });
+    expect(await findImportJob(IMPORT_ID)).toMatchObject({ campId: activeCampId(), startedBy: ADMIN, status: "done", lastBatch: 1 });
+    const reads = core.callsTo(`GET /imports/${IMPORT_ID}/batches`).length;
+    await enqueueAppMessage({ ...batchMessage(1, batches[0].rows), id: "again" } as never, TEST_PROJECT);
+    await settle();
+    expect(await findImportJob(IMPORT_ID)).toMatchObject({ lastBatch: 1 });
+    expect(core.callsTo(`GET /imports/${IMPORT_ID}/batches`)).toHaveLength(reads);
   });
 
   test("the importer has no live session: nothing is read, the entry waits; an import persons-api dropped (404) ends the entry", async () => {

@@ -1,7 +1,7 @@
 import { io } from "socket.io-client";
 import { config } from "../config";
 import { coreClient, ipalphaEnabled } from "./ipalpha";
-import { catchUpUnfinished, enqueueAppMessage, toAppMessage } from "./personImports";
+import { adoptPendingImports, catchUpUnfinished, enqueueAppMessage, toAppMessage } from "./personImports";
 
 /**
  * The ONE persistent dispatch app-channel socket of this backend (CONTRACTS
@@ -87,6 +87,7 @@ export class DispatchChannel {
       }),
       // every connect: messages sent while the socket was down (and before this process started) may be missing
       onSubscribed: deps.onSubscribed ?? (() => {
+        adoptPendingImports(config.ipalpha.projectId);
         void catchUpUnfinished()
           .then((n) => n && this.deps.log(`caught up ${n} import(s)`))
           .catch(() => this.deps.log("import catch-up failed — next connect / the importer's next read tries again"));

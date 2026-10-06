@@ -53,7 +53,9 @@ import { emitImportEvent, publish } from "./realtime";
  * (re)connect and on the importer's reads, unfinished imports are caught up
  * from persons-api (`GET /imports/:id/batches`, cursor = the next batch
  * number) with the importer's own coordenação token. Batches are applied in
- * order, each once (`lastBatch` only moves forward).
+ * order, each once (`lastBatch` only moves forward). An import started
+ * outside Acampa (Mordomia, decision 63) with no live coordenação session
+ * waits as an id only until one appears.
  *
  * Decision 78: a camp field a person changed by hand since the last import
  * (`participants.importEdited`) is never overwritten by a different import
@@ -505,9 +507,24 @@ export function subjectOf(importId: string): ImportSubject | null {
   return subjects.get(importId) ?? null;
 }
 
+/**
+ * Import ids that arrived (Mordomia, decision 63) before any coordenação
+ * session could read them. Ids only (decision 70). Lost on restart: persons-api
+ * keeps results for 30 days, and GET /api/imports/:id still adopts the import.
+ */
+const pendingImports = new Set<string>();
+const PENDING_IMPORTS_MAX = 500;
+
+function rememberPendingImport(importId: string): void {
+  if (pendingImports.has(importId)) return;
+  if (pendingImports.size >= PENDING_IMPORTS_MAX) pendingImports.delete(pendingImports.keys().next().value!);
+  pendingImports.add(importId);
+}
+
 /** tests only */
 export function clearImportMemory(): void {
   subjects.clear();
+  pendingImports.clear();
 }
 
 // ── importJobs: tracking + catch-up (decision 77) ───────────────────────────
@@ -595,6 +612,50 @@ export async function catchUpImport(importId: string, token?: string | null, rec
   }
 }
 
+/**
+ * Reads one untracked import with a live coordenação token, records the
+ * `importJobs` entry (ids only) and applies every retained batch. Must run
+ * inside the import queue. True when the import is tracked (or already was).
+ */
+async function adoptImport(importId: string, projectId: string): Promise<boolean> {
+  if (await findImportJob(importId)) return true;
+  const { getDb } = await import("../db");
+  const owners = await (await getDb()).collection("sessions").distinct("personId", { roles: COORDINATION_ROLE, expiresAt: { $gt: new Date() } });
+  for (const personId of owners) {
+    const token = await importerToken(String(personId));
+    if (!token) continue;
+    try {
+      const view = await coreClient().getImport(token, importId);
+      const subject = subjectOfTargets(view.targets);
+      if (!subject || (view.projectId && view.projectId !== projectId)) return true;
+      const campId = await campOfEdition(s(view.editionId));
+      await trackImport({ importId, campId, startedBy: s(view.createdBy) ?? String(personId), status: s(view.status) ?? "applying", subject });
+      await catchUpImport(importId, token);
+      return true;
+    } catch (err) {
+      if (err instanceof IpalphaRejected && (err.status === 403 || err.status === 404)) continue;
+      throw err;
+    }
+  }
+  return false;
+}
+
+/**
+ * A coordenação session just became live (login, role switch) or the app
+ * channel (re)subscribed: adopt imports that arrived with nobody here able
+ * to read them. Idempotent; a failure leaves the id for the next try.
+ */
+export function adoptPendingImports(projectId: string): void {
+  if (pendingImports.size === 0) return;
+  const ids = [...pendingImports];
+  void (async () => {
+    for (const importId of ids) {
+      const adopted = await runInImportQueue(() => adoptImport(importId, projectId)).catch(() => false);
+      if (adopted) pendingImports.delete(importId);
+    }
+  })();
+}
+
 /** Boot / app-channel (re)connect: catch up every unfinished import (in the queue, one by one). Returns how many were read. */
 export async function catchUpUnfinished(): Promise<number> {
   let done = 0;
@@ -651,25 +712,14 @@ export async function handleAppMessage(msg: AppMessage, projectId: string): Prom
   if (msg.projectId && msg.projectId !== projectId) return;
   let job = await findImportJob(msg.importId);
   if (!job) {
-    const { getDb } = await import("../db");
-    const owners = await (await getDb()).collection("sessions").distinct("personId", { roles: COORDINATION_ROLE, expiresAt: { $gt: new Date() } });
-    for (const personId of owners) {
-      const token = await importerToken(String(personId));
-      if (!token) continue;
-      try {
-        const view = await coreClient().getImport(token, msg.importId);
-        const subject = subjectOfTargets(view.targets);
-        if (!subject || (view.projectId && view.projectId !== projectId)) return;
-        const campId = await campOfEdition(s(view.editionId));
-        job = await trackImport({ importId: msg.importId, campId, startedBy: s(view.createdBy) ?? String(personId), status: s(view.status) ?? "applying", subject });
-        await catchUpImport(msg.importId, token);
-        return;
-      } catch (err) {
-        if (err instanceof IpalphaRejected && (err.status === 403 || err.status === 404)) continue;
-        throw err;
-      }
+    if (await adoptImport(msg.importId, projectId)) {
+      pendingImports.delete(msg.importId);
+      return;
     }
-    // No authorized importer session: retained batches are read on their next visit.
+    // No authorized importer session, and campId / startedBy cannot be known without a token.
+    // The id waits (in-process) until a coordenação session is live. Lost on restart:
+    // persons-api keeps the results 30 days, and GET /api/imports/:id still adopts it.
+    rememberPendingImport(msg.importId);
     return;
   }
   emitImportEvent(job.startedBy, job.campId, "import-progress", { importId: msg.importId, step: msg.step, done: msg.done, total: msg.total, status: msg.status, ...(msg.batch !== undefined ? { batch: msg.batch } : {}) });

@@ -6,7 +6,13 @@ import { forgetSessionValidation } from "./sessionValidation";
 import { closePersonSockets, closeSessionSockets } from "./realtime";
 import type { RoleGrant } from "./ipalpha/coreClient";
 import type { CoreRole, Session } from "../types";
+import { COORDINATION_ROLE } from "../types";
 import { ensureIndex } from "./indexes";
+
+/** A live coordenação session can read imports that arrived with nobody here (decision 63/77). */
+function noteCoordinationSession(): void {
+  void import("./personImports").then(({ adoptPendingImports }) => adoptPendingImports(config.ipalpha.projectId)).catch(() => undefined);
+}
 
 /**
  * Acampa sessions (CONTRACTS §15): `{personId, roles[], activeRole, campId,
@@ -118,6 +124,7 @@ export async function createSession(input: { personId: string; grants: RoleGrant
     hours,
   };
   await db.collection(COLLECTION).insertOne(session as never);
+  if (session.roles.includes(COORDINATION_ROLE)) noteCoordinationSession();
   return { token, session };
 }
 
@@ -157,7 +164,9 @@ export async function switchSessionRole(id: string, role: CoreRole): Promise<Ses
   const db = await getDb();
   forgetSessionValidation(id);
   const res = await db.collection(COLLECTION).findOneAndUpdate({ _id: id as never }, { $set: { activeRole: role, offlineKey: newOfflineKey() } }, { returnDocument: "after" });
-  return toSession(res as Record<string, unknown> | null);
+  const next = toSession(res as Record<string, unknown> | null);
+  if (role === COORDINATION_ROLE) noteCoordinationSession();
+  return next;
 }
 
 /** History / camp switch (coordenação). The offline key rotates too. */
