@@ -19,7 +19,7 @@ import { EMPTY_STAFF, findStaffById, insertStaff, updateStaff, type StaffData } 
 import { listTeams } from "../models/teams";
 import { listTransports } from "../models/transports";
 import { transportLabel } from "../routes/transports";
-import { bedroomCapacity, COORDINATION_ROLE, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, ROOM_ROLES, TEAM_ROLE, type RoomRole } from "../types";
+import { bedroomCapacity, COORDINATION_ROLE, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, ROOM_ROLES, TEAM_ROLE, type RoomRole, type Session } from "../types";
 import { withCamp } from "./campContext";
 import { coreClient } from "./ipalpha";
 import {
@@ -34,6 +34,7 @@ import {
   type ImportTarget,
 } from "./ipalpha/coreClient";
 import { editionRolesOf } from "./members";
+import { currentViewer, withViewerOf } from "./viewer";
 import { emitImportEvent, publish } from "./realtime";
 
 /**
@@ -481,12 +482,12 @@ async function subjectOfPerson(personId: string, campId: string): Promise<Import
   return null;
 }
 
-/** Resolve the import edition without falling back to another camp's roster. */
-export async function campOfEdition(editionId: string | null): Promise<string> {
+/** Resolve the import edition without falling back to another camp's roster (a camp without a stored edition is looked up with `session`'s token). */
+export async function campOfEdition(editionId: string | null, session: Session | null = currentViewer()): Promise<string> {
   if (!editionId) throw new IpalphaRejected(409, "unknownEdition", {});
   const { campEditionId } = await import("./acting");
   for (const camp of await listCamps()) {
-    if ((camp.editionId ?? await campEditionId(camp._id)) === editionId) return camp._id;
+    if ((camp.editionId ?? await campEditionId(camp._id, session)) === editionId) return camp._id;
   }
   throw new IpalphaRejected(409, "unknownEdition", {});
 }
@@ -535,15 +536,15 @@ export async function trackImport(input: { importId: string; campId: string; sta
   return createImportJob({ importId: input.importId, campId: input.campId, startedBy: input.startedBy, status: FINAL_IMPORT_STATUSES.has(input.status) ? "applying" : input.status });
 }
 
-/** The importer's coordenação persons token, from any of their live sessions (null = none: caught up on their next visit). */
-async function importerToken(personId: string): Promise<string | null> {
+/** A live coordenação session of the importer with its persons token (null = none: caught up on their next visit). */
+async function importerSession(personId: string): Promise<{ session: Session; token: string } | null> {
   const { listLiveSessionsOf } = await import("./session");
   const { coordinationToken } = await import("./acting");
   for (const session of await listLiveSessionsOf(personId)) {
     if (!session.roles.includes(COORDINATION_ROLE)) continue;
     try {
       const token = coordinationToken(session, PERSONS_RESOURCE);
-      if (token) return token;
+      if (token) return { session, token };
     } catch {
       // that session's coordenação token expired — try the next one
     }
@@ -551,9 +552,17 @@ async function importerToken(personId: string): Promise<string | null> {
   return null;
 }
 
-/** Applies one batch for a tracked import and moves its `lastBatch` (only from `from`). */
+async function importerToken(personId: string): Promise<string | null> {
+  return (await importerSession(personId))?.token ?? null;
+}
+
+/**
+ * Applies one batch for a tracked import and moves its `lastBatch` (only from `from`). Member reads act for the
+ * request's session, else for one of the importer's live coordenação sessions (a socket / webhook has no viewer).
+ */
 async function applyTracked(job: ImportJob, batch: ImportBatch, subject: ImportSubject | null): Promise<BatchOutcome | null> {
-  const outcome = await applyBatch(job.importId, batch, { campId: job.campId, subject });
+  const viewer = currentViewer() ?? (await importerSession(job.startedBy))?.session ?? null;
+  const outcome = await withViewerOf(viewer, () => applyBatch(job.importId, batch, { campId: job.campId, subject }));
   if (!(await advanceImportJob(job.importId, job.lastBatch, batch.batch))) return null; // another pass already moved it
   job.lastBatch = batch.batch;
   emitImportEvent(job.startedBy, job.campId, "import-batch", { importId: job.importId, batch: batch.batch, ...outcome });
@@ -622,13 +631,14 @@ async function adoptImport(importId: string, projectId: string): Promise<boolean
   const { getDb } = await import("../db");
   const owners = await (await getDb()).collection("sessions").distinct("personId", { roles: COORDINATION_ROLE, expiresAt: { $gt: new Date() } });
   for (const personId of owners) {
-    const token = await importerToken(String(personId));
-    if (!token) continue;
+    const importer = await importerSession(String(personId));
+    if (!importer) continue;
+    const { session, token } = importer;
     try {
       const view = await coreClient().getImport(token, importId);
       const subject = subjectOfTargets(view.targets);
       if (!subject || (view.projectId && view.projectId !== projectId)) return true;
-      const campId = await campOfEdition(s(view.editionId));
+      const campId = await campOfEdition(s(view.editionId), session);
       await trackImport({ importId, campId, startedBy: s(view.createdBy) ?? String(personId), status: s(view.status) ?? "applying", subject });
       await catchUpImport(importId, token);
       return true;

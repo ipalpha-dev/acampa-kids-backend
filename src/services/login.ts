@@ -72,10 +72,10 @@ export async function accessWindowError(personId: string, role: CoreRole) {
 }
 
 /** The public shape of the session's person (name read live; empty when core cannot answer right now). */
-export async function publicUser(session: Pick<Session, "personId" | "roles" | "activeRole">, history = false) {
+export async function publicUser(session: Session, history = false) {
   let name = "";
   try {
-    name = await nameOf(session.personId);
+    name = await nameOf(session.personId, session);
   } catch {
     name = "";
   }

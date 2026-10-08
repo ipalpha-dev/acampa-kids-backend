@@ -20,10 +20,10 @@ import { activeCamp, inHistoryCamp, withCamp } from "../services/campContext";
 import { deleteCamp, evaluateCampDeleteCode, generateDeleteCode, hashDeleteCode } from "../services/campDelete";
 import { IMPORT_BLOCKS, campSummary, importFromCamp, searchCampCampers, searchCampStaff, type ImportBlock, type ImportOptions } from "../services/campImport";
 import { rearmActiveCampTimers } from "../services/realtime";
-import { rolloverEdition } from "../services/ipalpha";
+import { ipalphaEnabled } from "../services/ipalpha";
 import { sendMessage } from "../services/messages";
-import { coordinationContext } from "../services/acting";
-import { COORDINATION_ROLE } from "../types";
+import { coordinationContext, editionForYear } from "../services/acting";
+import { COORDINATION_ROLE, type Session } from "../types";
 
 type Env = { Variables: AuthVariables & { targetCamp: Camp } };
 
@@ -35,6 +35,25 @@ function serializeCamp(c: Pick<Camp, "_id" | "label" | "year">): { id: string; l
 
 function serializeCampFull(c: Camp): { id: string; label: string; year: number; active: boolean; archivedAt: string | null } {
   return { ...serializeCamp(c), active: c.active, archivedAt: c.archivedAt ? c.archivedAt.toISOString() : null };
+}
+
+/**
+ * The edition a camp of `year` maps to — editions are created only in Oikos. undefined = IPAlpha is off
+ * (nothing to map); null = no edition of that year this app may use yet.
+ */
+async function editionOf(session: Session, year: number): Promise<string | null | undefined> {
+  if (!ipalphaEnabled()) return undefined;
+  return (await editionForYear(session, year))?.id ?? null;
+}
+
+function editionMissing(year: number) {
+  return {
+    error: {
+      code: "EDITION_MISSING",
+      year,
+      message: `Ainda não encontramos a edição ${year} no Oikos. Peça com carinho à coordenação do projeto para criá-la por lá e tente de novo.`,
+    },
+  };
 }
 
 /** the coordenação (project-wide role, acting as it) or a SUPER_ADMIN_PERSON_IDS owner */
@@ -72,9 +91,10 @@ camps.get("/", requireAuth, async (c) => {
 });
 
 /**
- * POST /api/camps  { label, year } — admin. Creates the camp, makes it active
- * (archiving the previous one), writes its default settings and re-arms the
- * runtime timers for it.
+ * POST /api/camps  { label, year } — admin. The camp maps to the IPAlpha edition
+ * of that year, created in Oikos (409 EDITION_MISSING when there is none yet).
+ * Creates the camp, makes it active (archiving the previous one), writes its
+ * default settings and re-arms the runtime timers for it.
  */
 camps.post("/", requireAuth, requireGlobalAdmin, async (c) => {
   const body = await c.req.json<{ label?: unknown; year?: unknown }>().catch(() => null);
@@ -87,18 +107,22 @@ camps.post("/", requireAuth, requireGlobalAdmin, async (c) => {
     return c.json({ error: { code: "YEAR_INVALID", message: "Informe um ano entre 2000 e 2100." } }, 400);
   }
 
+  const editionId = await editionOf(c.get("session"), year);
+  if (editionId === null) return c.json(editionMissing(year), 409);
+
   const created = await createCamp({ label, year, createdByPersonId: c.get("userId") });
+  if (editionId) await setCampEditionId(created._id, editionId);
   await activateCamp(created._id);
   await withCamp(created._id, () => updateSettings({ wizardMode: false }));
   await rearmActiveCampTimers();
-  // IPAlpha: this year's edition becomes the project's current one (best effort, never blocks); its id is kept on the camp
-  void rolloverEdition(created.year).then((r) => (r.editionId ? setCampEditionId(created._id, r.editionId) : undefined));
 
   return c.json({ camp: serializeCampFull((await findCamp(created._id)) ?? created) }, 201);
 });
 
 /**
  * PUT /api/camps/:id  { label?, year?, active?: true, archived?: boolean } — admin.
+ * Activating a camp or changing its year maps it to that year's edition (409
+ * EDITION_MISSING when Oikos has none yet — nothing is changed).
  */
 camps.put("/:id", requireAuth, requireGlobalAdmin, async (c) => {
   const id = c.req.param("id");
@@ -118,6 +142,11 @@ camps.put("/:id", requireAuth, requireGlobalAdmin, async (c) => {
     return c.json({ error: { code: "CAMP_ACTIVE", message: "Torne outro acampamento ativo primeiro." } }, 409);
   }
 
+  const finalYear = typeof year === "number" ? year : existing.year;
+  const remap = body?.active === true || finalYear !== existing.year;
+  const editionId = remap && (finalYear !== existing.year || !existing.editionId) ? await editionOf(c.get("session"), finalYear) : undefined;
+  if (editionId === null) return c.json(editionMissing(finalYear), 409);
+
   if (body?.active === true) {
     await activateCamp(id);
     await rearmActiveCampTimers();
@@ -127,9 +156,11 @@ camps.put("/:id", requireAuth, requireGlobalAdmin, async (c) => {
   if (typeof label === "string") patch.label = label;
   if (typeof year === "number") patch.year = year;
   if (typeof body?.archived === "boolean") patch.archived = body.archived;
-  const updated = Object.keys(patch).length ? await updateCamp(id, patch) : await findCamp(id);
-  // IPAlpha: the activated camp's year becomes the project's current edition (best effort, never blocks)
-  if (body?.active === true && updated) void rolloverEdition(updated.year).then((r) => (r.editionId ? setCampEditionId(updated._id, r.editionId) : undefined));
+  let updated = Object.keys(patch).length ? await updateCamp(id, patch) : await findCamp(id);
+  if (editionId && updated) {
+    await setCampEditionId(updated._id, editionId);
+    updated = await findCamp(updated._id);
+  }
 
   return c.json({ camp: serializeCampFull(updated!) });
 });

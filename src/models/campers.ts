@@ -171,32 +171,6 @@ export async function countCampersPerBedroom(): Promise<Map<string, number>> {
   return new Map(rows.map((r) => [r._id, r.n]));
 }
 
-/**
- * Marks the birthday message for `day` as sent — atomically, only if it was
- * NOT sent for that day yet. True when this call won.
- */
-export async function claimBirthdayNotice(personId: string, day: string): Promise<boolean> {
-  const db = await getDb();
-  const res = await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId, birthdayNoticeDay: { $ne: day } }, { $set: { birthdayNoticeDay: day } });
-  return res.modifiedCount === 1;
-}
-
-/** A birthday message that could not go out: the marker is lifted so the next run tries again. */
-export async function releaseBirthdayNotice(personId: string, day: string): Promise<void> {
-  const db = await getDb();
-  await db.collection(PARTICIPANTS).updateOne({ ...KIND, personId, birthdayNoticeDay: day }, { $unset: { birthdayNoticeDay: "" } });
-}
-
-/**
- * Lifts every marker of another day: a marker only lives on its own day, so
- * Acampa never keeps a trace of when a kid's birthday is (no birth date at rest).
- */
-export async function clearStaleBirthdayNotices(today: string): Promise<number> {
-  const db = await getDb();
-  const res = await db.collection(PARTICIPANTS).updateMany({ ...KIND, birthdayNoticeDay: { $exists: true, $nin: [today, null] } }, { $unset: { birthdayNoticeDay: "" } });
-  return res.modifiedCount;
-}
-
 export async function ensureCamperIndexes(): Promise<void> {
   const db = await getDb();
   // keys moved from `camperId` to `personId`: new names (decision 91)

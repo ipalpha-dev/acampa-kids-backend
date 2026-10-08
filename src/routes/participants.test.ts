@@ -9,7 +9,6 @@ import { updateSettings } from "../models/settings";
 import { loadCollections } from "../services/snapshot";
 import { resolveScope } from "../services/scope";
 import { flushNotifications } from "../services/notify";
-import { TEMPLATE_DEFAULTS } from "../messages/templates";
 
 const call = testApp();
 let keys: TestKeys;
@@ -120,9 +119,11 @@ describe("campers: camp ops + names live, health only with the acting role token
     expect(JSON.stringify(row)).not.toContain("lactose");
     await new Promise((r) => setTimeout(r, 30)); // the edit notifies in the background
     await flushNotifications();
-    const sent = world.messages.find((m) => m.slug === "acampa-parent-edit-medical");
-    expect(sent?.recipients.map((r) => r.personId).sort()).toEqual([ADMIN, CARE, MEDIC].sort());
-    expect(sent?.recipients[0].variables).toMatchObject({ kid: "Ana" });
+    const sent = world.messages.filter((m) => m.slug === "acampa-parent-edit-medical");
+    // the caretaker by person id; saúde + coordenação as a role audience (a family cannot list them)
+    expect(sent.flatMap((m) => m.recipients.map((r) => r.personId)).sort()).toEqual([ADMIN, CARE, MEDIC].sort());
+    expect(sent.find((m) => m.audience)?.audience).toEqual({ roles: ["saude", "coordenacao"], editionId: TEST_EDITION });
+    for (const m of sent) expect(m.recipients[0].variables).toMatchObject({ kid: "Ana" });
   });
 
   test("a responsável reads / edits their kid's health with THEIR responsavel role token (core's onlyInvolved rule, §19)", async () => {
@@ -173,7 +174,7 @@ describe("campers: camp ops + names live, health only with the acting role token
     expect((await call("POST", `/api/campers/${KID_A}/checkin/bus`, {}, token)).status).toBe(200);
     await new Promise((r) => setTimeout(r, 20));
     const sent = world.messages.find((m) => m.slug === "acampa-bus-boarded");
-    expect(sent?.recipients).toEqual([{ personId: PARENT, variables: { kid: "Ana", name: "Família" } }]);
+    expect(sent?.recipients).toEqual([{ personId: PARENT, variables: { kid: "Ana" } }]);
     const log = await (await rawDb()).collection("checkinLog").find({ personId: KID_A }).toArray();
     expect(log.map((l) => l.kind)).toEqual(["church", "bus"]);
     expect(log[0]).toMatchObject({ byPersonId: ADMIN, byRole: "coordenacao" });
@@ -343,6 +344,20 @@ describe("/api/people", () => {
     expect((await call("POST", "/api/people/names", { personIds: Array.from({ length: 201 }, (_, i) => `p${i}`) }, admin)).status).toBe(400);
   });
 
+  test("names go with the requester's acting role token; ids core leaves out (roles policy seesNamesOf) are simply absent", async () => {
+    core.on("POST /projects/project-test-1/people/names", (c) => {
+      const ids = (c.json as { personIds: string[] }).personIds.filter((id) => id !== KID_B);
+      return new Response(JSON.stringify({ items: ids.map((id) => ({ personId: id, name: world.names.get(id) })) }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const admin = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    const res = await call("POST", "/api/people/names", { personIds: [KID_A, KID_B] }, admin);
+    expect(res.body.items.map((i: { personId: string }) => i.personId)).toEqual([KID_A]);
+    const asked = core.callsTo("POST /projects/project-test-1/people/names").at(-1)!;
+    expect(JSON.parse(atob((asked.headers.get("authorization") ?? "").split(".")[1]))).toMatchObject({ sub: ADMIN, projectRole: "coordenacao" });
+    const list = await call("GET", "/api/campers", undefined, admin);
+    expect(list.body.items.find((k: { id: string }) => k.id === KID_B)).toMatchObject({ name: "" });
+  });
+
   test("there is no health queue in Acampa any more (decision 50)", async () => {
     const admin = await sessionFor(keys, ADMIN, ["coordenacao"]);
     const app = (await import("../app")).createApp();
@@ -353,31 +368,14 @@ describe("/api/people", () => {
   });
 });
 
-describe("message templates (settings → projects:templates)", () => {
-  test("seed creates every catalog template; the list merges live + defaults", async () => {
+describe("message templates live in the Developers portal", () => {
+  test("Acampa has no template routes and never calls projects-api templates", async () => {
     const admin = await sessionFor(keys, ADMIN, ["coordenacao"]);
-    const seeded = await call("POST", "/api/settings/message-templates/seed", {}, admin);
-    expect(seeded.body).toEqual({ created: TEMPLATE_DEFAULTS.length, total: TEMPLATE_DEFAULTS.length });
-    const list = await call("GET", "/api/settings/message-templates", undefined, admin);
-    expect(list.body.templates.every((t: { live: boolean }) => t.live)).toBe(true);
-    expect(list.body.templates.find((t: { slug: string }) => t.slug === "acampa-bus-boarded")).toMatchObject({ channel: "sms", variables: ["name", "kid"], customized: false });
-  });
-
-  test("an edit is validated with core's rules before it is sent", async () => {
-    const admin = await sessionFor(keys, ADMIN, ["coordenacao"]);
-    const bad = await call("PATCH", "/api/settings/message-templates/acampa-bus-boarded", { body: { "pt-BR": "Oi {name}, {cpf}" } }, admin);
-    expect(bad.status).toBe(400);
-    expect(bad.body.error.code).toBe("TEMPLATE_INVALID");
-    const ok = await call("PATCH", "/api/settings/message-templates/acampa-bus-boarded", { body: { "pt-BR": "Oi {name}, {kid} embarcou!" } }, admin);
-    expect(ok.status).toBe(200);
-    expect(ok.body.template).toMatchObject({ live: true, customized: true });
-    const reset = await call("POST", "/api/settings/message-templates/acampa-bus-boarded/reset", {}, admin);
-    expect(reset.body.template.customized).toBe(false);
-  });
-
-  test("only the coordenação edits templates", async () => {
-    const care = await sessionFor(keys, CARE, ["equipe"]);
-    expect((await call("GET", "/api/settings/message-templates", undefined, care)).status).toBe(403);
+    const app = createApp();
+    const headers = { authorization: `Bearer ${admin}`, "content-type": "application/json" };
+    expect((await app.request("/api/settings/message-templates", { headers })).status).toBe(404);
+    expect((await app.request("/api/settings/message-templates/seed", { method: "POST", headers, body: "{}" })).status).toBe(404);
+    expect(core.calls.filter((c) => c.path.includes("message-templates"))).toEqual([]);
   });
 });
 

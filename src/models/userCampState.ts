@@ -79,6 +79,12 @@ export async function resetUserWelcome(campId: string = currentCampId()): Promis
   return res.modifiedCount;
 }
 
+/** Lifts one person's (or one audience mark's) welcome — a send that failed is tried again. */
+export async function resetUserWelcomeOf(personId: string, campId: string = currentCampId()): Promise<void> {
+  const db = await getDb();
+  await db.collection(COLLECTION).updateOne({ personId, campId }, { $set: { welcomeSentAt: null } });
+}
+
 export async function claimUserPhotosNotice(personId: string, campId: string = currentCampId()): Promise<boolean> {
   return claimMark(personId, campId, "photosSmsSentAt");
 }
@@ -87,6 +93,11 @@ export async function resetUserPhotosNotice(campId: string = currentCampId()): P
   const db = await getDb();
   const res = await db.collection(COLLECTION).updateMany({ campId, photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null } });
   return res.modifiedCount;
+}
+
+export async function resetUserPhotosNoticeOf(personId: string, campId: string = currentCampId()): Promise<void> {
+  const db = await getDb();
+  await db.collection(COLLECTION).updateOne({ personId, campId }, { $set: { photosSmsSentAt: null } });
 }
 
 export async function setUserPrepDoneState(personId: string, key: string, done: boolean, campId: string = currentCampId()): Promise<UserCampState> {

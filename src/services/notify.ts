@@ -1,20 +1,19 @@
 import { findBedroomById, listBedrooms } from "../models/bedrooms";
-import { claimBirthdayNotice, clearStaleBirthdayNotices, listCampers, releaseBirthdayNotice } from "../models/campers";
 import { findTransportById } from "../models/transports";
 import { listRoles } from "../models/schedule";
-import { claimCheckinReminder, getSettings, staffAccessOpen } from "../models/settings";
+import { claimBirthdayNoticeDay, claimCheckinReminder, getSettings, releaseBirthdayNoticeDay, staffAccessOpen } from "../models/settings";
 import { claimStaffPhotosNotice, claimStaffWelcome, findStaffById, listStaff } from "../models/staff";
 import { findTeamById, listTeams } from "../models/teams";
-import { claimUserPhotosNotice, claimUserWelcome } from "../models/userCampState";
+import { claimUserPhotosNotice, claimUserWelcome, findUserCampState, resetUserPhotosNoticeOf, resetUserWelcomeOf } from "../models/userCampState";
 import { transportLabel as transportLabelOf } from "../routes/transports";
-import { PREP_AUDIENCES, RESPONSIBLE_ROLE, TEAM_ROLE, type Bedroom, type CampEvent, type Camper, type CamperChangeLog, type DocAudience, type InstructionDoc, type Occurrence, type PrepAudience, type PrepSection, type RoomRole, type ScheduleRole, type Settings, type Staff, type Team } from "../types";
+import { COORDINATION_ROLE, PARTICIPANT_ROLE, PREP_AUDIENCES, RESPONSIBLE_ROLE, TEAM_ROLE, type Bedroom, type Session, type CampEvent, type Camper, type CamperChangeLog, type DocAudience, type InstructionDoc, type Occurrence, type PrepAudience, type PrepSection, type RoomRole, type ScheduleRole, type Settings, type Staff, type Team } from "../types";
 import { saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { campPeriod } from "./camp";
-import { campEditionId } from "./acting";
-import { coreClient, ipalphaEnabled } from "./ipalpha";
-import { kidsOfResponsible, membersOf, responsiblesOf } from "./members";
-import { previewMessage, sendMessage, type SendInput } from "./messages";
+import { ipalphaEnabled } from "./ipalpha";
+import { membersOf, responsiblesOf } from "./members";
+import { previewMessage, sendMessage, sendToRoles, type SendInput } from "./messages";
 import { firstName, namesOf } from "./people";
+import { currentViewer, withViewerOf } from "./viewer";
 import { assignmentDetail, autoRoleCovers, autoRoleFor, teamMap } from "./schedule";
 import type { TemplateKey } from "../messages/templates";
 
@@ -34,6 +33,12 @@ import type { TemplateKey } from "../messages/templates";
  *   - the kid boarded the bus (the kid's responsáveis)
  *   - photos published, welcomes (team when its window opens, families)
  *
+ * Member lists and names are read with the session of whoever caused the
+ * message (services/viewer.ts — the queue remembers it). Where Acampa can no
+ * longer read a list — families, the coordenação / medical team from a
+ * non-coordenação request, helpers from a timer — the message goes to a role
+ * `audience` that core resolves (shared variables only).
+ *
  * Each kind can be switched off in Settings → Notificações. Plain team
  * members (`equipe`) are only messaged inside `settings.staffAccessWindow`;
  * helper roles and parent contacts always. Messages to the same person with
@@ -41,12 +46,10 @@ import type { TemplateKey } from "../messages/templates";
  * (bulk edits never flood a phone). Delivery is best effort and never blocks
  * the write.
  *
- * Birthdays (decision 51): on a camp day at 07:45 São Paulo the whole team of
- * the room of each kid whose birthday is today gets the birthday template.
- * Core answers only the ids of today's birthdays (persons
- * `POST /projects/:projectId/people/birthdays-today`) — Acampa never sees or
- * stores a birth date. Once per kid per day: a marker on the kid's camp-ops
- * row (`birthdayNoticeDay`) that only lives on its own day.
+ * Birthdays (decision 51): on a camp day at 07:45 São Paulo the birthday
+ * template goes to the edition's `participante` audience with
+ * `birthdayToday` — core picks today's birthdays; Acampa never sees who, nor
+ * a birth date. Once per camp day: `settings.birthdayNoticeDay`.
  */
 
 const COALESCE_MS = Number(process.env.NOTIFY_COALESCE_SECONDS ?? 20) * 1000;
@@ -56,18 +59,27 @@ interface Pending {
   input: SendInput;
   /** team members are re-checked against the access window at send time */
   gate: "staff" | "parent" | "none";
+  /** the session that caused it (names and member lists are read with its tokens), null from a timer */
+  viewer: Session | null;
 }
 
 const queue = new Map<string, Pending>();
 let timer: ReturnType<typeof setTimeout> | null = null;
 
-/** Person ids holding a helper role (not plain `equipe` / `responsavel`) in this camp's edition — never window-gated. */
-async function helperIds(): Promise<Set<string>> {
+/** The helper roles (not plain `equipe` / `responsavel`) — never window-gated. */
+async function helperRoles(): Promise<string[]> {
   const { ROLE_FLAGS } = await import("./scope");
-  const roles = Object.keys(ROLE_FLAGS).filter((r) => r !== TEAM_ROLE);
-  const lists = await Promise.all(roles.map((r) => membersOf(r).catch(() => [])));
+  return Object.keys(ROLE_FLAGS).filter((r) => r !== TEAM_ROLE);
+}
+
+/** Person ids holding a helper role in this camp's edition, as far as the viewer may list them (none from a timer). */
+async function helperIds(): Promise<Set<string>> {
+  const lists = await Promise.all((await helperRoles()).map((r) => membersOf(r).catch(() => [])));
   return new Set(lists.flat().map((m) => m.personId));
 }
+
+/** The `userCampState` key of the families' once-per-camp marks (an audience, never a person id). */
+const FAMILIES_MARK = `role:${RESPONSIBLE_ROLE}`;
 
 async function gateOpen(p: Pending, settings: Settings, helpers: () => Promise<Set<string>>): Promise<boolean> {
   if (p.gate === "parent") return staffAccessOpen(settings.parentAccessWindow);
@@ -80,7 +92,7 @@ async function gateOpen(p: Pending, settings: Settings, helpers: () => Promise<S
 }
 
 function enqueue(key: TemplateKey, input: SendInput, gate: Pending["gate"]): void {
-  queue.set(`${input.personId}|${key}`, { key, input, gate });
+  queue.set(`${input.personId}|${key}`, { key, input, gate, viewer: currentViewer() });
   if (COALESCE_MS <= 0) {
     void flushNotifications();
     return;
@@ -100,14 +112,20 @@ export async function flushNotifications(): Promise<void> {
   if (pending.length === 0) return;
   try {
     const settings = await getSettings();
-    let helperSet: Promise<Set<string>> | null = null;
-    const helpers = () => (helperSet ??= helperIds());
-    const byKey = new Map<TemplateKey, SendInput[]>();
-    for (const p of pending) {
-      if (!(await gateOpen(p, settings, helpers))) continue;
-      byKey.set(p.key, [...(byKey.get(p.key) ?? []), p.input]);
+    const byViewer = new Map<string, Pending[]>();
+    for (const p of pending) byViewer.set(p.viewer?._id ?? "", [...(byViewer.get(p.viewer?._id ?? "") ?? []), p]);
+    for (const group of byViewer.values()) {
+      await withViewerOf(group[0].viewer, async () => {
+        let helperSet: Promise<Set<string>> | null = null;
+        const helpers = () => (helperSet ??= helperIds());
+        const byKey = new Map<TemplateKey, SendInput[]>();
+        for (const p of group) {
+          if (!(await gateOpen(p, settings, helpers))) continue;
+          byKey.set(p.key, [...(byKey.get(p.key) ?? []), p.input]);
+        }
+        for (const [key, inputs] of byKey) await sendMessage(key, inputs);
+      });
     }
-    for (const [key, inputs] of byKey) await sendMessage(key, inputs);
   } catch (err) {
     console.error("notify: flush failed", err instanceof Error ? err.message : err);
   }
@@ -148,16 +166,21 @@ export async function notifyCheckin(staff: Staff): Promise<void> {
   }
 }
 
-/** At `settings.checkinReminder.at` every active team member is reminded (once per instant). */
+/**
+ * At `settings.checkinReminder.at` every active team member not checked in yet is reminded (once per instant).
+ * Outside the team's access window only the parents' contacts are (by id) and the helper roles (audience: a
+ * timer cannot list them — they may get it after checking in).
+ */
 export async function sendCheckinReminder(now = new Date()): Promise<void> {
   try {
     const settings = await getSettings();
     const at = settings.checkinReminder.at;
     if (!settings.notifications.checkinReminder || !at || settings.checkinReminder.sentAt || now < at) return;
     if (!(await claimCheckinReminder(at))) return;
-    const team = (await listStaff({ active: true })).filter((s) => !s.checkin);
-    for (const s of team) enqueue("checkinReminder", { personId: s._id }, "staff");
-    await flushNotifications();
+    const open = staffAccessOpen(settings.staffAccessWindow);
+    const team = (await listStaff({ active: true })).filter((s) => !s.checkin && (open || settings.parentContacts.some((p) => p.personId === s._id)));
+    await sendMessage("checkinReminder", team.map((s) => ({ personId: s._id })));
+    if (!open) await sendToRoles("checkinReminder", await helperRoles());
   } catch (err) {
     console.error("notify: checkin reminder failed", err);
   }
@@ -173,48 +196,25 @@ export function birthdaySmsDue(day: string): Date {
 }
 
 /**
- * Sends today's birthday messages (idempotent: hourly safety net + the 07:45
- * timer both call it). Only on camp days, after 07:45, with the setting on and
- * the kids' rooms published. Ids from core, names fetched at send time.
+ * Sends today's birthday message (idempotent: hourly safety net + the 07:45
+ * timer both call it). Only on camp days, after 07:45, with the setting on.
+ * Core resolves who has a birthday today among the edition's kids.
  */
 export async function sendBirthdayNotices(now = new Date()): Promise<void> {
   try {
     const today = todayInSaoPaulo(now);
-    await clearStaleBirthdayNotices(today);
     if (!ipalphaEnabled()) return;
     const settings = await getSettings();
-    if (!settings.notifications.birthdays || settings.kidsRoomsDraft) return;
+    if (!settings.notifications.birthdays) return;
     const period = await campPeriod();
     if (!period.from || !period.until || today < period.from || today > period.until) return;
     if (now < birthdaySmsDue(today)) return;
-    const editionId = await campEditionId();
-    const born = new Set(await coreClient().birthdaysToday(editionId ?? undefined));
-    if (born.size === 0) return;
-    const kids = (await listCampers()).filter((k) => k.bedroom && born.has(k._id));
-    if (kids.length === 0) return;
-    const staff = (await listStaff({ active: true })).filter((s) => s.bedroom);
-    const kidNames = await firstNames(kids.map((k) => k._id));
-    let helperSet: Promise<Set<string>> | null = null;
-    const helpers = () => (helperSet ??= helperIds());
-    let notified = 0;
-    let messages = 0;
-    for (const kid of kids) {
-      if (!(await claimBirthdayNotice(kid._id, today))) continue;
-      const room = await bedroomName(kid.bedroom);
-      const recipients: SendInput[] = [];
-      for (const s of staff.filter((x) => x.bedroom === kid.bedroom)) {
-        const input = { personId: s._id, variables: { kid: kidNames.get(kid._id) ?? "", room } };
-        if (await gateOpen({ key: "birthday", input, gate: "staff" }, settings, helpers)) recipients.push(input);
-      }
-      if (recipients.length === 0) continue;
-      const sent = await sendMessage("birthday", recipients, "birthday");
-      // nothing went out (core down / refused): lift the marker so the hourly run tries again today
-      if (!sent || sent.sent === 0) await releaseBirthdayNotice(kid._id, today);
-      notified++;
-      messages += sent?.sent ?? 0;
-    }
-    // counts only — no person id, room or date that would tie the line to one kid's birthday
-    if (notified) console.log(`🎂 birthday notices: ${notified} kid(s) → ${messages} message(s) sent`);
+    if (!(await claimBirthdayNoticeDay(today))) return;
+    const accepted = await sendToRoles("birthday", [PARTICIPANT_ROLE], { birthdayToday: true }, "birthday");
+    // nothing went out (core down / refused): lift the marker so the hourly run tries again today
+    if (accepted === null) await releaseBirthdayNoticeDay(today);
+    // counts only — no person id or date that would tie the line to one kid's birthday
+    else if (accepted) console.log(`🎂 birthday notices: ${accepted} message(s) accepted`);
   } catch (err) {
     console.error("notify: birthday notices failed", err instanceof Error ? err.message : err);
   }
@@ -223,22 +223,18 @@ export async function sendBirthdayNotices(now = new Date()): Promise<void> {
 // ── a family edited a kid's health / notes ───────────────────────────────────
 
 /**
- * Medical fields → medical team (`saude`) + coordenação + the kid's
- * caretaker; observations only → the caretaker. Names the fields, never values.
+ * Medical fields → medical team (`saude`) + coordenação (role audience: a
+ * family cannot list them) + the kid's caretaker; observations only → the
+ * caretaker. Names the fields, never values.
  */
 export async function notifyParentEdit(kid: Camper, entry: Pick<CamperChangeLog, "medical" | "byPersonId">): Promise<void> {
   try {
     const settings = await getSettings();
     if (!settings.notifications.parentEdits) return;
     const kidName = (await firstNames([kid._id])).get(kid._id) ?? "";
-    const to = new Set<string>();
-    if (kid.caretakerId && !settings.kidsRoomsDraft) to.add(kid.caretakerId);
-    if (entry.medical) {
-      for (const m of [...(await membersOf("saude").catch(() => [])), ...(await membersOf("coordenacao").catch(() => []))]) to.add(m.personId);
-    }
-    to.delete(entry.byPersonId);
     const key: TemplateKey = entry.medical ? "parentEditMedical" : "parentEditNotes";
-    for (const personId of to) enqueue(key, { personId, variables: { kid: kidName } }, "staff");
+    if (kid.caretakerId && !settings.kidsRoomsDraft && kid.caretakerId !== entry.byPersonId) enqueue(key, { personId: kid.caretakerId, variables: { kid: kidName } }, "staff");
+    if (entry.medical) await sendToRoles("parentEditMedical", ["saude", COORDINATION_ROLE], { variables: { kid: kidName } });
   } catch (err) {
     console.error("notify: parent edit failed", err);
   }
@@ -246,13 +242,12 @@ export async function notifyParentEdit(kid: Camper, entry: Pick<CamperChangeLog,
 
 // ── occurrences / out-of-scope badge scans ───────────────────────────────────
 
-/** A new occurrence → every coordenação member (sent at once). */
-export async function notifyOccurrence(o: Occurrence): Promise<void> {
+/** A new occurrence → every coordenação member (role audience, sent at once). */
+export async function notifyOccurrence(_o: Occurrence): Promise<void> {
   try {
     const settings = await getSettings();
     if (!settings.notifications.occurrences) return;
-    const admins = (await membersOf("coordenacao")).map((m) => m.personId).filter((id) => id !== o.createdByPersonId);
-    await sendMessage("occurrence", admins.map((personId) => ({ personId })));
+    await sendToRoles("occurrence", [COORDINATION_ROLE]);
   } catch (err) {
     console.error("notify: occurrence failed", err);
   }
@@ -262,8 +257,7 @@ export async function notifyOccurrence(o: Occurrence): Promise<void> {
 export async function notifyForeignLookupAlert(staff: Pick<Staff, "_id">, count: number): Promise<void> {
   try {
     const staffName = (await firstNames([staff._id])).get(staff._id) ?? "";
-    const admins = (await membersOf("coordenacao")).map((m) => m.personId);
-    await sendMessage("foreignLookup", admins.map((personId) => ({ personId, variables: { staff: staffName, count } })));
+    await sendToRoles("foreignLookup", [COORDINATION_ROLE], { variables: { staff: staffName, count } });
   } catch (err) {
     console.error("notify: foreign lookup alert failed", err);
   }
@@ -479,18 +473,6 @@ export async function notifyInstructionChange(before: InstructionDoc | null, aft
   }
 }
 
-/** Every responsável of this camp with at least one kid here. */
-async function campParents(): Promise<string[]> {
-  const kidIds = new Set((await listCampers()).map((k) => k._id));
-  const parents = await membersOf(RESPONSIBLE_ROLE);
-  const out: string[] = [];
-  for (const p of parents) {
-    const kids = await kidsOfResponsible(p.personId);
-    if (kids.some((id) => kidIds.has(id))) out.push(p.personId);
-  }
-  return [...new Set(out)];
-}
-
 /** A Preparação section was created / changed / posted to a new group. Parents only inside their access window. */
 export async function notifyPreparationChange(before: PrepSection | null, after: PrepSection): Promise<void> {
   try {
@@ -502,8 +484,8 @@ export async function notifyPreparationChange(before: PrepSection | null, after:
     if (n.contentChanges && (concerned("caretaker") || concerned("helper"))) {
       for (const s of await teamFor("all")) if (concerned(s.roomRole)) enqueue("preparationUpdated", { personId: s._id, variables: { title: after.title } }, "staff");
     }
-    if (n.parentContentChanges && concerned("parent")) {
-      for (const personId of await campParents()) enqueue("preparationUpdated", { personId, variables: { title: after.title } }, "parent");
+    if (n.parentContentChanges && concerned("parent") && staffAccessOpen((await getSettings()).parentAccessWindow)) {
+      await sendToRoles("preparationUpdated", [RESPONSIBLE_ROLE], { variables: { title: after.title } });
     }
   } catch (err) {
     console.error("notify: preparation change failed", err);
@@ -519,8 +501,8 @@ export async function notifyPhotosPublished(count: number): Promise<void> {
     for (const s of await listStaff({ active: true })) {
       if (await claimStaffPhotosNotice(s._id)) enqueue("photosPublished", { personId: s._id }, "staff");
     }
-    if (staffAccessOpen(settings.parentAccessWindow)) {
-      for (const personId of await campParents()) if (await claimUserPhotosNotice(personId)) enqueue("photosPublished", { personId }, "parent");
+    if (staffAccessOpen(settings.parentAccessWindow) && (await claimUserPhotosNotice(FAMILIES_MARK))) {
+      if ((await sendToRoles("photosPublished", [RESPONSIBLE_ROLE])) === null) await resetUserPhotosNoticeOf(FAMILIES_MARK);
     }
   } catch (err) {
     console.error("notify: photos published failed", err);
@@ -542,27 +524,13 @@ export async function notifyBusCheckin(kid: Camper): Promise<void> {
 
 // ── welcomes ─────────────────────────────────────────────────────────────────
 
-/** Families with kids in this camp who were never welcomed, with the kids' ids. */
-async function pendingParentWelcomes(): Promise<{ personId: string; kids: string[] }[]> {
-  const kidIds = new Set((await listCampers()).map((k) => k._id));
-  const out: { personId: string; kids: string[] }[] = [];
-  for (const p of await membersOf(RESPONSIBLE_ROLE)) {
-    const kids = (await kidsOfResponsible(p.personId)).filter((id) => kidIds.has(id));
-    if (kids.length) out.push({ personId: p.personId, kids });
-  }
-  return out;
-}
-
-/** When the parents' access window is open, every family not welcomed yet gets the welcome (once ever per camp). */
+/** When the parents' access window is open, the families of the edition get the welcome (role audience, once per camp). */
 export async function syncParentWelcomes(): Promise<void> {
   try {
     const settings = await getSettings();
     if (!settings.notifications.parentWelcome || !staffAccessOpen(settings.parentAccessWindow)) return;
-    for (const p of await pendingParentWelcomes()) {
-      if (!(await claimUserWelcome(p.personId))) continue;
-      const names = await firstNames(p.kids);
-      await sendMessage("parentWelcome", [{ personId: p.personId, variables: { kids: joinNames(p.kids.map((id) => names.get(id) ?? "")) } }]);
-    }
+    if (!(await claimUserWelcome(FAMILIES_MARK))) return;
+    if ((await sendToRoles("parentWelcome", [RESPONSIBLE_ROLE])) === null) await resetUserWelcomeOf(FAMILIES_MARK);
   } catch (err) {
     console.error("notify: parent welcome sync failed", err);
   }
@@ -582,13 +550,17 @@ export async function syncWelcomes(): Promise<void> {
   }
 }
 
-/** Who WOULD be welcomed right now (settings preview) — counts and person ids (names read by the client). */
+/**
+ * Who WOULD be welcomed right now (settings preview) — counts and person ids (names read by the client). The
+ * families are the edition's responsáveis as the viewer (coordenação) may list them, until their welcome went out.
+ */
 export async function welcomePreview(): Promise<{ staff: { count: number; windowOpen: boolean; personIds: string[] }; parents: { count: number; windowOpen: boolean; personIds: string[] } }> {
   const settings = await getSettings();
   const staffOpen = staffAccessOpen(settings.staffAccessWindow);
   const team = (await listStaff({ active: true })).filter((s) => !s.welcomeSentAt).map((s) => s._id);
   const parentsOpen = staffAccessOpen(settings.parentAccessWindow);
-  const parents = parentsOpen ? (await pendingParentWelcomes()).map((p) => p.personId) : [];
+  const welcomed = !!(await findUserCampState(FAMILIES_MARK))?.welcomeSentAt;
+  const parents = parentsOpen && !welcomed ? [...new Set((await membersOf(RESPONSIBLE_ROLE)).map((m) => m.personId))] : [];
   return {
     staff: { count: staffOpen ? team.length : 0, windowOpen: staffOpen, personIds: staffOpen ? team : [] },
     parents: { count: parents.length, windowOpen: parentsOpen, personIds: parents },

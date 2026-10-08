@@ -55,23 +55,44 @@ describe("core client", () => {
   test("app-client calls retry once with a fresh system token after a bearer 401", async () => {
     const { core, api } = client();
     let n = 0;
-    core.on("POST /projects/project-test-1/people/names", () => (++n === 1 ? json({ reason: "invalidToken" }, 401) : json({ items: [{ personId: "p1", name: "Ana" }] })));
-    expect(await api.names(["p1"])).toEqual([{ personId: "p1", name: "Ana", nickname: null, sex: null }]);
+    core.on("POST /projects/project-test-1/messages", () => (++n === 1 ? json({ reason: "invalidToken" }, 401) : json({ accepted: 3 })));
+    expect(await api.sendTemplateToAudience({ templateSlug: "acampa-birthday", audience: { roles: ["participante"], editionId: "e1", birthdayToday: true } })).toEqual({ accepted: 3 });
     expect(core.callsTo("POST /oauth/token")).toHaveLength(2);
-    expect(core.callsTo("POST /oauth/token")[0].form?.get("scope")).toBe("persons:app-names");
+    expect(core.callsTo("POST /oauth/token")[0].form?.get("scope")).toBe("notifications:send-template");
+  });
+
+  test("names, counts, editions and member lists go with the person's role token (no app-bound scope left)", async () => {
+    const { core, api } = client();
+    core.on("POST /projects/project-test-1/people/names", () => json({ items: [{ personId: "p1", name: "Ana" }] }));
+    core.on("POST /projects/project-test-1/people/count", () => json({ total: 2, byTag: { amendoim: 1 } }));
+    core.on("GET /projects/project-test-1/editions", () => json([{ id: "e1", name: "2026", year: 2026, current: true }]));
+    expect(await api.names("role-token", ["p1", "p2"])).toEqual([{ personId: "p1", name: "Ana", nickname: null, sex: null }]);
+    expect(await api.count("role-token", { role: "participante", filters: {} })).toEqual({ total: 2, byTag: { amendoim: 1 } });
+    expect(await api.listEditions("role-token")).toEqual([{ id: "e1", name: "2026", year: 2026, status: "active", current: true }]);
+    expect(core.callsTo("POST /oauth/token")).toHaveLength(0);
+    for (const call of core.calls) expect(call.headers.get("authorization")).toBe("Bearer role-token");
+    core.on("POST /projects/project-test-1/people/names", () => json({ reason: "invalidToken" }, 401));
+    await expect(api.names("role-token", ["p1"])).rejects.toBeInstanceOf(IpalphaTokenRevoked);
   });
 
   test("names refuses more than 200 ids per call (the caller pages)", async () => {
     const { api } = client();
-    await expect(api.names(Array.from({ length: 201 }, (_, i) => `p${i}`))).rejects.toThrow();
+    await expect(api.names("role-token", Array.from({ length: 201 }, (_, i) => `p${i}`))).rejects.toThrow();
+  });
+
+  test("own memberships: the self read keeps only the token subject's rows", async () => {
+    const { core, api } = client();
+    core.on("GET /projects/project-test-1/memberships/person/p1", () => json({ personId: "p1", editionId: "e1", memberships: [{ personId: "p1", role: "equipe", editionId: "e1" }, { personId: "p9", role: "coordenacao" }] }));
+    expect(await api.ownMemberships("role-token", "p1", "e1")).toMatchObject({ editionId: "e1", memberships: [{ personId: "p1", role: "equipe", editionId: "e1" }] });
+    expect(core.callsTo("GET /projects/project-test-1/memberships/person/p1")[0].query.get("editionId")).toBe("e1");
   });
 
   test("memberships: tolerates today's plain array and the contract's {items, nextCursor}", async () => {
     const { core, api } = client();
     core.on("GET /projects/project-test-1/memberships", () => json([{ personId: "p1", role: "equipe", editionId: "e1" }]));
-    expect((await api.listMembers({ role: "equipe" })).items[0]).toMatchObject({ personId: "p1", role: "equipe", editionId: "e1" });
+    expect((await api.listMembers("role-token", { role: "equipe" })).items[0]).toMatchObject({ personId: "p1", role: "equipe", editionId: "e1" });
     core.on("GET /projects/project-test-1/memberships", () => json({ items: [{ personId: "p2", role: "participante", involved: [{ personId: "p3", purpose: "responsible" }] }], nextCursor: "c2" }));
-    const page = await api.listMembers({ role: "participante", involvedPersonId: "p3" });
+    const page = await api.listMembers("role-token", { role: "participante", involvedPersonId: "p3" });
     expect(page).toMatchObject({ nextCursor: "c2", items: [{ personId: "p2", involved: [{ personId: "p3" }] }] });
     expect(core.callsTo("GET /projects/project-test-1/memberships")[1].query.get("involvedPersonId")).toBe("p3");
   });
@@ -84,9 +105,16 @@ describe("core client", () => {
     expect(core.callsTo("POST /oauth/token")[0].form?.get("resource")).toBe("ipalpha:notifications");
   });
 
+  test("send-template to an audience: roles + edition + birthdayToday and shared variables → accepted", async () => {
+    const { core, api } = client();
+    core.on("POST /projects/project-test-1/messages", () => json({ accepted: 4 }));
+    expect(await api.sendTemplateToAudience({ templateSlug: "acampa-occurrence", audience: { roles: ["coordenacao"], editionId: "e1" }, variables: { link: "https://x" } })).toEqual({ accepted: 4 });
+    expect(core.callsTo("POST /projects/project-test-1/messages")[0].json).toEqual({ templateSlug: "acampa-occurrence", audience: { roles: ["coordenacao"], editionId: "e1" }, variables: { link: "https://x" } });
+  });
+
   test("core down → IpalphaUnavailable", async () => {
     const { core, api } = client();
     core.setDown(true);
-    await expect(api.listEditions()).rejects.toBeInstanceOf(IpalphaUnavailable);
+    await expect(api.listEditions("role-token")).rejects.toBeInstanceOf(IpalphaUnavailable);
   });
 });

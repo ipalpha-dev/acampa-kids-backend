@@ -99,24 +99,6 @@ export function mapRelayError(phase: "request" | "verify", err: unknown): RelayE
   return { status: 503, error: { ...UNAVAILABLE_ERROR } };
 }
 
-/**
- * Camp activated → the matching edition of the Acampa project becomes current
- * in projects-api (`current-by-year`). Best effort: logged, never thrown, never
- * blocks the activation. Returns the edition id when core answered one.
- */
-export async function rolloverEdition(year: number): Promise<{ status: "skipped" | "ok" | "failed"; editionId: string | null }> {
-  if (!ipalpha.config.enabled) return { status: "skipped", editionId: null };
-  try {
-    const edition = await coreClient().markCurrentEdition(year);
-    console.log(`[ipalpha] edition ${year} marked current`);
-    return { status: "ok", editionId: edition?.id ?? null };
-  } catch (err) {
-    const why = err instanceof IpalphaRejected ? `${err.status} ${err.reason}` : err instanceof IpalphaUnavailable ? "unavailable" : "error";
-    console.warn(`[ipalpha] edition ${year} rollover failed (${why}) — the camp stays active`);
-    return { status: "failed", editionId: null };
-  }
-}
-
 /** Boot log: which variables are missing (names only, never values). */
 export function logIpalphaStatus(): void {
   const cfg = ipalpha.config;

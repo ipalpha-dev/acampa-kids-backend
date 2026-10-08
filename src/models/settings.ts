@@ -170,6 +170,27 @@ export async function updateSettings(patch: Partial<Omit<Settings, "updatedAt">>
  * if that exact instant is still scheduled and was NOT sent yet. Returns true
  * when this call won (so the caller may text the team).
  */
+/**
+ * Marks today's birthday message (one audience send per camp day) — atomically, only if it was not sent for
+ * `day` yet. The marker is a date of the camp, never a person's birthday. True when this call won.
+ */
+export async function claimBirthdayNoticeDay(day: string): Promise<boolean> {
+  const db = await getDb();
+  try {
+    const res = await db.collection(COLLECTION).updateOne({ _id: DOC_ID() as never, birthdayNoticeDay: { $ne: day } }, { $set: { birthdayNoticeDay: day } }, { upsert: true });
+    return res.modifiedCount === 1 || res.upsertedCount === 1;
+  } catch (err) {
+    if ((err as { code?: number }).code === 11000) return false;
+    throw err;
+  }
+}
+
+/** A birthday send that failed: the marker is lifted so the next run tries again. */
+export async function releaseBirthdayNoticeDay(day: string): Promise<void> {
+  const db = await getDb();
+  await db.collection(COLLECTION).updateOne({ _id: DOC_ID() as never, birthdayNoticeDay: day }, { $unset: { birthdayNoticeDay: "" } });
+}
+
 export async function claimCheckinReminder(at: Date): Promise<boolean> {
   const db = await getDb();
   const res = await db

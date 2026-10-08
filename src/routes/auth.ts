@@ -115,7 +115,7 @@ auth.post("/role", requireAuth, async (c) => {
   if (!role || !session.roles.includes(role)) return c.json({ error: { code: "ROLE_FORBIDDEN", message: "Você não tem este perfil." } }, 403);
   let live: boolean;
   try {
-    live = await holdsRole(session.personId, role);
+    live = await holdsRole(session, role);
   } catch (err) {
     if (err instanceof IpalphaUnavailable) return c.json({ error: UNAVAILABLE_ERROR }, 503);
     throw err;

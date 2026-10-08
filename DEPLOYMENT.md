@@ -50,7 +50,7 @@ committed YAML or frontend `VITE_*` variables.
 | `IPALPHA_TOKEN_ISSUER` | auth-api `iss` |
 | `IPALPHA_CLIENT_ID`, `IPALPHA_ENTRY_POINT`, `IPALPHA_REDIRECT_URI` | Acampa's confidential external entry point in auth-api |
 | `IPALPHA_CLIENT_SECRET` | Secret ref only — the entry point's client secret |
-| `IPALPHA_SYSTEM_CLIENT_ID` | Acampa's app-bound system client: `login:relay`, `projects:editions`, `projects:app-members`, `projects:templates`, `persons:app-names`, `notifications:send-template`, `dispatch:app-channel` (CONTRACTS §14, §22) |
+| `IPALPHA_SYSTEM_CLIENT_ID` | Acampa's app-bound system client: `login:relay`, `notifications:send-template`, `dispatch:app-channel` (CONTRACTS §14, §22). Editions, members, names and counts are read with the signed-in person's role tokens; Acampa must be linked to the project (or the edition) in Oikos |
 | `IPALPHA_SYSTEM_CLIENT_SECRET` | Secret ref only |
 | `IPALPHA_PROJECT_ID` | the yearly Acampa project (camps = its editions; roles = its memberships) |
 | `IPALPHA_PROJECTS_API_URL` | projects-api base URL (editions, memberships, message templates) |

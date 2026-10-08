@@ -224,7 +224,7 @@ export async function wipeWelcomes(): Promise<number> {
 /**
  * The "already sent" memory of every notice that is delivered only once per
  * camp — the check-in reminder (its hour), the album notice (the photos went
- * up) and the birthday of each kid. Clearing it arms all of them again.
+ * up) and the day of the birthday message. Clearing it arms all of them again.
  */
 export async function wipeNotices(): Promise<number> {
   const db = await getDb();
@@ -232,7 +232,7 @@ export async function wipeNotices(): Promise<number> {
   const [team, parents, kids, reminder] = await Promise.all([
     db.collection("participants").updateMany({ kind: "team", photosSmsSentAt: { $ne: null } }, { $set: { photosSmsSentAt: null, updatedAt: now } }),
     resetUserPhotosNotice(),
-    db.collection("participants").updateMany({ kind: "camper", birthdayNoticeDay: { $ne: null } }, { $unset: { birthdayNoticeDay: "" }, $set: { updatedAt: now } }),
+    db.collection("settings").updateOne({ _id: currentCampId() as never, birthdayNoticeDay: { $ne: null, $exists: true } }, { $unset: { birthdayNoticeDay: "" } }),
     db.collection("settings").updateOne({ _id: currentCampId() as never, "checkinReminder.sentAt": { $ne: null } }, { $set: { "checkinReminder.sentAt": null, updatedAt: now } }),
   ]);
   return team.modifiedCount + parents + kids.modifiedCount + reminder.modifiedCount;
@@ -249,7 +249,7 @@ export async function countNotificationMarks(): Promise<{ welcomes: number; noti
   const [staffWelcome, staffPhotos, birthdays, reminder, userMarks] = await Promise.all([
     db.collection("participants").countDocuments({ kind: "team", welcomeSentAt: sent }),
     db.collection("participants").countDocuments({ kind: "team", photosSmsSentAt: sent }),
-    db.collection("participants").countDocuments({ kind: "camper", birthdayNoticeDay: sent }),
+    db.collection("settings").countDocuments({ _id: currentCampId() as never, birthdayNoticeDay: { $ne: null, $exists: true } }),
     db.collection("settings").countDocuments({ _id: currentCampId() as never, "checkinReminder.sentAt": sent }),
     countUserNotificationMarks(),
   ]);

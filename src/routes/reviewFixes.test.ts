@@ -10,6 +10,7 @@ import { clearMembersMemo, kidsOfResponsible } from "../services/members";
 import { addClient, clientCount, removeClient, type RealtimeClient } from "../services/realtime";
 import { findSessionByToken, hashToken } from "../services/session";
 import { isBooted, markBooted, resetReadiness } from "../services/readiness";
+import { withViewer } from "../services/viewer";
 
 const call = testApp();
 let keys: TestKeys;
@@ -78,7 +79,19 @@ describe("kidsOfResponsible checks `involved` itself", () => {
       json({ items: world.memberships.filter((m) => m.role === "participante").map((m) => ({ personId: m.personId, role: m.role, editionId: m.editionId, involved: m.involved ?? [] })), nextCursor: null }),
     );
     clearMembersMemo();
-    expect(await kidsOfResponsible(PARENT)).toEqual([KID_A]);
+    const session = (await findSessionByToken(await sessionFor(keys, PARENT, ["responsavel"])))!;
+    expect(await withViewer(session, () => kidsOfResponsible(PARENT))).toEqual([KID_A]);
+    const read = core.callsTo(`GET /projects/${TEST_PROJECT}/memberships`)[0];
+    expect(read.query.get("involvedPersonId")).toBe(PARENT);
+    expect(JSON.parse(Buffer.from((read.headers.get("authorization") ?? "").split(".")[1], "base64url").toString())).toMatchObject({ sub: PARENT, projectRole: "responsavel" });
+  });
+
+  test("only the parent's own session answers it: no viewer, or another person's, opens nobody", async () => {
+    clearMembersMemo();
+    expect(await kidsOfResponsible(PARENT)).toEqual([]);
+    const admin = (await findSessionByToken(await sessionFor(keys, ADMIN, ["coordenacao"])))!;
+    expect(await withViewer(admin, () => kidsOfResponsible(PARENT))).toEqual([]);
+    expect(core.callsTo(`GET /projects/${TEST_PROJECT}/memberships`)).toHaveLength(0);
   });
 });
 

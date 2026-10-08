@@ -17,7 +17,7 @@ import { PARTICIPANT_ROLE, RESPONSIBLE_ROLE, TEAM_ROLE } from "../types";
 /**
  * /api/people — person data AT USE (CONTRACTS §15), never stored:
  *
- *   POST /names {personIds ≤ 200}        names of people the viewer may know (app client, paged by the caller)
+ *   POST /names {personIds ≤ 200}        names of people the viewer may know (their acting role token; core may omit some — seesNamesOf)
  *   GET  /search?role&q&cursor           project members (coordenação / organização — to add someone to the camp)
  *   GET  /health-lists                   the church health option lists (labels for allergies / conditions)
  *   GET  /:personId/data/:kind           one data kind with the ACTING role token (persons-api role rules decide; logged)

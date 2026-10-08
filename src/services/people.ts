@@ -1,14 +1,18 @@
+import { roleToken } from "./acting";
 import { coreClient } from "./ipalpha";
-import { IpalphaRejected, NAMES_BATCH_MAX, type HealthBlock, type HealthTagFilter, type PersonName } from "./ipalpha/coreClient";
-import { EMPTY_HEALTH, type HealthInfo, type Medication } from "../types";
+import { IpalphaRejected, NAMES_BATCH_MAX, PERSONS_RESOURCE, type HealthBlock, type HealthTagFilter, type PersonName } from "./ipalpha/coreClient";
+import { currentViewer } from "./viewer";
+import { EMPTY_HEALTH, type HealthInfo, type Medication, type Session } from "../types";
 
 /**
  * Person data at the moment of use (CONTRACTS §15, decisions 22/31, LGPD):
  *
- *   names    app client `persons:app-names`, ≤ 200 ids per call, logged by
- *            persons-api per person. Request-scoped only — nothing cached.
+ *   names    the REQUESTER's acting role token (the viewer, services/viewer.ts), ≤ 200 ids per call, logged by
+ *            persons-api per person. Core answers only the people that role may see (roles policy
+ *            `seesNamesOf`; leaders / directors see everyone) — others are silently absent, and with no
+ *            viewer (timers) there are no names. Request-scoped only — nothing cached.
  *   health   the ACTING role token (persons-api role rules decide), logged.
- *   counts   app client count endpoint (anonymized, not logged).
+ *   counts   the acting role token on the count endpoint (anonymized, not logged).
  *
  * Nothing returned here is ever written to Mongo or to a log line.
  */
@@ -21,19 +25,25 @@ function chunks<T>(list: T[], size: number): T[][] {
   return out;
 }
 
-/** Names of the given project members (unknown ids are simply absent). */
-export async function namesOf(personIds: readonly string[]): Promise<Map<string, PersonName>> {
+/** Names of the given project members the session may see (unknown / not visible ids are simply absent; no session → none). */
+export async function namesOf(personIds: readonly string[], session: Session | null = currentViewer()): Promise<Map<string, PersonName>> {
   const unique = [...new Set(personIds.filter(Boolean))];
   const out = new Map<string, PersonName>();
-  if (unique.length === 0) return out;
-  const pages = await Promise.all(chunks(unique, NAMES_BATCH_MAX).map((ids) => coreClient().names(ids)));
-  for (const page of pages) for (const p of page) out.set(p.personId, p);
+  if (unique.length === 0 || !session) return out;
+  const token = roleToken(session, PERSONS_RESOURCE);
+  try {
+    const pages = await Promise.all(chunks(unique, NAMES_BATCH_MAX).map((ids) => coreClient().names(token, ids)));
+    for (const page of pages) for (const p of page) out.set(p.personId, p);
+  } catch (err) {
+    if (err instanceof IpalphaRejected && err.status === 403) return out;
+    throw err;
+  }
   return out;
 }
 
-/** One name ("" when core does not know the id). */
-export async function nameOf(personId: string): Promise<string> {
-  return (await namesOf([personId])).get(personId)?.name ?? "";
+/** One name ("" when core does not know the id or the session may not see it). */
+export async function nameOf(personId: string, session: Session | null = currentViewer()): Promise<string> {
+  return (await namesOf([personId], session)).get(personId)?.name ?? "";
 }
 
 export function firstName(name: string): string {
@@ -169,10 +179,10 @@ export function mergeHealth(current: HealthInfo, patch: Partial<HealthInfo>): Pa
 
 /**
  * Health-tag counts for the list chips (anonymized, not logged — decisions 22/56):
- * core counts the members of a project ROLE (+ edition); no person ids are sent.
+ * core counts the members of a project ROLE (+ edition) the acting role may count; no person ids are sent.
  */
-export async function healthCounts(role: string, filters: HealthTagFilter, editionId?: string | null): Promise<{ total: number; byTag: Record<string, number> }> {
-  return coreClient().count({ role, ...(editionId ? { editionId } : {}), filters: { healthTags: filters } });
+export async function healthCounts(token: string, role: string, filters: HealthTagFilter, editionId?: string | null): Promise<{ total: number; byTag: Record<string, number> }> {
+  return coreClient().count(token, { role, ...(editionId ? { editionId } : {}), filters: { healthTags: filters } });
 }
 
 /**

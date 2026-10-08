@@ -7,11 +7,9 @@ import type { IpalphaConfig } from "../../config";
  * JWKS (no network):
  *
  *   auth-api           PAR / authorization_code / SMS relay v2 → per-role tokens
- *   projects-api       app client (projects:editions, projects:app-members,
- *                      projects:templates) + per-role tokens (memberships)
- *   persons-api        app client (persons:app-names: names, count, birthdays today) + per-role
- *                      tokens (people list, data/health, registrations)
- *   notifications-api  app client (notifications:send-template)
+ *   projects-api       per-role tokens (editions, memberships, own roles)
+ *   persons-api        per-role tokens (names, count, people list, data/health, registrations)
+ *   notifications-api  app client (notifications:send-template: recipients or a role audience)
  *
  * Rules: tokens and person data are never logged. Only SYSTEM (app client)
  * tokens are cached here (memory, until 30 s before expiry); per-role tokens
@@ -30,10 +28,6 @@ export const LOGIN_RESOURCES = [PERSONS_RESOURCE, PROJECTS_RESOURCE, AUTH_RESOUR
 
 export const SCOPES = {
   relay: "login:relay",
-  editions: "projects:editions",
-  appMembers: "projects:app-members",
-  templates: "projects:templates",
-  appNames: "persons:app-names",
   sendTemplate: "notifications:send-template",
   appChannel: "dispatch:app-channel",
 } as const;
@@ -329,20 +323,18 @@ export function toImportBatch(v: unknown): ImportBatch | null {
   return { batch, rows };
 }
 
-export type LocalizedText = Record<string, string>;
-
-export interface MessageTemplate {
-  slug: string;
-  name: string;
-  channel: "sms" | "email";
-  subject?: LocalizedText;
-  body: LocalizedText;
-  variables: string[];
-  version: number;
-  updatedAt: string | null;
+/** projects-api `GET /projects/:id/memberships/person/:me` (own token): the edition used + the person's own memberships */
+export interface OwnMemberships {
+  editionId: string | null;
+  memberships: Membership[];
 }
 
-export type TemplateInput = Omit<MessageTemplate, "version" | "updatedAt">;
+/** notifications-api `audience`: core resolves the members of `roles` (+ edition; only today's birthdays) — Acampa never sees them */
+export interface MessageAudience {
+  roles: string[];
+  editionId?: string;
+  birthdayToday?: boolean;
+}
 
 export interface MessageRecipient {
   personId: string;
@@ -361,33 +353,21 @@ export interface IpalphaCoreClient {
   /** relay v2 (§10): identity proof + the same per-role tokens as the code exchange */
   relayVerify(input: { challengeId: string; code: string; editionId?: string }): Promise<LoginAnswer>;
 
-  // ── projects-api (app client) ──
-  listEditions(): Promise<Edition[]>;
-  /** `current-by-year` (yearly project): find-or-create + mark current */
-  markCurrentEdition(year: number): Promise<Edition | null>;
-  listMembers(query: { role?: string; editionId?: string; involvedPersonId?: string; personId?: string; cursor?: string; limit?: number }): Promise<Page<Membership>>;
-  listTemplates(): Promise<MessageTemplate[]>;
-  getTemplate(slug: string): Promise<MessageTemplate | null>;
-  createTemplate(input: TemplateInput): Promise<MessageTemplate>;
-  updateTemplate(slug: string, patch: Partial<Omit<TemplateInput, "slug" | "channel">>): Promise<MessageTemplate>;
-  deleteTemplate(slug: string): Promise<void>;
-
   // ── projects-api (per-role token) ──
+  /** the editions Acampa may use (created in Oikos; core answers only those whose apps include Acampa) */
+  listEditions(token: string): Promise<Edition[]>;
+  /** member lists — core decides who may list (leaders / directors of the project) */
+  listMembers(token: string, query: { role?: string; editionId?: string; involvedPersonId?: string; personId?: string; cursor?: string; limit?: number }): Promise<Page<Membership>>;
+  /** the token subject's OWN roles (`personId` must be the token's `sub`): that edition's + project-wide */
+  ownMemberships(token: string, personId: string, editionId?: string): Promise<OwnMemberships>;
   addMembership(token: string, input: MembershipInput): Promise<Membership>;
   removeMembership(token: string, input: { personId: string; role: string; editionId?: string }): Promise<void>;
 
-  // ── persons-api (app client) ──
-  /** names of project members, ≤ 200 ids per call (the caller pages) */
-  names(personIds: string[]): Promise<PersonName[]>;
-  /**
-   * decision 51: ids of the project's live members whose birthday is today (America/Sao_Paulo; 02-29 on 02-28 of
-   * non-leap years) — with `editionId` that edition + project-wide. No dates, no names; one anonymized query log in core.
-   */
-  birthdaysToday(editionId?: string): Promise<string[]>;
-  /** anonymized counts of a project ROLE's members (app client — §23: project + role (+ edition), never person ids); not logged by core */
-  count(input: { role: string; editionId?: string; filters: { healthTags?: HealthTagFilter } }): Promise<CountAnswer>;
-
   // ── persons-api (per-role token) ──
+  /** names the token's role may see (roles policy `seesNamesOf`), ≤ 200 ids per call; other ids are silently left out */
+  names(token: string, personIds: string[]): Promise<PersonName[]>;
+  /** anonymized counts of a project ROLE's members (§23: project + role (+ edition), never person ids); not logged by core */
+  count(token: string, input: { role: string; editionId?: string; filters: { healthTags?: HealthTagFilter } }): Promise<CountAnswer>;
   listPeople(token: string, query: { role: string; kinds?: string[]; cursor?: string; limit?: number; q?: string }): Promise<Page<PersonRow>>;
   readData(token: string, personId: string, kind: string): Promise<unknown>;
   writeData(token: string, personId: string, kind: string, block: unknown): Promise<unknown>;
@@ -448,6 +428,8 @@ export interface IpalphaCoreClient {
 
   // ── notifications-api (app client) ──
   sendTemplate(input: { templateSlug: string; recipients: MessageRecipient[]; editionId?: string }): Promise<{ personId: string; status: MessageStatus }[]>;
+  /** the members of an audience (core resolves them; shared variables only) → how many messages core accepted */
+  sendTemplateToAudience(input: { templateSlug: string; audience: MessageAudience; variables?: Record<string, string> }): Promise<{ accepted: number }>;
 }
 
 const LINK_REQUEST_STATUSES = new Set<LinkRequest["status"]>(["pending", "accepted", "declined", "expired", "cancelled"]);
@@ -548,23 +530,6 @@ export function toMembership(v: unknown): Membership | null {
         .map((x) => ({ personId: x.personId as string, purpose: str(x.purpose) ?? "responsible" }))
     : [];
   return { id: str(o.id) ?? `${personId}:${role}`, personId, role, editionId: str(o.editionId), involved };
-}
-
-function toTemplate(v: unknown): MessageTemplate | null {
-  const o = obj(v);
-  const slug = str(o.slug);
-  if (!slug) return null;
-  const text = (x: unknown): LocalizedText => Object.fromEntries(Object.entries(obj(x)).filter(([, val]) => typeof val === "string")) as LocalizedText;
-  return {
-    slug,
-    name: str(o.name) ?? slug,
-    channel: o.channel === "email" ? "email" : "sms",
-    ...(o.subject ? { subject: text(o.subject) } : {}),
-    body: text(o.body),
-    variables: strings(o.variables),
-    version: typeof o.version === "number" ? o.version : 1,
-    updatedAt: str(o.updatedAt),
-  };
 }
 
 /** `{items, nextCursor}` (contract) — tolerates the plain array core answers today */
@@ -795,8 +760,8 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       return { personId, sessionIdleHours: idleHours(body.sessionIdleHours ?? body.session_idle_hours), roles: roleGrants(body) };
     },
 
-    async listEditions() {
-      const body = await systemCall("editions", PROJECTS_RESOURCE, SCOPES.editions, "GET", `${cfg.projectsApiUrl}/projects/${project()}/editions`);
+    async listEditions(token) {
+      const body = await roleCall("editions", token, "GET", `${cfg.projectsApiUrl}/projects/${project()}/editions`);
       return toPage(body, (v) => {
         const o = obj(v);
         const id = str(o.id);
@@ -804,47 +769,19 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       }).items;
     },
 
-    async markCurrentEdition(year) {
-      const body = obj(await systemCall("editions/current-by-year", PROJECTS_RESOURCE, SCOPES.editions, "POST", `${cfg.projectsApiUrl}/projects/${project()}/editions/current-by-year?year=${year}`));
-      const id = str(body.id);
-      return id ? { id, name: str(body.name) ?? id, year: typeof body.year === "number" ? body.year : year, status: str(body.status) ?? "active", current: true } : null;
-    },
-
-    async listMembers(query) {
+    async listMembers(token, query) {
       const params = new URLSearchParams();
       for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== "") params.set(k, String(v));
-      const body = await systemCall("app-members", PROJECTS_RESOURCE, SCOPES.appMembers, "GET", `${cfg.projectsApiUrl}/projects/${project()}/memberships?${params.toString()}`);
+      if (!params.has("limit")) params.set("limit", "200");
+      const body = await roleCall("memberships", token, "GET", `${cfg.projectsApiUrl}/projects/${project()}/memberships?${params.toString()}`);
       return toPage(body, toMembership);
     },
 
-    async listTemplates() {
-      const body = await systemCall("templates", PROJECTS_RESOURCE, SCOPES.templates, "GET", `${cfg.projectsApiUrl}/projects/${project()}/message-templates`);
-      return toPage(body, toTemplate).items;
-    },
-
-    async getTemplate(slug) {
-      try {
-        return toTemplate(await systemCall("template", PROJECTS_RESOURCE, SCOPES.templates, "GET", `${cfg.projectsApiUrl}/projects/${project()}/message-templates/${encodeURIComponent(slug)}`));
-      } catch (err) {
-        if (err instanceof IpalphaRejected && err.status === 404) return null;
-        throw err;
-      }
-    },
-
-    async createTemplate(input) {
-      const t = toTemplate(await systemCall("template/create", PROJECTS_RESOURCE, SCOPES.templates, "POST", `${cfg.projectsApiUrl}/projects/${project()}/message-templates`, input));
-      if (!t) throw new IpalphaUnavailable("template/create: unreadable answer");
-      return t;
-    },
-
-    async updateTemplate(slug, patch) {
-      const t = toTemplate(await systemCall("template/update", PROJECTS_RESOURCE, SCOPES.templates, "PATCH", `${cfg.projectsApiUrl}/projects/${project()}/message-templates/${encodeURIComponent(slug)}`, patch));
-      if (!t) throw new IpalphaUnavailable("template/update: unreadable answer");
-      return t;
-    },
-
-    async deleteTemplate(slug) {
-      await systemCall("template/delete", PROJECTS_RESOURCE, SCOPES.templates, "DELETE", `${cfg.projectsApiUrl}/projects/${project()}/message-templates/${encodeURIComponent(slug)}`);
+    async ownMemberships(token, personId, editionId) {
+      const query = editionId ? `?editionId=${encodeURIComponent(editionId)}` : "";
+      const body = obj(await roleCall("memberships/own", token, "GET", `${cfg.projectsApiUrl}/projects/${project()}/memberships/person/${encodeURIComponent(personId)}${query}`));
+      const memberships = (Array.isArray(body.memberships) ? body.memberships : []).map(toMembership).filter((m): m is Membership => m !== null && m.personId === personId);
+      return { editionId: str(body.editionId), memberships };
     },
 
     async addMembership(token, input) {
@@ -862,23 +799,18 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       );
     },
 
-    async names(personIds) {
+    async names(token, personIds) {
       if (personIds.length === 0) return [];
       if (personIds.length > NAMES_BATCH_MAX) throw new Error(`names: at most ${NAMES_BATCH_MAX} ids per call`);
-      const body = obj(await systemCall("people/names", PERSONS_RESOURCE, SCOPES.appNames, "POST", `${cfg.personsApiUrl}/projects/${project()}/people/names`, { personIds }));
+      const body = obj(await roleCall("people/names", token, "POST", `${cfg.personsApiUrl}/projects/${project()}/people/names`, { personIds }));
       return (Array.isArray(body.items) ? body.items : [])
         .map((x) => obj(x))
         .filter((x) => typeof x.personId === "string" && typeof x.name === "string")
         .map((x) => ({ personId: x.personId as string, name: x.name as string, nickname: str(x.nickname), sex: toSexCode(x.sex) }));
     },
 
-    async birthdaysToday(editionId) {
-      const body = obj(await systemCall("people/birthdays-today", PERSONS_RESOURCE, SCOPES.appNames, "POST", `${cfg.personsApiUrl}/projects/${project()}/people/birthdays-today`, editionId ? { editionId } : {}));
-      return Array.isArray(body.personIds) ? body.personIds.filter((x): x is string => typeof x === "string" && x !== "") : [];
-    },
-
-    async count(input) {
-      const body = obj(await systemCall("people/count", PERSONS_RESOURCE, SCOPES.appNames, "POST", `${cfg.personsApiUrl}/projects/${project()}/people/count`, input));
+    async count(token, input) {
+      const body = obj(await roleCall("people/count", token, "POST", `${cfg.personsApiUrl}/projects/${project()}/people/count`, input));
       const byTag: Record<string, number> = {};
       for (const [k, v] of Object.entries(obj(body.byTag))) if (typeof v === "number") byTag[k] = v;
       return { total: typeof body.total === "number" ? body.total : 0, byTag };
@@ -1056,6 +988,17 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
         .map((x) => obj(x))
         .filter((x) => typeof x.personId === "string")
         .map((x) => ({ personId: x.personId as string, status: (["sent", "notMember", "noContact", "failed"].includes(x.status as string) ? x.status : "failed") as MessageStatus }));
+    },
+
+    async sendTemplateToAudience({ templateSlug, audience, variables }) {
+      const body = obj(
+        await systemCall("messages/audience", NOTIFICATIONS_RESOURCE, SCOPES.sendTemplate, "POST", `${cfg.notificationsApiUrl}/projects/${project()}/messages`, {
+          templateSlug,
+          audience,
+          ...(variables && Object.keys(variables).length ? { variables } : {}),
+        }),
+      );
+      return { accepted: typeof body.accepted === "number" && body.accepted >= 0 ? body.accepted : 0 };
     },
   };
 }

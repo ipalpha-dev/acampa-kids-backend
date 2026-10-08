@@ -6,7 +6,9 @@ import { openRoleTokens, revokeSession } from "./session";
 import { forgetSessionValidation, rememberValidation, rememberedValidation } from "./sessionValidation";
 import { holdsRole } from "./members";
 import { currentCampId } from "./campContext";
+import { currentViewer } from "./viewer";
 import { COORDINATION_ROLE, RESPONSIBLE_ROLE, type CoreRole, type Session } from "../types";
+import type { Edition } from "./ipalpha/coreClient";
 
 /**
  * The per-role IPAlpha token a request ACTS with (CONTRACTS §15: "health /
@@ -49,16 +51,34 @@ export function responsibleToken(session: Session, audience: Audience): string |
 }
 
 /**
- * The projects-api edition of a camp (camps are yearly editions of the one
- * Acampa project). Stored on the camp the first time it is resolved (camp-ops
- * metadata, not person data); looked up by year in the editions list.
+ * The projects token member lists are read with: the session's coordenação token (core lets leaders /
+ * directors list), else its acting one (core answers 403 when that role may not list).
  */
-export async function campEditionId(campId: string = currentCampId()): Promise<string | null> {
+export function membersToken(session: Session): string {
+  return coordinationToken(session, PROJECTS_RESOURCE) ?? roleToken(session, PROJECTS_RESOURCE);
+}
+
+/**
+ * The editions created in Oikos for Acampa, read with the session's acting projects token — Acampa never
+ * creates or rolls an edition over (core answers only the editions this app may use).
+ */
+export async function editionForYear(session: Session, year: number): Promise<Edition | null> {
+  return (await coreClient().listEditions(roleToken(session, PROJECTS_RESOURCE))).find((e) => e.year === year) ?? null;
+}
+
+/**
+ * The projects-api edition of a camp (camps are yearly editions of the one
+ * Acampa project). Stored on the camp when it is created / activated (camp-ops
+ * metadata, not person data); an older camp without one is looked up by year
+ * with the viewer's token (none → null).
+ */
+export async function campEditionId(campId: string = currentCampId(), session: Session | null = currentViewer()): Promise<string | null> {
   const camp = await findCamp(campId);
   if (!camp) return null;
   if (camp.editionId) return camp.editionId;
+  if (!session) return null;
   try {
-    const edition = (await coreClient().listEditions()).find((e) => e.year === camp.year) ?? null;
+    const edition = await editionForYear(session, camp.year);
     if (edition) await setCampEditionId(camp._id, edition.id);
     return edition?.id ?? null;
   } catch {
@@ -71,7 +91,7 @@ export async function coordinationContext(session: Session): Promise<{ ok: true;
   const persons = coordinationToken(session, PERSONS_RESOURCE);
   const projects = coordinationToken(session, PROJECTS_RESOURCE);
   if (!persons || !projects) return { ok: false, status: 403, error: { code: "COORDINATION_REQUIRED", message: "Só a coordenação cadastra pessoas no IPAlpha." } };
-  const editionId = await campEditionId(session.campId);
+  const editionId = await campEditionId(session.campId, session);
   if (!editionId) return { ok: false, status: 409, error: { code: "EDITION_UNKNOWN", message: "A edição deste acampamento ainda não existe no IPAlpha." } };
   return { ok: true, tokens: { persons, projects }, editionId };
 }
@@ -105,7 +125,7 @@ export async function validateSessionRole(session: Session, role: CoreRole = ses
     const token = roleToken(session, PROJECTS_RESOURCE, role);
     const editionId = role === COORDINATION_ROLE ? undefined : openRoleTokens(session)[role]?.editionId ?? undefined;
     await coreClient().pendingKinds(token, editionId);
-    if (!(await holdsRole(session.personId, role, session.campId))) throw new IpalphaTokenRevoked("membership removed");
+    if (!(await holdsRole(session, role, session.campId))) throw new IpalphaTokenRevoked("membership removed");
     rememberValidation(session._id, role, session.campId);
   } catch (err) {
     forgetSessionValidation(session._id);

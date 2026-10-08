@@ -23,7 +23,7 @@ import { normalizeBrazilPhone, titleCaseName } from "../utils";
 
 /**
  * /api/campers — the kids of the camp: `participants` rows (camp ops) keyed by
- * the IPAlpha person id. Names come live from core (persons:app-names) for the
+ * the IPAlpha person id. Names come live from core (the requester's role token) for the
  * PAGE being shown; health only with the acting role token (persons-api role
  * rules decide), and in lists only when a health filter is on or a name filter
  * narrowed the list to ≤ 6 kids (decision 31). Nothing about the person is
@@ -291,7 +291,7 @@ campers.get("/health-counts", requireRole("admin", "staff"), async (c) => {
   // these roles see every kid of the camp: core counts the edition's `participante` members (no ids sent — decision 56)
   const editionId = await campEditionId();
   if (!editionId) return c.json({ total: 0, byTag: {} });
-  return c.json(await healthCounts(PARTICIPANT_ROLE, merged, editionId));
+  return c.json(await healthCounts(actingToken(c, PERSONS_RESOURCE), PARTICIPANT_ROLE, merged, editionId));
 });
 
 /**

@@ -3,7 +3,7 @@ import { emailSlug, hasEmailTwin, templateDefault, TEMPLATE_SLUGS, type Template
 import { recordSms } from "../models/smsUsage";
 import { campEditionId } from "./acting";
 import { coreClient, ipalphaEnabled } from "./ipalpha";
-import { MESSAGE_RECIPIENTS_MAX, type MessageRecipient, type MessageStatus } from "./ipalpha/coreClient";
+import { MESSAGE_RECIPIENTS_MAX, type MessageAudience, type MessageRecipient, type MessageStatus } from "./ipalpha/coreClient";
 import { firstName, namesOf } from "./people";
 
 /**
@@ -12,10 +12,13 @@ import { firstName, namesOf } from "./people";
  * language, renders and delivers, and logs the access for the person. Acampa
  * never sees a phone or an e-mail address.
  *
- * `{name}` (the recipient's first name) and `{link}` (APP_URL) are filled in
- * here when the template uses them and the caller did not. Best effort: a
- * failure is logged (counts only) and never thrown into the write that
- * triggered it.
+ * `{name}` (the recipient's first name, when the requester may see it) and
+ * `{link}` (APP_URL) are filled in here when the template uses them and the
+ * caller did not. Where Acampa cannot read the member list (a role of the
+ * edition, today's birthdays), `sendToRoles` hands core an `audience` and
+ * shared variables only — core resolves the people, Acampa never sees them.
+ * Best effort: a failure is logged (counts only) and never thrown into the
+ * write that triggered it.
  */
 export interface SendInput {
   personId: string;
@@ -70,6 +73,44 @@ export async function sendMessage(key: TemplateKey, recipients: SendInput[], lab
     }
     console.log(`[messages] ${label}: ${sms.sent} sent, ${sms.noContact} without contact, ${sms.notMember} not members, ${sms.failed} failed`);
     return sms;
+  } catch (err) {
+    console.error(`[messages] ${label} failed (${err instanceof Error ? err.message : "error"})`);
+    return null;
+  }
+}
+
+/**
+ * Sends one catalog message (and its e-mail twin) to the members of `roles` in the camp's edition (+ project-wide),
+ * optionally only those whose birthday is today. Variables are shared by everyone. Returns how many messages core
+ * accepted, null on failure.
+ */
+export async function sendToRoles(
+  key: TemplateKey,
+  roles: string[],
+  opts: { birthdayToday?: boolean; variables?: Record<string, string | number> } = {},
+  label: string = key,
+): Promise<number | null> {
+  if (roles.length === 0 || !ipalphaEnabled()) return null;
+  const slug = TEMPLATE_SLUGS[key];
+  try {
+    const editionId = await campEditionId();
+    const audience: MessageAudience = { roles, ...(editionId ? { editionId } : {}), ...(opts.birthdayToday ? { birthdayToday: true } : {}) };
+    const shared = (s: string): Record<string, string> => {
+      const v: Record<string, string> = {};
+      for (const [k, val] of Object.entries(opts.variables ?? {})) v[k] = String(val);
+      const vars = templateDefault(s)?.variables ?? [];
+      if (vars.includes("link") && v.link === undefined) v.link = appLink();
+      for (const k of vars) v[k] ??= "";
+      return v;
+    };
+    const { accepted } = await coreClient().sendTemplateToAudience({ templateSlug: slug, audience, variables: shared(slug) });
+    void recordSms({ at: new Date(), templateSlug: slug, channel: "sms", sent: accepted });
+    if (hasEmailTwin(slug)) {
+      const mail = await coreClient().sendTemplateToAudience({ templateSlug: emailSlug(slug), audience, variables: shared(emailSlug(slug)) });
+      void recordSms({ at: new Date(), templateSlug: emailSlug(slug), channel: "email", sent: mail.accepted });
+    }
+    console.log(`[messages] ${label}: ${accepted} accepted for ${roles.length} role(s)`);
+    return accepted;
   } catch (err) {
     console.error(`[messages] ${label} failed (${err instanceof Error ? err.message : "error"})`);
     return null;

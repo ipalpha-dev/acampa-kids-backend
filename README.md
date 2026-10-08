@@ -79,7 +79,9 @@ editions, `camps.editionId`): per edition `participante` (kids — never sign
 in), `responsavel`, `equipe`, `saude`, `organizacao`, `organizacao-jogos`,
 `pontuacao`, `coletes`, `fotografia`, `checkin`, `checkin-onibus`; project-wide
 `coordenacao` (every edition). They are granted in Oikos (or by Acampa's
-imports with the coordenação token). `services/scope.ts#ROLE_FLAGS` maps a role
+imports with the coordenação token). Editions are created in Oikos only, with
+Acampa linked to the project or the edition: a camp is created / activated for
+an existing edition of its year (`409 EDITION_MISSING` otherwise). `services/scope.ts#ROLE_FLAGS` maps a role
 onto what it sees; the WINDOWS (check-in, bus trips, vests, team / parent
 access) stay camp ops in `settings`, and so does which vehicle each
 `checkin-onibus` person stands at (`settings.busHelpers`). Audiences used by the
@@ -108,11 +110,16 @@ the acting role token ends the session** (`401 SESSION_ENDED`,
 `services/coreErrors.ts`). Super admins (`SUPER_ADMIN_PERSON_IDS`) still need a
 role to sign in.
 
-**People at use** (`services/people.ts`, `routes/people.ts`): names through the
-app client (`persons:app-names`, ≤ 200 per call, the lists are PAGED), health /
+**People at use** (`services/people.ts`, `routes/people.ts`): names with the
+REQUESTER's acting role token (≤ 200 per call, the lists are PAGED) — core
+answers only who that role may see (roles policy `seesNamesOf`; leaders /
+directors see everyone), others come back without a name; a timer has no
+requester and reads no names. Member lists use the session's coordenação token,
+a parent's kids their own `responsavel` token, a role check the self read
+(`services/members.ts`, `services/viewer.ts`). Health /
 contacts / documents with the ACTING role token (persons-api role rules
 decide; logged for the person), health-tag chips through the anonymized count
-endpoint. Lists never show health details (neutral ♥ only) unless filtered by a
+endpoint (acting role token). Lists never show health details (neutral ♥ only) unless filtered by a
 health tag or narrowed by name to ≤ 6 people (decision 31).
 
 **Registrations** (wizard sample, manual registration — `services/coreRegistration.ts`):
@@ -150,9 +157,10 @@ atual", decision 78). No AI, no staging, no worker, no health in Acampa.
 **Messages** (`services/messages.ts`, `src/messages/templates.ts`): every SMS /
 e-mail is a project template sent by notifications-api to a person id
 (language, contact and access log are core's). The catalog holds the default
-copy in 5 languages; `POST /api/settings/message-templates/seed` (or
-`bun scripts/templates-json.ts` for provisioning) creates them, and Settings
-edits them through `projects:templates`.
+copy in 5 languages (`bun scripts/templates-json.ts` prints it); the app owner
+creates and edits Acampa's templates in the IPAlpha Developers portal — Acampa
+has no template screen. Where Acampa cannot read a member list (a timer, a
+family's request), it sends to a role `audience` and core resolves the people.
 
 ## Realtime feed (WebSocket) 📡
 
@@ -430,8 +438,7 @@ notification toggles, the windows (check-in, return bus, team / parent access,
 score suspense), `busHelpers {helpers:[{personId, vehicleId}]}` and
 `parentContacts [{id, title, personId}]`. **Who holds which helper role is not
 here any more** — it is a project role in projects-api (Oikos). Message
-templates: `GET|PATCH /api/settings/message-templates[/:slug]`, `POST …/seed`,
-`POST …/:slug/reset` (coordenação).
+templates are edited in the IPAlpha Developers portal.
 
 ## Parents 👨‍👩‍👧
 
@@ -550,17 +557,18 @@ room / team / vehicle, check-in confirmation and reminder, occurrences
 (coordenação), family health edits, bus boarding (the kid's responsáveis),
 welcomes (team / families, once per camp), photos published, content changes.
 Plain `equipe` members are messaged only inside the team access window; helper
-roles and parent contacts always. Messages to the same person with the same
+roles and parent contacts always. Families, the coordenação / medical team
+from a non-coordenação request and the helpers of the check-in reminder go as
+a role `audience` (notifications-api resolves them; shared variables only, no
+`{name}`). Messages to the same person with the same
 template inside `NOTIFY_COALESCE_SECONDS` collapse into the last one.
 
 **Birthdays** (decision 51): on camp days at 07:45 São Paulo (a timer + the
-hourly safety net) the app client asks persons-api `POST
-/projects/:projectId/people/birthdays-today {editionId}` — only the ids of
-today's birthdays come back, never a date — and the team of each such kid's
-room gets the `acampa-birthday` template (inside the team access window, like
-every team message). Once per kid per day: `participants.birthdayNoticeDay`
-holds today's date and is lifted on any other day, so Acampa keeps no trace of
-when a birthday is. A failed send lifts the marker so the next run retries.
+hourly safety net) Acampa sends `acampa-birthday` to the audience
+`{roles: [participante], editionId, birthdayToday: true}` — notifications-api
+picks today's birthdays; Acampa never learns who, nor a date. Once per camp
+day: `settings.birthdayNoticeDay` (a camp date, not anyone's birthday). A failed
+send lifts the marker so the next run retries.
 
 ## Multi-year camps
 
@@ -650,8 +658,8 @@ the coordenação acting as it, or a `SUPER_ADMIN_PERSON_IDS` owner
 |---|---|---|---|
 | GET | `/api/camps/active` | public | `{ id, label, year }` |
 | GET | `/api/camps` | admin / active-camp organizer | every camp with `{ counts: { campers, staff, photos }, canEnter: true }`; `403 CAMP_FORBIDDEN` otherwise |
-| POST | `/api/camps` `{ label, year }` | admin | creates the camp, makes it active (archives the previous one), writes its `settings` defaults (`wizardMode: false`), re-arms the runtime timers → `{ camp }` (201) |
-| PUT | `/api/camps/:id` `{ label?, year?, active?: true, archived?: boolean }` | admin | renames / activates / archives; `409 CAMP_ACTIVE` when archiving the active camp |
+| POST | `/api/camps` `{ label, year }` | admin | maps it to the Oikos edition of `year` (`409 EDITION_MISSING {year}` when there is none), creates the camp, makes it active (archives the previous one), writes its `settings` defaults (`wizardMode: false`), re-arms the runtime timers → `{ camp }` (201) |
+| PUT | `/api/camps/:id` `{ label?, year?, active?: true, archived?: boolean }` | admin | renames / activates / archives; activating or a new year maps the edition first (`409 EDITION_MISSING`, nothing changed); `409 CAMP_ACTIVE` when archiving the active camp |
 | POST | `/api/camps/:id/delete/request` | admin, target must not be active | sends a 6-digit code to the **caller** (template `acampa-camp-delete-code`, by person id — 5 min) |
 | POST | `/api/camps/:id/delete/confirm` `{ code }` | same | wipes the camp → `{ success, removed }` (counts per collection) |
 | GET | `/api/camps/:id/summary` | manager | counts per importable block of `:id` |

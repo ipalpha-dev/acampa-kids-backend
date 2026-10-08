@@ -1,7 +1,9 @@
 /**
- * Prints Acampa's message template catalog as JSON — the bodies the
- * provisioning Job POSTs to projects-api (`POST /projects/:id/message-templates`,
- * CONTRACTS §11) for a fresh project. No database, no network.
+ * Prints Acampa's message template catalog as JSON — the default copy of
+ * Acampa's OWN templates, created and edited by the app owner in the IPAlpha
+ * Developers portal (templates with `appId` = Acampa; the project's templates
+ * are edited in Oikos). notifications-api sends Acampa's own slug first, else
+ * the project's. No database, no network.
  *
  *   bun scripts/templates-json.ts > acampa-templates.json
  */

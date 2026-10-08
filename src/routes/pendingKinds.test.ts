@@ -2,6 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { createFakeCore, createTestKeys, emptyWorld, enableIpalpha, installFakeCore, json, resetData, sessionFor, startTestDb, stopTestDb, testApp, TEST_EDITION, TEST_PROJECT, type FakeCore, type FakeWorld, type TestKeys } from "../testing/ipalphaHarness";
 import { EMPTY_CAMPER, insertCamper } from "../models/campers";
 import { kidsOfResponsible } from "../services/members";
+import { findSessionByToken } from "../services/session";
+import { withViewer } from "../services/viewer";
 
 const call = testApp();
 let keys: TestKeys;
@@ -54,13 +56,15 @@ const claims = (path: string) => JSON.parse(atob((core.callsTo(path)[0].headers.
 describe("pending kinds (decision 87)", () => {
   test("after the acceptance the new responsável sees the kid at once (empty kinds are not filtered; the 20 s memo is refreshed)", async () => {
     const token = await sessionFor(keys, NEW_PARENT, ["responsavel"]);
+    const session = (await findSessionByToken(token))!;
+    const kids = () => withViewer(session, () => kidsOfResponsible(NEW_PARENT));
     // already signed in for KID_B: the memo holds [KID_B]
-    expect(await kidsOfResponsible(NEW_PARENT)).toEqual([KID_B]);
+    expect(await kids()).toEqual([KID_B]);
     acceptLinkInCore();
-    expect(await kidsOfResponsible(NEW_PARENT)).toEqual([KID_B]);
+    expect(await kids()).toEqual([KID_B]);
     const pending = await call("GET", "/api/pending-kinds", undefined, token);
     expect(pending.status).toBe(200);
-    expect((await kidsOfResponsible(NEW_PARENT)).sort()).toEqual([KID_A, KID_B]);
+    expect((await kids()).sort()).toEqual([KID_A, KID_B]);
     const list = await call("GET", "/api/campers", undefined, token);
     expect(list.body.items.map((k: { id: string }) => k.id).sort()).toEqual([KID_A, KID_B]);
   });

@@ -57,12 +57,20 @@ describe("GET /api/campers/:id/responsibles", () => {
     expect(healthReads()).toHaveLength(0);
   });
 
-  test("a caretaker (visibility 'care') gets the responsáveis of the kid under their care", async () => {
+  test("a caretaker (visibility 'care'): core lists members only for leaders / directors, so no responsáveis come back", async () => {
     const token = await sessionFor(keys, CARE, ["equipe"]);
     const res = await call("GET", `/api/campers/${KID_A}/responsibles`, undefined, token);
     expect(res.status).toBe(200);
-    expect(res.body.responsibles).toEqual([{ personId: PARENT, name: "Família Teste" }]);
+    expect(res.body).toEqual({ camper: { id: KID_A, name: "Ana Pequena" }, responsibles: [] });
     expect(healthReads()).toHaveLength(0);
+  });
+
+  test("a responsável: their own kid's responsáveis come from the memberships naming them (their own token)", async () => {
+    world.memberships.find((m) => m.personId === KID_A)!.involved!.push({ personId: OTHER_PARENT, purpose: "responsible" });
+    const token = await sessionFor(keys, PARENT, ["responsavel"]);
+    const res = await call("GET", `/api/campers/${KID_A}/responsibles`, undefined, token);
+    expect(res.body.responsibles.map((r: { personId: string }) => r.personId).sort()).toEqual([OTHER_PARENT, PARENT].sort());
+    expect(core.callsTo("GET /projects/project-test-1/memberships").every((c) => c.query.get("involvedPersonId") === PARENT)).toBe(true);
   });
 
   test("a responsável: their own kid only; another family's kid is 404 CAMPER_NOT_FOUND (same as GET /:id)", async () => {
@@ -91,7 +99,7 @@ describe("GET /api/campers/:id/responsibles", () => {
     const res = await call("GET", `/api/campers/${KID_B}/responsibles`, undefined, token);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ camper: { id: KID_B, name: "Bruno Pequeno" }, responsibles: [] });
-    expect(core.calls.filter((c) => c.path.includes("/memberships") && !c.query.get("personId"))).toHaveLength(0); // the responsáveis are never even looked up
+    expect(core.callsTo("GET /projects/project-test-1/memberships")).toHaveLength(0); // the responsáveis are never even looked up
   });
 
   test("unknown kid = 404; no session = 401", async () => {

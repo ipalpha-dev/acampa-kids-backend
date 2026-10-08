@@ -5,6 +5,7 @@ import { findSessionByToken, revokeSession } from "../services/session";
 import { getSettings, staffAccessOpen } from "../models/settings";
 import { staffHasAccess } from "../services/scope";
 import { activeCampId, withCamp } from "../services/campContext";
+import { withViewer } from "../services/viewer";
 import { audienceOf, COORDINATION_ROLE, RESPONSIBLE_ROLE, type Role, type Session, type SessionUser } from "../types";
 
 export const superAdminIds = (): string[] => readSuperAdminPersonIds(process.env.SUPER_ADMIN_PERSON_IDS);
@@ -62,7 +63,7 @@ export const requireAuth = createMiddleware<{ Variables: AuthVariables }>(async 
   if (!session) return c.json({ error: { code: "UNAUTHORIZED", message: "Sessão inválida ou expirada." } }, 401);
 
   c.set("sessionId", session._id);
-  return withCamp(session.campId, async () => {
+  return withCamp(session.campId, () => withViewer(session, async () => {
     await validateSessionRole(session);
     const history = session.campId !== activeCampId();
     if (history) {
@@ -81,7 +82,7 @@ export const requireAuth = createMiddleware<{ Variables: AuthVariables }>(async 
     c.set("user", user);
     c.set("campId", session.campId);
     await next();
-  });
+  }));
 });
 
 /** config is imported for its side effect on test setups that read it before the routes */

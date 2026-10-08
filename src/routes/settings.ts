@@ -10,9 +10,6 @@ import { syncParentWelcomes, syncWelcomes, welcomePreview } from "../services/no
 import { evictStaffOutsideWindow, publish, rearmWindows, scheduleCheckinReminder } from "../services/realtime";
 import { listEvents } from "../models/schedule";
 import { parentWindowOf, parentWindowOpen } from "../services/camp";
-import { coreClient } from "../services/ipalpha";
-import type { MessageTemplate } from "../services/ipalpha/coreClient";
-import { TEMPLATE_DEFAULTS, templateDefault, validateTemplate, type TemplateDefault } from "../messages/templates";
 import { type BusHelperList, type CheckinLocation, type CheckinWindow, type NotificationSettings, type ParentContact, type Settings } from "../types";
 
 type Env = { Variables: AuthVariables };
@@ -342,90 +339,6 @@ settings.put("/", requireManager, async (c) => {
 
 /** GET /api/settings/welcome-preview — coordenação. Who would get the welcome RIGHT NOW (person ids; names via /api/people/names). */
 settings.get("/welcome-preview", requireAdmin, async (c) => c.json(await welcomePreview()));
-
-// ── message templates (projects-api `projects:templates`, CONTRACTS §11/§15) ──
-
-type TemplatePatch = Partial<Pick<MessageTemplate, "name" | "body" | "subject">>;
-
-function serializeTemplate(def: TemplateDefault | null, live: MessageTemplate | null) {
-  const src = live ?? def!;
-  return {
-    slug: src.slug,
-    name: src.name,
-    channel: src.channel,
-    variables: def?.variables ?? live?.variables ?? [],
-    subject: src.subject ?? null,
-    body: src.body,
-    /** created in the project (else only the default copy exists) */
-    live: !!live,
-    version: live?.version ?? null,
-    /** the live copy differs from Acampa's default */
-    customized: !!live && !!def && (JSON.stringify(live.body) !== JSON.stringify(def.body) || JSON.stringify(live.subject ?? null) !== JSON.stringify(def.subject ?? null)),
-    /** pt-BR default, for "restaurar" */
-    defaults: def ? { body: def.body, subject: def.subject ?? null } : null,
-  };
-}
-
-/** GET /api/settings/message-templates — the coordenação. Every Acampa template: live copy (projects-api) + default. */
-settings.get("/message-templates", requireAdmin, async (c) => {
-  const live = await coreClient().listTemplates();
-  const bySlug = new Map(live.map((t) => [t.slug, t]));
-  const known = TEMPLATE_DEFAULTS.map((d) => serializeTemplate(d, bySlug.get(d.slug) ?? null));
-  const extra = live.filter((t) => !templateDefault(t.slug)).map((t) => serializeTemplate(null, t));
-  return c.json({ templates: [...known, ...extra] });
-});
-
-/** POST /api/settings/message-templates/seed — creates every catalog template the project does not have yet. */
-settings.post("/message-templates/seed", requireAdmin, async (c) => {
-  const live = new Set((await coreClient().listTemplates()).map((t) => t.slug));
-  let created = 0;
-  for (const d of TEMPLATE_DEFAULTS) {
-    if (live.has(d.slug)) continue;
-    await coreClient().createTemplate({ slug: d.slug, name: d.name, channel: d.channel, ...(d.subject ? { subject: d.subject } : {}), body: d.body, variables: d.variables });
-    created++;
-  }
-  return c.json({ created, total: TEMPLATE_DEFAULTS.length });
-});
-
-/**
- * PATCH /api/settings/message-templates/:slug { name?, body?, subject? } —
- * edits the project's copy (variables are fixed by Acampa's code). Validated
- * here with core's rules (pt-BR required, known `{vars}`, SMS ≤ 320 chars);
- * a template not created yet is created from the default + the edit.
- */
-settings.patch("/message-templates/:slug", requireAdmin, async (c) => {
-  const slug = c.req.param("slug");
-  const def = templateDefault(slug);
-  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
-  if (!body) return fail(c, "BODY_INVALID", "Corpo da requisição inválido.");
-  const text = (v: unknown): Record<string, string> | undefined =>
-    v && typeof v === "object" ? (Object.fromEntries(Object.entries(v as Record<string, unknown>).filter(([, x]) => typeof x === "string")) as Record<string, string>) : undefined;
-  const patch: TemplatePatch = {};
-  if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim().slice(0, 120);
-  if (body.body !== undefined) patch.body = text(body.body);
-  if (body.subject !== undefined) patch.subject = text(body.subject);
-  const current = await coreClient().getTemplate(slug);
-  if (!current && !def) return fail(c, "TEMPLATE_NOT_FOUND", "Modelo não encontrado.", 404);
-  const base = current ?? { slug, name: def!.name, channel: def!.channel, subject: def!.subject, body: def!.body, variables: def!.variables };
-  const merged = { ...base, ...patch, variables: def?.variables ?? base.variables };
-  const invalid = validateTemplate({ slug, channel: merged.channel, body: merged.body as never, subject: merged.subject as never, variables: merged.variables });
-  if (invalid) return fail(c, "TEMPLATE_INVALID", `Modelo inválido: ${invalid}.`);
-  const saved = current
-    ? await coreClient().updateTemplate(slug, patch)
-    : await coreClient().createTemplate({ slug, name: merged.name, channel: merged.channel, ...(merged.subject ? { subject: merged.subject } : {}), body: merged.body, variables: merged.variables });
-  return c.json({ template: serializeTemplate(def, saved) });
-});
-
-/** POST /api/settings/message-templates/:slug/reset — back to Acampa's default copy. */
-settings.post("/message-templates/:slug/reset", requireAdmin, async (c) => {
-  const def = templateDefault(c.req.param("slug"));
-  if (!def) return fail(c, "TEMPLATE_NOT_FOUND", "Modelo não encontrado.", 404);
-  const current = await coreClient().getTemplate(def.slug);
-  const saved = current
-    ? await coreClient().updateTemplate(def.slug, { name: def.name, body: def.body, ...(def.subject ? { subject: def.subject } : {}) })
-    : await coreClient().createTemplate({ slug: def.slug, name: def.name, channel: def.channel, ...(def.subject ? { subject: def.subject } : {}), body: def.body, variables: def.variables });
-  return c.json({ template: serializeTemplate(def, saved) });
-});
 
 /** POST /api/settings/checkin/reset — admin only. Clears EVERY check-in (kids' church + both bus trips, team), the team vests and the audit log, so the process can be rehearsed. */
 settings.post("/checkin/reset", requireManager, async (c) => {

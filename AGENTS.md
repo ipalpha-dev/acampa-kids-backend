@@ -16,9 +16,14 @@ programme, documents, scores, photos. Details: README → "Identity, people and 
   `src/testing/ipalphaHarness.ts`; no network in tests).
 - Roles are §10 project role keys; `services/scope.ts#ROLE_FLAGS` maps them onto scopes. A new
   helper role = a new key in core + (optionally) a flag here — never a settings list.
-- Person data at use only: names via `services/people.ts#namesOf` (app client, ≤ 200 per call,
-  page the lists), health / contacts with the ACTING role token (`services/acting.ts`), the list
-  ♥ via persons health-flags (never a full medical read), counts by project role (no ids). Writes of people go through `services/coreRegistration.ts`
+- Person data at use only: names via `services/people.ts#namesOf` (the REQUESTER's acting role token —
+  `services/viewer.ts`; core omits who the role may not see, `seesNamesOf`; no viewer = no names; ≤ 200 per
+  call, page the lists), health / contacts with the ACTING role token (`services/acting.ts`), the list
+  ♥ via persons health-flags (never a full medical read), counts by project role (no ids, acting token).
+- Member lists with the session's coordenação token, a parent's kids with their OWN `responsavel` token, a role
+  check through the self read (`services/members.ts`). Acampa holds no app-bound read scope any more: only
+  `login:relay`, `notifications:send-template`, `dispatch:app-channel`. Where it cannot list people (timers, a
+  family's request) it sends to a role `audience` (`services/messages.ts#sendToRoles`) — never a workaround list. Writes of people go through `services/coreRegistration.ts`
   with the coordenação tokens.
 - Messages only through `services/messages.ts` + `src/messages/templates.ts` (5 languages,
   SMS ≤ 160 chars rendered — decision 45). A new message = a new catalog entry + test.
@@ -53,15 +58,16 @@ Do NOT:
 - send `medical` in a persons registration: core reuses a known person (`created: false`) and REPLACES the
   block — health goes through `coreRegistration#mergeHealthInto` (read, union / append, never blank; a block
   the role cannot read is never written);
-- make camp activation wait on projects-api (edition rollover is best effort);
+- create or roll over an edition: camps map to an edition created in Oikos (create / activate answer
+  `409 EDITION_MISSING` without one);
 - guess sex or any person attribute with AI — sex comes from core with the name (decision 39);
   registrations send `sex` only when the sheet / form said it;
-- compute or keep birthdays — core answers today's ids (`birthdays-today`, decision 51); the
-  `birthdayNoticeDay` marker only lives on its own day.
+- compute or keep birthdays — the birthday message goes to an `audience` with `birthdayToday` (decision 51);
+  `settings.birthdayNoticeDay` is a camp date only.
 
 ## Copy
 
 Backend messages are pt-BR + a machine code; the frontend localizes by code (5 languages).
-Template copy is localized here (catalog) and edited in Settings / Oikos. Pastoral language
+Template copy is localized here (catalog) and edited in the Developers portal (project templates in Oikos). Pastoral language
 applies to every user-facing string: never blunt labels about family shape, loss, health or
 money — propose gentler options when in doubt (workspace `AGENTS.md`).

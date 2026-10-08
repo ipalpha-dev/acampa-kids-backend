@@ -29,6 +29,7 @@ import { getSettings } from "../models/settings";
 import type { Role } from "../types";
 import { isSuperAdmin } from "../middleware/auth";
 import { COLLECTIONS, type Collection, type Snapshot } from "./realtime";
+import { currentViewer, withViewer } from "./viewer";
 import { canManageGallery, canSeeBedroom, canSeeDoc, canSeeScores, isParent, resolveScope, scopeEvent, scopeRoles, viewerOccurrenceGroup, type Viewer } from "./scope";
 
 /**
@@ -61,6 +62,13 @@ export function snapshotKey(viewer: Viewer): string {
  * with the acting role token.
  */
 export async function loadCollections(viewer: Viewer, names: readonly Collection[] = COLLECTIONS): Promise<Snapshot> {
+  if (!viewer.sessionId || currentViewer()?._id === viewer.sessionId) return loadFor(viewer, names);
+  const { findSession } = await import("./session");
+  const session = await findSession(viewer.sessionId);
+  return session ? withViewer(session, () => loadFor(viewer, names)) : loadFor(viewer, names);
+}
+
+async function loadFor(viewer: Viewer, names: readonly Collection[]): Promise<Snapshot> {
   const role: Role = viewer.activeRole;
   const allowed = new Set(READABLE[role]);
   let wanted = names.filter((n) => allowed.has(n));
