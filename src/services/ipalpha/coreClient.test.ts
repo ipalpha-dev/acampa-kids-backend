@@ -82,8 +82,10 @@ describe("core client", () => {
 
   test("own memberships: the self read keeps only the token subject's rows", async () => {
     const { core, api } = client();
-    core.on("GET /projects/project-test-1/memberships/person/p1", () => json({ personId: "p1", editionId: "e1", memberships: [{ personId: "p1", role: "equipe", editionId: "e1" }, { personId: "p9", role: "coordenacao" }] }));
-    expect(await api.ownMemberships("role-token", "p1", "e1")).toMatchObject({ editionId: "e1", memberships: [{ personId: "p1", role: "equipe", editionId: "e1" }] });
+    core.on("GET /projects/project-test-1/memberships/person/p1", () => json({ personId: "p1", editionId: "e1", memberships: [{ personId: "p1", role: "equipe", editionId: "e1" }, { personId: "p9", role: "coordenacao" }], involved: [{ personId: "k1", role: "participante", editionId: "e1" }, { personId: "k2", role: "participante" }] }));
+    const own = await api.ownMemberships("role-token", "p1", "e1");
+    expect(own).toMatchObject({ editionId: "e1", memberships: [{ personId: "p1", role: "equipe", editionId: "e1" }] });
+    expect(own.involved).toEqual([{ personId: "k1", role: "participante", editionId: "e1" }, { personId: "k2", role: "participante", editionId: null }]);
     expect(core.callsTo("GET /projects/project-test-1/memberships/person/p1")[0].query.get("editionId")).toBe("e1");
   });
 
@@ -92,9 +94,12 @@ describe("core client", () => {
     core.on("GET /projects/project-test-1/memberships", () => json([{ personId: "p1", role: "equipe", editionId: "e1" }]));
     expect((await api.listMembers("role-token", { role: "equipe" })).items[0]).toMatchObject({ personId: "p1", role: "equipe", editionId: "e1" });
     core.on("GET /projects/project-test-1/memberships", () => json({ items: [{ personId: "p2", role: "participante", involved: [{ personId: "p3", purpose: "responsible" }] }], nextCursor: "c2" }));
-    const page = await api.listMembers("role-token", { role: "participante", involvedPersonId: "p3" });
+    const page = await api.listMembers("role-token", { role: "participante", editionId: "e1" });
     expect(page).toMatchObject({ nextCursor: "c2", items: [{ personId: "p2", involved: [{ personId: "p3" }] }] });
-    expect(core.callsTo("GET /projects/project-test-1/memberships")[1].query.get("involvedPersonId")).toBe("p3");
+    expect(core.callsTo("GET /projects/project-test-1/memberships")[1].query.get("editionId")).toBe("e1");
+    // a person-token list (Round 2): ids only — `involvedPersonIds` are the responsáveis
+    core.on("GET /projects/project-test-1/memberships", () => json({ items: [{ personId: "p2", role: "participante", editionId: "e1", involvedPersonIds: ["p3", "p4"] }], nextCursor: null }));
+    expect((await api.listMembers("role-token", { role: "participante" })).items[0].involved).toEqual([{ personId: "p3", purpose: "responsible" }, { personId: "p4", purpose: "responsible" }]);
   });
 
   test("send-template posts recipients by person id to notifications-api", async () => {

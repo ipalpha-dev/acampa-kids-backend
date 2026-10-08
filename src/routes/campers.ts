@@ -18,7 +18,7 @@ import { healthToCore, mergeHealthInto, registrationData, registrationExtras, re
 import { coreClient } from "../services/ipalpha";
 import { PERSONS_RESOURCE, PROJECTS_RESOURCE } from "../services/ipalpha/coreClient";
 import { hasHealthInfo, healthCounts, healthFlagsOf, matchesHealthTag, nameMatches, namesOf, pageOf, readHealth, readHealthMany, readHealthState, tagFilter, writeHealth } from "../services/people";
-import { editionRolesOf, responsiblesOf } from "../services/members";
+import { editionRolesOf, responsiblesView } from "../services/members";
 import { normalizeBrazilPhone, titleCaseName } from "../utils";
 
 /**
@@ -363,10 +363,11 @@ campers.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
   const names = await namesOf([k._id]);
   const withHealth = healthAllowed(scope, k);
   const vis = camperVisibility(scope, k);
-  const [healthState, responsibles] = await Promise.all([
+  const [healthState, view] = await Promise.all([
     withHealth ? readHealthState(actingToken(c, PERSONS_RESOURCE), k._id) : null,
-    vis === "full" || vis === "care" ? responsiblesOf([k._id]).then((m) => m.get(k._id) ?? []) : Promise.resolve([] as string[]),
+    vis === "full" || vis === "care" ? responsiblesView([k._id]) : Promise.resolve({ byKid: new Map<string, string[]>(), hidden: false }),
   ]);
+  const responsibles = view.byKid.get(k._id) ?? [];
   const rNames = await namesOf(responsibles);
   return c.json({
     camper: {
@@ -376,6 +377,7 @@ campers.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
       sex: names.get(k._id)?.sex ?? null,
       ...(healthState ? { health: healthFor(healthState.health, scope, k), ...(healthState.forbidden ? { healthForbidden: true } : {}) } : {}),
       responsibles: responsibles.map((id) => ({ personId: id, name: rNames.get(id)?.name ?? "" })),
+      ...(view.hidden ? { responsiblesHidden: true } : {}),
     },
   });
 });
@@ -385,18 +387,21 @@ campers.get("/:id", requireRole("admin", "staff", "parent"), async (c) => {
  * for the 📞 button: the same role guard, scope and responsáveis rule as GET /:id, and
  * NO health read (never a medical block — the button only needs who to call).
  * Out of scope = 404; in scope but the visibility does not reach the responsáveis
- * (anything but "full" / "care") = `responsibles: []`. Names are read live, never stored.
+ * (anything but "full" / "care") = `responsibles: []`; core refusing the viewer's role the lists
+ * (`seesPersonsOf`) = `responsiblesHidden: true` (never "no responsável"). Names are read live, never stored.
  */
 campers.get("/:id/responsibles", requireRole("admin", "staff", "parent"), async (c) => {
   const k = await findCamperById(c.req.param("id"));
   const scope = await resolveScope(c.get("user"));
   if (!k || !serializeCamperFor(k, scope)) return fail(c, "CAMPER_NOT_FOUND", "Acampante não encontrado.", 404);
   const vis = camperVisibility(scope, k);
-  const responsibles = vis === "full" || vis === "care" ? ((await responsiblesOf([k._id])).get(k._id) ?? []) : [];
+  const view = vis === "full" || vis === "care" ? await responsiblesView([k._id]) : { byKid: new Map<string, string[]>(), hidden: false };
+  const responsibles = view.byKid.get(k._id) ?? [];
   const names = await namesOf([k._id, ...responsibles]);
   return c.json({
     camper: { id: k._id, name: names.get(k._id)?.name ?? "" },
     responsibles: responsibles.map((id) => ({ personId: id, name: names.get(id)?.name ?? "" })),
+    ...(view.hidden ? { responsiblesHidden: true } : {}),
   });
 });
 

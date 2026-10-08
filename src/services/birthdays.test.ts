@@ -9,7 +9,7 @@ import { activeCampId } from "./campContext";
 import { sendBirthdayNotices } from "./notify";
 import { todayInSaoPaulo } from "../utils";
 
-/** Decision 51: notifications-api resolves today's birthdays of the edition's kids (`audience.birthdayToday`); Acampa never learns who. */
+/** Decision 51 (Round 2): the team gets a notice as an audience with `birthdayOf: participante`; core fills `{birthdayNames}` per recipient — Acampa never learns who. */
 let keys: TestKeys;
 let core: FakeCore;
 let world: FakeWorld;
@@ -17,6 +17,8 @@ let world: FakeWorld;
 const KID_A = "person-kid-a";
 const KID_B = "person-kid-b";
 const CARE = "person-caretaker";
+const ADMIN = "person-admin";
+const VESTS = "person-vests";
 const SLUG = "acampa-birthday";
 
 /** 08:00 in São Paulo (UTC-3) today — after the 07:45 send time */
@@ -33,7 +35,10 @@ beforeEach(async () => {
   await resetData();
   core = createFakeCore();
   world = emptyWorld();
+  for (const [id, name] of [[KID_A, "Ana Pequena"], [CARE, "Líder Teste"], [ADMIN, "Coordenadora"], [VESTS, "Coletes Teste"]]) world.names.set(id, name);
   world.memberships.push(
+    { personId: ADMIN, role: "coordenacao" },
+    { personId: VESTS, role: "coletes", editionId: TEST_EDITION },
     { personId: CARE, role: "equipe", editionId: TEST_EDITION },
     { personId: KID_A, role: "participante", editionId: TEST_EDITION },
     { personId: KID_B, role: "participante", editionId: TEST_EDITION },
@@ -52,12 +57,30 @@ beforeEach(async () => {
 const sends = () => core.callsTo("POST /projects/project-test-1/messages").filter((c) => (c.json as { templateSlug: string }).templateSlug === SLUG);
 
 describe("birthday messages (decision 51)", () => {
-  test("one audience send: the edition's kids whose birthday is today — no ids, names or dates go from Acampa", async () => {
+  test("one audience send to the team roles with birthdayOf: participante — core fills {name} / {birthdayNames}, roles that see no kid are skipped", async () => {
     await sendBirthdayNotices(now);
-    expect(sends().map((c) => c.json)).toEqual([{ templateSlug: SLUG, audience: { roles: ["participante"], editionId: TEST_EDITION, birthdayToday: true } }]);
+    const body = sends()[0].json as { templateSlug: string; audience: { roles: string[]; editionId: string; birthdayOf: { roles: string[] } }; variables?: unknown };
+    expect(sends()).toHaveLength(1);
+    expect(body.audience.birthdayOf).toEqual({ roles: ["participante"] });
+    expect(body.audience.editionId).toBe(TEST_EDITION);
+    expect(body.audience.roles).toEqual(expect.arrayContaining(["equipe", "coordenacao", "saude", "coletes"]));
+    expect(body.variables).toBeUndefined();
     expect(sends()[0].headers.get("authorization")).toBe("Bearer system:notifications:send-template");
-    expect(world.messages.find((m) => m.slug === SLUG)?.recipients.map((r) => r.personId)).toEqual([KID_A]);
+    // the fake renders like core: the vests helper's role sees no kid → skipped; CARE's own birthday is not a kid's
+    expect(world.messages.find((m) => m.slug === SLUG)?.recipients).toEqual([
+      { personId: ADMIN, variables: { name: "Coordenadora", birthdayNames: "Ana" } },
+      { personId: CARE, variables: { name: "Líder", birthdayNames: "Ana" } },
+    ]);
     expect(core.calls.some((c) => c.path.includes("birthdays-today"))).toBe(false);
+  });
+
+  test("outside the team's access window plain equipe is left out; no birthday today → nothing accepted", async () => {
+    await updateSettings({ staffAccessWindow: { from: new Date(now.getTime() + 86400_000), until: new Date(now.getTime() + 2 * 86400_000) } } as never);
+    world.birthdays.clear();
+    await sendBirthdayNotices(now);
+    const body = sends()[0].json as { audience: { roles: string[] } };
+    expect(body.audience.roles).not.toContain("equipe");
+    expect(world.messages.find((m) => m.slug === SLUG)?.recipients).toEqual([]);
   });
 
   test("once per camp day: the hourly safety net never repeats it", async () => {

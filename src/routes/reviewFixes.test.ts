@@ -72,18 +72,18 @@ describe("unknown role keys behave exactly as equipe", () => {
   });
 });
 
-describe("kidsOfResponsible checks `involved` itself", () => {
-  test("a membership row returned by core WITHOUT the parent as responsible never opens the kid", async () => {
-    // a core that ignores the involvedPersonId filter (bug / older version) answers every participante
-    core.on(`GET /projects/${TEST_PROJECT}/memberships`, () =>
-      json({ items: world.memberships.filter((m) => m.role === "participante").map((m) => ({ personId: m.personId, role: m.role, editionId: m.editionId, involved: m.involved ?? [] })), nextCursor: null }),
+describe("kidsOfResponsible: the parent's own self read (`involved`)", () => {
+  test("only `participante` entries of this edition open a kid, read with the parent's own responsavel token", async () => {
+    core.on(`GET /projects/${TEST_PROJECT}/memberships/person/${PARENT}`, () =>
+      json({ personId: PARENT, editionId: TEST_EDITION, memberships: [], involved: [{ personId: KID_A, role: "participante", editionId: TEST_EDITION }, { personId: KID_B, role: "participante", editionId: "edition-other" }, { personId: "person-x", role: "equipe", editionId: TEST_EDITION }] }),
     );
     clearMembersMemo();
     const session = (await findSessionByToken(await sessionFor(keys, PARENT, ["responsavel"])))!;
     expect(await withViewer(session, () => kidsOfResponsible(PARENT))).toEqual([KID_A]);
-    const read = core.callsTo(`GET /projects/${TEST_PROJECT}/memberships`)[0];
-    expect(read.query.get("involvedPersonId")).toBe(PARENT);
+    const read = core.callsTo(`GET /projects/${TEST_PROJECT}/memberships/person/${PARENT}`).at(-1)!;
+    expect(read.query.get("editionId")).toBe(TEST_EDITION);
     expect(JSON.parse(Buffer.from((read.headers.get("authorization") ?? "").split(".")[1], "base64url").toString())).toMatchObject({ sub: PARENT, projectRole: "responsavel" });
+    expect(core.callsTo(`GET /projects/${TEST_PROJECT}/memberships`)).toHaveLength(0);
   });
 
   test("only the parent's own session answers it: no viewer, or another person's, opens nobody", async () => {
@@ -91,7 +91,7 @@ describe("kidsOfResponsible checks `involved` itself", () => {
     expect(await kidsOfResponsible(PARENT)).toEqual([]);
     const admin = (await findSessionByToken(await sessionFor(keys, ADMIN, ["coordenacao"])))!;
     expect(await withViewer(admin, () => kidsOfResponsible(PARENT))).toEqual([]);
-    expect(core.callsTo(`GET /projects/${TEST_PROJECT}/memberships`)).toHaveLength(0);
+    expect(core.calls.filter((c) => c.path === `/projects/${TEST_PROJECT}/memberships/person/${PARENT}`)).toHaveLength(0);
   });
 });
 

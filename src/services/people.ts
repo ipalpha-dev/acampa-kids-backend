@@ -9,7 +9,7 @@ import { EMPTY_HEALTH, type HealthInfo, type Medication, type Session } from "..
  *
  *   names    the REQUESTER's acting role token (the viewer, services/viewer.ts), ≤ 200 ids per call, logged by
  *            persons-api per person. Core answers only the people that role may see (roles policy
- *            `seesNamesOf`; leaders / directors see everyone) — others are silently absent, and with no
+ *            `seesPersonsOf`; leaders / directors see everyone) — others are silently absent, and with no
  *            viewer (timers) there are no names. Request-scoped only — nothing cached.
  *   health   the ACTING role token (persons-api role rules decide), logged.
  *   counts   the acting role token on the count endpoint (anonymized, not logged).

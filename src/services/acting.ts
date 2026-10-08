@@ -51,8 +51,8 @@ export function responsibleToken(session: Session, audience: Audience): string |
 }
 
 /**
- * The projects token member lists are read with: the session's coordenação token (core lets leaders /
- * directors list), else its acting one (core answers 403 when that role may not list).
+ * The projects token member lists are read with: the session's coordenação token (leaders / directors list),
+ * else its acting one (core answers when that role `seesPersonsOf` the listed role, 403 otherwise).
  */
 export function membersToken(session: Session): string {
   return coordinationToken(session, PROJECTS_RESOURCE) ?? roleToken(session, PROJECTS_RESOURCE);

@@ -57,20 +57,35 @@ describe("GET /api/campers/:id/responsibles", () => {
     expect(healthReads()).toHaveLength(0);
   });
 
-  test("a caretaker (visibility 'care'): core lists members only for leaders / directors, so no responsáveis come back", async () => {
+  test("a caretaker (visibility 'care') whose role seesPersonsOf participante + responsavel gets them, with their OWN token", async () => {
     const token = await sessionFor(keys, CARE, ["equipe"]);
     const res = await call("GET", `/api/campers/${KID_A}/responsibles`, undefined, token);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ camper: { id: KID_A, name: "Ana Pequena" }, responsibles: [] });
+    expect(res.body).toEqual({ camper: { id: KID_A, name: "Ana Pequena" }, responsibles: [{ personId: PARENT, name: "Família Teste" }] });
+    const lists = core.callsTo("GET /projects/project-test-1/memberships");
+    expect(lists.map((c) => c.query.get("role")).sort()).toEqual(["participante", "responsavel"]);
+    for (const c of lists) expect(JSON.parse(atob((c.headers.get("authorization") ?? "").split(".")[1]))).toMatchObject({ sub: CARE, projectRole: "equipe" });
     expect(healthReads()).toHaveLength(0);
   });
 
-  test("a responsável: their own kid's responsáveis come from the memberships naming them (their own token)", async () => {
+  test("a role core refuses the lists (no seesPersonsOf): fails closed and says so — never 'no responsável'", async () => {
+    world.seesPersonsOf.equipe = ["participante"];
+    const token = await sessionFor(keys, CARE, ["equipe"]);
+    const res = await call("GET", `/api/campers/${KID_A}/responsibles`, undefined, token);
+    expect(res.body).toEqual({ camper: { id: KID_A, name: "Ana Pequena" }, responsibles: [], responsiblesHidden: true });
+    const page = await call("GET", `/api/campers/${KID_A}`, undefined, token);
+    expect(page.body.camper).toMatchObject({ responsibles: [], responsiblesHidden: true });
+  });
+
+  test("a responsável whose role sees no lists still gets themselves for their own kid", async () => {
     world.memberships.find((m) => m.personId === KID_A)!.involved!.push({ personId: OTHER_PARENT, purpose: "responsible" });
     const token = await sessionFor(keys, PARENT, ["responsavel"]);
     const res = await call("GET", `/api/campers/${KID_A}/responsibles`, undefined, token);
-    expect(res.body.responsibles.map((r: { personId: string }) => r.personId).sort()).toEqual([OTHER_PARENT, PARENT].sort());
-    expect(core.callsTo("GET /projects/project-test-1/memberships").every((c) => c.query.get("involvedPersonId") === PARENT)).toBe(true);
+    expect(res.body).toMatchObject({ responsibles: [{ personId: PARENT, name: "Família Teste" }], responsiblesHidden: true });
+    world.seesPersonsOf.responsavel = ["participante", "responsavel"];
+    const seen = await call("GET", `/api/campers/${KID_A}/responsibles`, undefined, token);
+    expect(seen.body.responsibles.map((r: { personId: string }) => r.personId).sort()).toEqual([OTHER_PARENT, PARENT].sort());
+    expect(seen.body.responsiblesHidden).toBeUndefined();
   });
 
   test("a responsável: their own kid only; another family's kid is 404 CAMPER_NOT_FOUND (same as GET /:id)", async () => {

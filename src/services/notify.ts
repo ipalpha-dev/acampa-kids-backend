@@ -46,10 +46,11 @@ import type { TemplateKey } from "../messages/templates";
  * (bulk edits never flood a phone). Delivery is best effort and never blocks
  * the write.
  *
- * Birthdays (decision 51): on a camp day at 07:45 São Paulo the birthday
- * template goes to the edition's `participante` audience with
- * `birthdayToday` — core picks today's birthdays; Acampa never sees who, nor
- * a birth date. Once per camp day: `settings.birthdayNoticeDay`.
+ * Birthdays (decision 51): on a camp day at 07:45 São Paulo the team roles
+ * get the birthday notice as an audience with `birthdayOf: participante` —
+ * core finds today's birthdays and fills `{birthdayNames}` per recipient with
+ * the kids that recipient's role sees (none → skipped); Acampa never learns
+ * who, nor a date. Once per camp day: `settings.birthdayNoticeDay`.
  */
 
 const COALESCE_MS = Number(process.env.NOTIFY_COALESCE_SECONDS ?? 20) * 1000;
@@ -169,7 +170,7 @@ export async function notifyCheckin(staff: Staff): Promise<void> {
 /**
  * At `settings.checkinReminder.at` every active team member not checked in yet is reminded (once per instant).
  * Outside the team's access window only the parents' contacts are (by id) and the helper roles (audience: a
- * timer cannot list them — they may get it after checking in).
+ * timer cannot list them; the ones already checked in are excluded).
  */
 export async function sendCheckinReminder(now = new Date()): Promise<void> {
   try {
@@ -178,9 +179,11 @@ export async function sendCheckinReminder(now = new Date()): Promise<void> {
     if (!settings.notifications.checkinReminder || !at || settings.checkinReminder.sentAt || now < at) return;
     if (!(await claimCheckinReminder(at))) return;
     const open = staffAccessOpen(settings.staffAccessWindow);
-    const team = (await listStaff({ active: true })).filter((s) => !s.checkin && (open || settings.parentContacts.some((p) => p.personId === s._id)));
+    const staff = await listStaff({ active: true });
+    const team = staff.filter((s) => !s.checkin && (open || settings.parentContacts.some((p) => p.personId === s._id)));
     await sendMessage("checkinReminder", team.map((s) => ({ personId: s._id })));
-    if (!open) await sendToRoles("checkinReminder", await helperRoles());
+    // helpers already checked in (or just reminded by id) are left out by core
+    if (!open) await sendToRoles("checkinReminder", await helperRoles(), { excludePersonIds: [...staff.filter((s) => s.checkin).map((s) => s._id), ...team.map((s) => s._id)] });
   } catch (err) {
     console.error("notify: checkin reminder failed", err);
   }
@@ -195,10 +198,15 @@ export function birthdaySmsDue(day: string): Date {
   return new Date(saoPauloWallClockToIso(saoPauloWallClock(day, BIRTHDAY_SMS_TIME)));
 }
 
+/** The roles told about a birthday: every team role (helpers, coordenação; plain `equipe` only inside its window). */
+async function birthdayRoles(settings: Settings): Promise<string[]> {
+  const helpers = await helperRoles();
+  return [...new Set([...helpers, COORDINATION_ROLE, ...(staffAccessOpen(settings.staffAccessWindow) ? [TEAM_ROLE] : [])])];
+}
+
 /**
- * Sends today's birthday message (idempotent: hourly safety net + the 07:45
- * timer both call it). Only on camp days, after 07:45, with the setting on.
- * Core resolves who has a birthday today among the edition's kids.
+ * Sends today's birthday notice to the team (idempotent: hourly safety net + the 07:45 timer both call it). Only
+ * on camp days, after 07:45, with the setting on. Core finds today's birthdays among the edition's kids.
  */
 export async function sendBirthdayNotices(now = new Date()): Promise<void> {
   try {
@@ -210,7 +218,7 @@ export async function sendBirthdayNotices(now = new Date()): Promise<void> {
     if (!period.from || !period.until || today < period.from || today > period.until) return;
     if (now < birthdaySmsDue(today)) return;
     if (!(await claimBirthdayNoticeDay(today))) return;
-    const accepted = await sendToRoles("birthday", [PARTICIPANT_ROLE], { birthdayToday: true }, "birthday");
+    const accepted = await sendToRoles("birthday", await birthdayRoles(settings), { birthdayOf: [PARTICIPANT_ROLE] }, "birthday");
     // nothing went out (core down / refused): lift the marker so the hourly run tries again today
     if (accepted === null) await releaseBirthdayNoticeDay(today);
     // counts only — no person id or date that would tie the line to one kid's birthday
@@ -234,7 +242,7 @@ export async function notifyParentEdit(kid: Camper, entry: Pick<CamperChangeLog,
     const kidName = (await firstNames([kid._id])).get(kid._id) ?? "";
     const key: TemplateKey = entry.medical ? "parentEditMedical" : "parentEditNotes";
     if (kid.caretakerId && !settings.kidsRoomsDraft && kid.caretakerId !== entry.byPersonId) enqueue(key, { personId: kid.caretakerId, variables: { kid: kidName } }, "staff");
-    if (entry.medical) await sendToRoles("parentEditMedical", ["saude", COORDINATION_ROLE], { variables: { kid: kidName } });
+    if (entry.medical) await sendToRoles("parentEditMedical", ["saude", COORDINATION_ROLE], { variables: { kid: kidName }, excludePersonIds: [entry.byPersonId, ...(kid.caretakerId ? [kid.caretakerId] : [])] });
   } catch (err) {
     console.error("notify: parent edit failed", err);
   }
@@ -242,12 +250,12 @@ export async function notifyParentEdit(kid: Camper, entry: Pick<CamperChangeLog,
 
 // ── occurrences / out-of-scope badge scans ───────────────────────────────────
 
-/** A new occurrence → every coordenação member (role audience, sent at once). */
-export async function notifyOccurrence(_o: Occurrence): Promise<void> {
+/** A new occurrence → every coordenação member but its author (role audience, sent at once). */
+export async function notifyOccurrence(o: Occurrence): Promise<void> {
   try {
     const settings = await getSettings();
     if (!settings.notifications.occurrences) return;
-    await sendToRoles("occurrence", [COORDINATION_ROLE]);
+    await sendToRoles("occurrence", [COORDINATION_ROLE], { excludePersonIds: [o.createdByPersonId] });
   } catch (err) {
     console.error("notify: occurrence failed", err);
   }
@@ -523,6 +531,25 @@ export async function notifyBusCheckin(kid: Camper): Promise<void> {
 }
 
 // ── welcomes ─────────────────────────────────────────────────────────────────
+
+/**
+ * Families who joined after the edition's welcome went out (a registration, an accepted link request, an import):
+ * welcomed by id, once per camp each. Before that audience send they are simply part of it.
+ */
+export async function welcomeLateFamilies(personIds: string[]): Promise<void> {
+  try {
+    const ids = [...new Set(personIds.filter(Boolean))];
+    if (ids.length === 0) return;
+    const settings = await getSettings();
+    if (!settings.notifications.parentWelcome || !staffAccessOpen(settings.parentAccessWindow)) return;
+    if (!(await findUserCampState(FAMILIES_MARK))?.welcomeSentAt) return;
+    const fresh: string[] = [];
+    for (const id of ids) if (await claimUserWelcome(id)) fresh.push(id);
+    if (fresh.length) await sendMessage("parentWelcome", fresh.map((personId) => ({ personId })));
+  } catch (err) {
+    console.error("notify: late family welcome failed", err);
+  }
+}
 
 /** When the parents' access window is open, the families of the edition get the welcome (role audience, once per camp). */
 export async function syncParentWelcomes(): Promise<void> {

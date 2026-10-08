@@ -323,17 +323,24 @@ export function toImportBatch(v: unknown): ImportBatch | null {
   return { batch, rows };
 }
 
-/** projects-api `GET /projects/:id/memberships/person/:me` (own token): the edition used + the person's own memberships */
+/** projects-api `GET /projects/:id/memberships/person/:me` (own token): the edition used, the person's own memberships and those naming them as involved (ids only) */
 export interface OwnMemberships {
   editionId: string | null;
   memberships: Membership[];
+  involved: { personId: string; role: string; editionId: string | null }[];
 }
 
-/** notifications-api `audience`: core resolves the members of `roles` (+ edition; only today's birthdays) — Acampa never sees them */
+/**
+ * notifications-api `audience`: core resolves the members of `roles` (+ edition; only today's birthdays) minus
+ * `excludePersonIds` — Acampa never sees them. `birthdayOf`: core finds today's birthdays among those roles and fills
+ * `{birthdayNames}` per recipient with the ones that recipient's role sees (none → skipped).
+ */
 export interface MessageAudience {
   roles: string[];
   editionId?: string;
   birthdayToday?: boolean;
+  excludePersonIds?: string[];
+  birthdayOf?: { roles: string[] };
 }
 
 export interface MessageRecipient {
@@ -356,15 +363,18 @@ export interface IpalphaCoreClient {
   // ── projects-api (per-role token) ──
   /** the editions Acampa may use (created in Oikos; core answers only those whose apps include Acampa) */
   listEditions(token: string): Promise<Edition[]>;
-  /** member lists — core decides who may list (leaders / directors of the project) */
-  listMembers(token: string, query: { role?: string; editionId?: string; involvedPersonId?: string; personId?: string; cursor?: string; limit?: number }): Promise<Page<Membership>>;
-  /** the token subject's OWN roles (`personId` must be the token's `sub`): that edition's + project-wide */
+  /**
+   * member lists of one role — leaders / directors, or a role whose `seesPersonsOf` includes it: rows `{personId, role,
+   * editionId?, involvedPersonIds}`; `editionId` only `none` or the token's edition (403 editionMismatch / roleNotVisible)
+   */
+  listMembers(token: string, query: { role?: string; editionId?: string; personId?: string; cursor?: string; limit?: number }): Promise<Page<Membership>>;
+  /** the token subject's OWN roles (`personId` must be the token's `sub`): that edition's + project-wide, and the memberships naming them as involved */
   ownMemberships(token: string, personId: string, editionId?: string): Promise<OwnMemberships>;
   addMembership(token: string, input: MembershipInput): Promise<Membership>;
   removeMembership(token: string, input: { personId: string; role: string; editionId?: string }): Promise<void>;
 
   // ── persons-api (per-role token) ──
-  /** names the token's role may see (roles policy `seesNamesOf`), ≤ 200 ids per call; other ids are silently left out */
+  /** names the token's role may see (roles policy `seesPersonsOf`), ≤ 200 ids per call; other ids are silently left out */
   names(token: string, personIds: string[]): Promise<PersonName[]>;
   /** anonymized counts of a project ROLE's members (§23: project + role (+ edition), never person ids); not logged by core */
   count(token: string, input: { role: string; editionId?: string; filters: { healthTags?: HealthTagFilter } }): Promise<CountAnswer>;
@@ -523,12 +533,13 @@ export function toMembership(v: unknown): Membership | null {
   const personId = str(o.personId);
   const role = str(o.role);
   if (!personId || !role) return null;
+  // a person-token list answers `involvedPersonIds` (ids only, the responsáveis); the full view `involved`
   const involved = Array.isArray(o.involved)
     ? o.involved
         .map((x) => obj(x))
         .filter((x) => typeof x.personId === "string")
         .map((x) => ({ personId: x.personId as string, purpose: str(x.purpose) ?? "responsible" }))
-    : [];
+    : strings(o.involvedPersonIds).map((personId) => ({ personId, purpose: "responsible" }));
   return { id: str(o.id) ?? `${personId}:${role}`, personId, role, editionId: str(o.editionId), involved };
 }
 
@@ -781,7 +792,11 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       const query = editionId ? `?editionId=${encodeURIComponent(editionId)}` : "";
       const body = obj(await roleCall("memberships/own", token, "GET", `${cfg.projectsApiUrl}/projects/${project()}/memberships/person/${encodeURIComponent(personId)}${query}`));
       const memberships = (Array.isArray(body.memberships) ? body.memberships : []).map(toMembership).filter((m): m is Membership => m !== null && m.personId === personId);
-      return { editionId: str(body.editionId), memberships };
+      const involved = (Array.isArray(body.involved) ? body.involved : [])
+        .map((x) => obj(x))
+        .filter((x) => str(x.personId) && str(x.role) && x.personId !== personId)
+        .map((x) => ({ personId: x.personId as string, role: x.role as string, editionId: str(x.editionId) }));
+      return { editionId: str(body.editionId), memberships, involved };
     },
 
     async addMembership(token, input) {

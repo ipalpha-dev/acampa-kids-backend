@@ -4,7 +4,6 @@ import { recordSms } from "../models/smsUsage";
 import { campEditionId } from "./acting";
 import { coreClient, ipalphaEnabled } from "./ipalpha";
 import { MESSAGE_RECIPIENTS_MAX, type MessageAudience, type MessageRecipient, type MessageStatus } from "./ipalpha/coreClient";
-import { firstName, namesOf } from "./people";
 
 /**
  * Every SMS / e-mail Acampa sends goes through notifications-api by personId
@@ -12,11 +11,12 @@ import { firstName, namesOf } from "./people";
  * language, renders and delivers, and logs the access for the person. Acampa
  * never sees a phone or an e-mail address.
  *
- * `{name}` (the recipient's first name, when the requester may see it) and
- * `{link}` (APP_URL) are filled in here when the template uses them and the
- * caller did not. Where Acampa cannot read the member list (a role of the
- * edition, today's birthdays), `sendToRoles` hands core an `audience` and
- * shared variables only — core resolves the people, Acampa never sees them.
+ * `{link}` (APP_URL) is filled in here when the template uses it and the
+ * caller did not. `{name}` (each recipient's own first name) and
+ * `{birthdayNames}` are filled by core — Acampa never sends them. Where Acampa
+ * cannot read the member list (a role of the edition, today's birthdays),
+ * `sendToRoles` hands core an `audience` and shared variables only — core
+ * resolves the people, Acampa never sees them.
  * Best effort: a failure is logged (counts only) and never thrown into the
  * write that triggered it.
  */
@@ -26,6 +26,11 @@ export interface SendInput {
 }
 
 export type SendSummary = Record<MessageStatus, number>;
+
+/** filled by notifications-api per recipient (decision: apps never send names) */
+const CORE_FILLED = new Set(["name", "birthdayNames"]);
+/** notifications-api cap on `audience.excludePersonIds` */
+const EXCLUDE_MAX = 1000;
 
 export function appLink(): string {
   return config.appUrl || "";
@@ -53,17 +58,7 @@ export async function sendMessage(key: TemplateKey, recipients: SendInput[], lab
   const slug = TEMPLATE_SLUGS[key];
   const vars = templateDefault(slug)?.variables ?? [];
   try {
-    const names = vars.includes("name") && unique.some((r) => r.variables?.name === undefined) ? await namesOf(unique.map((r) => r.personId)) : new Map();
-    const link = appLink();
-    const full: MessageRecipient[] = unique.map((r) => {
-      const v: Record<string, string> = {};
-      for (const [k, val] of Object.entries(r.variables ?? {})) v[k] = String(val);
-      if (vars.includes("name") && v.name === undefined) v.name = firstName(names.get(r.personId)?.name ?? "");
-      if (vars.includes("link") && v.link === undefined) v.link = link;
-      // notifications-api refuses the whole batch when a declared variable is missing (§18): never leave one out
-      for (const k of vars) v[k] ??= "";
-      return { personId: r.personId, variables: v };
-    });
+    const full: MessageRecipient[] = unique.map((r) => ({ personId: r.personId, variables: appVariables(vars, r.variables) }));
     const editionId = await campEditionId();
     const sms = await sendSlug(slug, full, editionId);
     void recordSms({ at: new Date(), templateSlug: slug, channel: "sms", sent: sms.sent });
@@ -79,30 +74,40 @@ export async function sendMessage(key: TemplateKey, recipients: SendInput[], lab
   }
 }
 
+/** The variables Acampa sends: the caller's, `{link}`, every other declared one ("" when unset) — never the ones core fills. */
+function appVariables(declared: readonly string[], given: Record<string, string | number> = {}): Record<string, string> {
+  const v: Record<string, string> = {};
+  for (const [k, val] of Object.entries(given)) if (!CORE_FILLED.has(k)) v[k] = String(val);
+  if (declared.includes("link") && v.link === undefined) v.link = appLink();
+  // notifications-api refuses the whole batch when a declared variable is missing (§18): never leave one out
+  for (const k of declared) if (!CORE_FILLED.has(k)) v[k] ??= "";
+  return v;
+}
+
 /**
  * Sends one catalog message (and its e-mail twin) to the members of `roles` in the camp's edition (+ project-wide),
- * optionally only those whose birthday is today. Variables are shared by everyone. Returns how many messages core
+ * minus `excludePersonIds`; with `birthdayOf` core sends only to those who see a birthday kid of those roles
+ * (`{birthdayNames}`). Variables are shared by everyone. Returns how many messages core
  * accepted, null on failure.
  */
 export async function sendToRoles(
   key: TemplateKey,
   roles: string[],
-  opts: { birthdayToday?: boolean; variables?: Record<string, string | number> } = {},
+  opts: { birthdayOf?: string[]; excludePersonIds?: string[]; variables?: Record<string, string | number> } = {},
   label: string = key,
 ): Promise<number | null> {
   if (roles.length === 0 || !ipalphaEnabled()) return null;
   const slug = TEMPLATE_SLUGS[key];
   try {
     const editionId = await campEditionId();
-    const audience: MessageAudience = { roles, ...(editionId ? { editionId } : {}), ...(opts.birthdayToday ? { birthdayToday: true } : {}) };
-    const shared = (s: string): Record<string, string> => {
-      const v: Record<string, string> = {};
-      for (const [k, val] of Object.entries(opts.variables ?? {})) v[k] = String(val);
-      const vars = templateDefault(s)?.variables ?? [];
-      if (vars.includes("link") && v.link === undefined) v.link = appLink();
-      for (const k of vars) v[k] ??= "";
-      return v;
+    const exclude = [...new Set(opts.excludePersonIds ?? [])].slice(0, EXCLUDE_MAX);
+    const audience: MessageAudience = {
+      roles,
+      ...(editionId ? { editionId } : {}),
+      ...(opts.birthdayOf?.length ? { birthdayOf: { roles: opts.birthdayOf } } : {}),
+      ...(exclude.length ? { excludePersonIds: exclude } : {}),
     };
+    const shared = (s: string) => appVariables(templateDefault(s)?.variables ?? [], opts.variables);
     const { accepted } = await coreClient().sendTemplateToAudience({ templateSlug: slug, audience, variables: shared(slug) });
     void recordSms({ at: new Date(), templateSlug: slug, channel: "sms", sent: accepted });
     if (hasEmailTwin(slug)) {

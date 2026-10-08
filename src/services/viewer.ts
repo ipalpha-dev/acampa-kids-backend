@@ -3,7 +3,7 @@ import type { Session } from "../types";
 
 /**
  * The session a request (or a realtime payload, or work it queued) acts for. Core reads that need a person's
- * role token — names (`seesNamesOf`), member lists, the editions list — take the token from here. No viewer
+ * role token — names (`seesPersonsOf`), member lists, the editions list — take the token from here. No viewer
  * (a timer, a webhook) = no role token: those paths drop the read (names) or go through notifications-api
  * `audience` (member lists).
  */

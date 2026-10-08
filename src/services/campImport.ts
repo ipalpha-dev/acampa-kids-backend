@@ -9,7 +9,7 @@ import { insertStaff, listStaff, updateStaff } from "../models/staff";
 import { insertTeam, listTeams } from "../models/teams";
 import { insertTransport, listTransports } from "../models/transports";
 import { activeCampId, withCamp } from "./campContext";
-import { grantRole, type CoordinationTokens } from "./coreRegistration";
+import { addFamilies, grantRole, type CoordinationTokens } from "./coreRegistration";
 import { responsiblesOf } from "./members";
 import { namesOf } from "./people";
 import { coreClient } from "./ipalpha";
@@ -319,7 +319,7 @@ async function importCampers(sourceCampers: Camper[], opts: ImportOptions, idMap
       const parents = responsibles.get(src._id) ?? [];
       try {
         await coreClient().addMembership(opts.core.tokens.projects, { personId: src._id, role: "participante", editionId: opts.core.editionId, involved: parents.map((personId) => ({ personId, purpose: "responsible" as const, kinds: [] })) });
-        for (const parent of parents) await grantRole(opts.core.tokens, parent, "responsavel", opts.core.editionId);
+        await addFamilies(opts.core.tokens, parents, opts.core.editionId);
       } catch (err) {
         if (!(err instanceof IpalphaRejected)) throw err;
         membershipsFailed++;

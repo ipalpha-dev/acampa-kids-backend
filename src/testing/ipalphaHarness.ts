@@ -18,6 +18,7 @@ import { ensureDispatchDeliveryIndexes } from "../models/dispatchDeliveries";
 import { clearImportMemory } from "../services/personImports";
 import { clearImportJobs, ensureImportJobIndexes } from "../models/importJobs";
 import { ensureImportConflictIndexes } from "../models/importConflicts";
+import { ensureUserCampStateIndexes } from "../models/userCampState";
 import { ensureSessionIndexes, createSession } from "../services/session";
 import { ipalpha } from "../services/ipalpha";
 import { createIpalphaCoreClient, type RoleGrant } from "../services/ipalpha/coreClient";
@@ -44,6 +45,7 @@ export async function startTestDb(): Promise<void> {
   await ensureDispatchDeliveryIndexes();
   await ensureImportJobIndexes();
   await ensureImportConflictIndexes();
+  await ensureUserCampStateIndexes();
 }
 
 export async function stopTestDb(): Promise<void> {
@@ -103,8 +105,10 @@ export interface FakeWorld {
   memberships: FakeMembership[];
   /** `archived` is unknown to pending-kinds (projects-api 400 unknownEdition); absent = active */
   editions: { id: string; year: number; current: boolean; status?: "active" | "archived" }[];
-  /** what notifications-api was asked to send; an audience send records the members core resolved */
-  messages: { slug: string; recipients: { personId: string; variables: Record<string, string> }[]; audience?: { roles: string[]; editionId?: string; birthdayToday?: boolean } }[];
+  /** what notifications-api was asked to send; an audience send records the members core resolved (variables as core rendered them: `name`, `birthdayNames` filled) */
+  messages: { slug: string; recipients: { personId: string; variables: Record<string, string> }[]; audience?: FakeAudience }[];
+  /** roles policy `seesPersonsOf` (Round 2): role → the roles whose persons it sees (names, member lists, counts); coordenação sees all */
+  seesPersonsOf: Record<string, string[]>;
   links: { subjectId: string; agentId: string }[];
   /** persons-api link requests (§25) */
   linkRequests: { id: string; childId: string; proposedResponsibleId: string; requestedBy: string; status: string; decidedBy?: string }[];
@@ -121,6 +125,14 @@ export interface FakeWorld {
   /** projects-api pending kinds per CALLER person id (decision 87): what the project asks of them, not granted yet */
   pendingKinds: Map<string, FakePendingItem[]>;
   nextId: number;
+}
+
+export interface FakeAudience {
+  roles: string[];
+  editionId?: string;
+  birthdayToday?: boolean;
+  excludePersonIds?: string[];
+  birthdayOf?: { roles: string[] };
 }
 
 export interface FakePendingItem {
@@ -283,19 +295,23 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     if (!personCaller(call)) return json({ reason: "forbidden" }, 403);
     return json(world.editions.map((e) => ({ id: e.id, name: String(e.year), year: e.year, current: e.current })));
   });
-  // member lists: leaders / directors (the coordenação here); another role only its own involvement (the parent's own kids)
+  // Round 2: leaders / directors list everything; another role one role it `seesPersonsOf` (ids + involvement)
+  const sees = (call: FakeCall, role: string | null) => {
+    const own = String(claimsOf(call).projectRole ?? "");
+    return own === "coordenacao" || (!!role && (world.seesPersonsOf[own] ?? []).includes(role));
+  };
   core.on(`GET ${P}/memberships`, (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
-    const claims = claimsOf(call);
     const q = call.query;
-    if (!personCaller(call) || (claims.projectRole !== "coordenacao" && q.get("involvedPersonId") !== claims.sub)) return json({ reason: "forbidden" }, 403);
+    if (!personCaller(call)) return json({ reason: "forbidden" }, 403);
+    if (!sees(call, q.get("role"))) return json({ reason: "roleNotVisible" }, 403);
+    if (q.get("editionId") && q.get("editionId") !== "none" && q.get("editionId") !== claimsOf(call).editionId) return json({ reason: "editionMismatch" }, 403);
     const editionId = q.get("editionId");
     const items = world.memberships
       .filter((m) => !q.get("role") || m.role === q.get("role"))
       .filter((m) => !q.get("personId") || m.personId === q.get("personId"))
       .filter((m) => !editionId || (editionId === "none" ? !m.editionId : m.editionId === editionId))
-      .filter((m) => !q.get("involvedPersonId") || (m.involved ?? []).some((i) => i.personId === q.get("involvedPersonId")))
-      .map(toView);
+      .map((m) => ({ personId: m.personId, role: m.role, ...(m.editionId ? { editionId: m.editionId } : {}), involvedPersonIds: (m.involved ?? []).map((i) => i.personId) }));
     return json({ items, nextCursor: null });
   });
   // decision 13: a person token reads its OWN roles — that edition's (else the current one's) + project-wide
@@ -306,8 +322,12 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     const asked = call.query.get("editionId");
     if (asked && !world.editions.some((e) => e.id === asked)) return json({ reason: "unknownEdition" }, 400);
     const editionId = asked ?? world.editions.find((e) => e.current)?.id;
-    const memberships = world.memberships.filter((m) => m.personId === personId && (!m.editionId || m.editionId === editionId)).map(toView);
-    return json({ personId, ...(editionId ? { editionId } : {}), memberships });
+    const inScope = (m: FakeMembership) => !m.editionId || m.editionId === editionId;
+    const memberships = world.memberships.filter((m) => m.personId === personId && inScope(m)).map(toView);
+    const involved = world.memberships
+      .filter((m) => inScope(m) && (m.involved ?? []).some((i) => i.personId === personId))
+      .map((m) => ({ personId: m.personId, role: m.role, ...(m.editionId ? { editionId: m.editionId } : {}) }));
+    return json({ personId, ...(editionId ? { editionId } : {}), memberships, involved });
   });
   core.on(`POST ${P}/memberships`, (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
@@ -433,9 +453,9 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   });
   core.on(`POST ${P}/people/count`, (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
-    if (!personCaller(call)) return json({ reason: "forbidden" }, 403);
     // §23: project + role (+ edition) — never person ids
     const body = call.json as { personIds?: unknown; role: string; editionId?: string; filters: { healthTags?: { allergies?: string[] } } };
+    if (!personCaller(call) || !sees(call, body.role)) return json({ reason: "forbidden" }, 403);
     if (body.personIds !== undefined || !body.role) return json({ reason: "validationFailed" }, 400);
     const ids = [...new Set(world.memberships.filter((m) => m.role === body.role && (!body.editionId || m.editionId === body.editionId)).map((m) => m.personId))];
     const byTag: Record<string, number> = {};
@@ -471,23 +491,37 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     return json({ health: call.json });
   });
   core.on("GET /health-lists", (call) => refused(call) ? json({ reason: "invalidToken" }, 401) : json([{ key: "alergias", options: [{ id: "amendoim", label: { "pt-BR": "Amendoim" }, order: 0, active: true }] }, { key: "alergia-medicamentos", options: [] }, { key: "condicao-cronica", options: [] }]));
-  // exactly one of `recipients` (→ results) or `audience` + shared `variables` (→ accepted; core resolves the members)
+  // exactly one of `recipients` (→ results) or `audience` + shared `variables` (→ accepted; core resolves the members).
+  // Round 2: core fills `{name}` (and `{birthdayNames}`) — an app sending them is refused
+  const firstNameOf = (id: string) => (world.names.get(id) ?? "").split(" ")[0];
   core.on(`POST ${P}/messages`, (call) => {
-    const body = call.json as { templateSlug: string; recipients?: { personId: string; variables: Record<string, string> }[]; audience?: { roles: string[]; editionId?: string; birthdayToday?: boolean }; variables?: Record<string, string> };
+    const body = call.json as { templateSlug: string; recipients?: { personId: string; variables: Record<string, string> }[]; audience?: FakeAudience; variables?: Record<string, string> };
     if (!bearer(call).includes("notifications:send-template") || (body.recipients === undefined) === (body.audience === undefined)) return json({ reason: "validationFailed" }, 400);
+    const sent = [...(body.recipients ?? []).map((r) => r.variables ?? {}), body.variables ?? {}];
+    if (sent.some((v) => "name" in v || "birthdayNames" in v)) return json({ reason: "validationFailed", fieldErrors: ["name is filled by core"] }, 400);
     if (body.recipients) {
-      world.messages.push({ slug: body.templateSlug, recipients: body.recipients });
+      world.messages.push({ slug: body.templateSlug, recipients: body.recipients.map((r) => ({ personId: r.personId, variables: { ...r.variables, name: firstNameOf(r.personId) } })) });
       return json({ results: body.recipients.map((r) => ({ personId: r.personId, status: "sent" })) });
     }
-    const { roles, editionId, birthdayToday } = body.audience!;
-    const ids = [...new Set(world.memberships.filter((m) => roles.includes(m.role) && (!m.editionId || !editionId || m.editionId === editionId)).map((m) => m.personId))].filter((id) => !birthdayToday || world.birthdays.has(id)).sort();
-    world.messages.push({ slug: body.templateSlug, recipients: ids.map((personId) => ({ personId, variables: body.variables ?? {} })), audience: body.audience });
-    return json({ accepted: ids.length });
+    const audience = body.audience!;
+    const { roles, editionId, birthdayToday, excludePersonIds = [], birthdayOf } = audience;
+    const inEdition = (m: FakeMembership) => !m.editionId || !editionId || m.editionId === editionId;
+    const roleOf = new Map<string, string>();
+    for (const m of world.memberships) if (roles.includes(m.role) && inEdition(m) && !excludePersonIds.includes(m.personId) && (!birthdayToday || world.birthdays.has(m.personId))) roleOf.set(m.personId, roleOf.get(m.personId) ?? m.role);
+    const birthdays = birthdayOf ? [...new Set(world.memberships.filter((m) => birthdayOf.roles.includes(m.role) && inEdition(m) && world.birthdays.has(m.personId)).map((m) => m))] : [];
+    const recipients: { personId: string; variables: Record<string, string> }[] = [];
+    for (const [personId, role] of [...roleOf].sort(([x], [y]) => x.localeCompare(y))) {
+      const seen = birthdays.filter((b) => role === "coordenacao" || (world.seesPersonsOf[role] ?? []).includes(b.role)).map((b) => firstNameOf(b.personId));
+      if (birthdayOf && seen.length === 0) continue;
+      recipients.push({ personId, variables: { ...(body.variables ?? {}), name: firstNameOf(personId), ...(birthdayOf ? { birthdayNames: seen.join(" & ") } : {}) } });
+    }
+    world.messages.push({ slug: body.templateSlug, recipients, audience });
+    return json({ accepted: recipients.length });
   });
 }
 
 export function emptyWorld(): FakeWorld {
-  return { links: [], linkRequests: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), phones: new Map(), births: new Map(), pendingKinds: new Map(), nextId: 0 };
+  return { links: [], linkRequests: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], seesPersonsOf: { equipe: ["participante", "responsavel"], saude: ["participante", "responsavel"], organizacao: ["participante", "responsavel", "equipe"], "checkin-onibus": ["participante"], checkin: ["participante"], responsavel: [] }, messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), phones: new Map(), births: new Map(), pendingKinds: new Map(), nextId: 0 };
 }
 
 /** Opens an Acampa session for `personId` holding `roles` (tokens signed like auth-api's) and returns the browser token. */

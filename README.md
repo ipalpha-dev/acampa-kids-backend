@@ -112,10 +112,12 @@ role to sign in.
 
 **People at use** (`services/people.ts`, `routes/people.ts`): names with the
 REQUESTER's acting role token (≤ 200 per call, the lists are PAGED) — core
-answers only who that role may see (roles policy `seesNamesOf`; leaders /
+answers only who that role may see (roles policy `seesPersonsOf`; leaders /
 directors see everyone), others come back without a name; a timer has no
-requester and reads no names. Member lists use the session's coordenação token,
-a parent's kids their own `responsavel` token, a role check the self read
+requester and reads no names. Member lists (one role, ids + involvement) use the
+session's coordenação token, else its acting one — core answers when that role
+`seesPersonsOf` the listed role; a refusal fails closed (`responsiblesHidden`).
+A parent's kids and a role check come from the self read with their own token
 (`services/members.ts`, `services/viewer.ts`). Health /
 contacts / documents with the ACTING role token (persons-api role rules
 decide; logged for the person), health-tag chips through the anonymized count
@@ -559,14 +561,20 @@ welcomes (team / families, once per camp), photos published, content changes.
 Plain `equipe` members are messaged only inside the team access window; helper
 roles and parent contacts always. Families, the coordenação / medical team
 from a non-coordenação request and the helpers of the check-in reminder go as
-a role `audience` (notifications-api resolves them; shared variables only, no
-`{name}`). Messages to the same person with the same
+a role `audience` (notifications-api resolves them, minus `excludePersonIds`
+— the author of an occurrence, helpers already checked in; shared variables
+only). `{name}` is always filled by core with each recipient's own first name —
+Acampa never sends it. Families who join the edition after its welcome went out
+(a registration, a copy from another year) get it by id. Messages to the same person with the same
 template inside `NOTIFY_COALESCE_SECONDS` collapse into the last one.
 
 **Birthdays** (decision 51): on camp days at 07:45 São Paulo (a timer + the
-hourly safety net) Acampa sends `acampa-birthday` to the audience
-`{roles: [participante], editionId, birthdayToday: true}` — notifications-api
-picks today's birthdays; Acampa never learns who, nor a date. Once per camp
+hourly safety net) Acampa sends `acampa-birthday` to the team roles
+(helpers, coordenação; plain `equipe` inside its window) as an audience with
+`birthdayOf: {roles: [participante]}` — notifications-api finds today's
+birthdays and fills `{birthdayNames}` per recipient with the kids that
+recipient's role sees (`seesPersonsOf`; none → skipped). Acampa never learns
+who, nor a date. Once per camp
 day: `settings.birthdayNoticeDay` (a camp date, not anyone's birthday). A failed
 send lifts the marker so the next run retries.
 

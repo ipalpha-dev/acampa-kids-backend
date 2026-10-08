@@ -122,7 +122,7 @@ describe("campers: camp ops + names live, health only with the acting role token
     const sent = world.messages.filter((m) => m.slug === "acampa-parent-edit-medical");
     // the caretaker by person id; saúde + coordenação as a role audience (a family cannot list them)
     expect(sent.flatMap((m) => m.recipients.map((r) => r.personId)).sort()).toEqual([ADMIN, CARE, MEDIC].sort());
-    expect(sent.find((m) => m.audience)?.audience).toEqual({ roles: ["saude", "coordenacao"], editionId: TEST_EDITION });
+    expect(sent.find((m) => m.audience)?.audience).toEqual({ roles: ["saude", "coordenacao"], editionId: TEST_EDITION, excludePersonIds: [PARENT, CARE] });
     for (const m of sent) expect(m.recipients[0].variables).toMatchObject({ kid: "Ana" });
   });
 
@@ -174,7 +174,9 @@ describe("campers: camp ops + names live, health only with the acting role token
     expect((await call("POST", `/api/campers/${KID_A}/checkin/bus`, {}, token)).status).toBe(200);
     await new Promise((r) => setTimeout(r, 20));
     const sent = world.messages.find((m) => m.slug === "acampa-bus-boarded");
-    expect(sent?.recipients).toEqual([{ personId: PARENT, variables: { kid: "Ana" } }]);
+    // `{name}` is filled by core (the fake records it as rendered); Acampa never sends it
+    expect(sent?.recipients).toEqual([{ personId: PARENT, variables: { kid: "Ana", name: "Família" } }]);
+    expect((core.callsTo("POST /projects/project-test-1/messages").at(-1)?.json as { recipients: { variables: Record<string, string> }[] }).recipients[0].variables).toEqual({ kid: "Ana" });
     const log = await (await rawDb()).collection("checkinLog").find({ personId: KID_A }).toArray();
     expect(log.map((l) => l.kind)).toEqual(["church", "bus"]);
     expect(log[0]).toMatchObject({ byPersonId: ADMIN, byRole: "coordenacao" });
@@ -344,7 +346,7 @@ describe("/api/people", () => {
     expect((await call("POST", "/api/people/names", { personIds: Array.from({ length: 201 }, (_, i) => `p${i}`) }, admin)).status).toBe(400);
   });
 
-  test("names go with the requester's acting role token; ids core leaves out (roles policy seesNamesOf) are simply absent", async () => {
+  test("names go with the requester's acting role token; ids core leaves out (roles policy seesPersonsOf) are simply absent", async () => {
     core.on("POST /projects/project-test-1/people/names", (c) => {
       const ids = (c.json as { personIds: string[] }).personIds.filter((id) => id !== KID_B);
       return new Response(JSON.stringify({ items: ids.map((id) => ({ personId: id, name: world.names.get(id) })) }), { status: 200, headers: { "content-type": "application/json" } });

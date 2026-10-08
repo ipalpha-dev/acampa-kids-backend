@@ -17,11 +17,13 @@ programme, documents, scores, photos. Details: README → "Identity, people and 
 - Roles are §10 project role keys; `services/scope.ts#ROLE_FLAGS` maps them onto scopes. A new
   helper role = a new key in core + (optionally) a flag here — never a settings list.
 - Person data at use only: names via `services/people.ts#namesOf` (the REQUESTER's acting role token —
-  `services/viewer.ts`; core omits who the role may not see, `seesNamesOf`; no viewer = no names; ≤ 200 per
+  `services/viewer.ts`; core omits who the role may not see, `seesPersonsOf`; no viewer = no names; ≤ 200 per
   call, page the lists), health / contacts with the ACTING role token (`services/acting.ts`), the list
   ♥ via persons health-flags (never a full medical read), counts by project role (no ids, acting token).
-- Member lists with the session's coordenação token, a parent's kids with their OWN `responsavel` token, a role
-  check through the self read (`services/members.ts`). Acampa holds no app-bound read scope any more: only
+- Member lists (one role, ids + involvement) with the session's coordenação token, else its acting one — core
+  answers per `seesPersonsOf`; a refusal fails closed and is shown as such, never as "nobody". A parent's kids and a
+  role check through the self read with the person's OWN token (`services/members.ts`). Never send `{name}` to
+  notifications-api (core fills it). Acampa holds no app-bound read scope any more: only
   `login:relay`, `notifications:send-template`, `dispatch:app-channel`. Where it cannot list people (timers, a
   family's request) it sends to a role `audience` (`services/messages.ts#sendToRoles`) — never a workaround list. Writes of people go through `services/coreRegistration.ts`
   with the coordenação tokens.
@@ -62,7 +64,7 @@ Do NOT:
   `409 EDITION_MISSING` without one);
 - guess sex or any person attribute with AI — sex comes from core with the name (decision 39);
   registrations send `sex` only when the sheet / form said it;
-- compute or keep birthdays — the birthday message goes to an `audience` with `birthdayToday` (decision 51);
+- compute or keep birthdays — the team's birthday notice is an `audience` with `birthdayOf` (decision 51);
   `settings.birthdayNoticeDay` is a camp date only.
 
 ## Copy

@@ -174,7 +174,9 @@ export async function registerKid(tokens: CoordinationTokens, input: { kid: KidI
     ...(child.linkId ? { onBehalf: { by: reg.responsible.personId, via: child.linkId } } : {}),
     involved: [{ personId: reg.responsible.personId, purpose: "responsible", kinds: [] }],
   });
+  const newFamily = !(await isFamilyOfEdition(reg.responsible.personId));
   await addMembership(tokens.projects, { personId: reg.responsible.personId, role: RESPONSIBLE_ROLE, editionId: input.editionId });
+  if (newFamily) await welcomeNewFamilies([reg.responsible.personId]);
   // after the membership: core's role rules reach the kid as `participante` now
   const medical = await mergeHealthInto(tokens.persons, child.personId, input.health, { isNew: child.created });
   return { kidId: child.personId, guardianId: reg.responsible.personId, created: child.created, medical };
@@ -213,6 +215,32 @@ export async function registerProposedResponsible(personsToken: string, input: {
   const person = reg.people[0];
   if (!person) throw new IpalphaRejected(502, "registrationIncomplete", {});
   return person;
+}
+
+/** Already a `responsavel` of the camp's edition? (a read that fails counts as yes: never a second welcome) */
+async function isFamilyOfEdition(personId: string): Promise<boolean> {
+  const { editionRolesOf } = await import("./members");
+  return (await editionRolesOf(personId).catch(() => [RESPONSIBLE_ROLE])).includes(RESPONSIBLE_ROLE);
+}
+
+/** Families that just joined the edition get the welcome by id when the edition's audience welcome already went out. */
+async function welcomeNewFamilies(personIds: string[]): Promise<void> {
+  if (personIds.length === 0) return;
+  const { welcomeLateFamilies } = await import("./notify");
+  void welcomeLateFamilies(personIds);
+}
+
+/** Responsáveis join the edition (a copy from another year); the ones new to it are welcomed (see `welcomeNewFamilies`). False when core refused one. */
+export async function addFamilies(tokens: CoordinationTokens, personIds: string[], editionId: string): Promise<boolean> {
+  const fresh: string[] = [];
+  let ok = true;
+  for (const personId of new Set(personIds)) {
+    const known = await isFamilyOfEdition(personId);
+    if (!(await grantRole(tokens, personId, RESPONSIBLE_ROLE, editionId))) ok = false;
+    else if (!known) fresh.push(personId);
+  }
+  await welcomeNewFamilies(fresh);
+  return ok;
 }
 
 /** A role for an existing person in the edition (helper roles from a staff spreadsheet). */
