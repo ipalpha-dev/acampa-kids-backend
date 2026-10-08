@@ -59,7 +59,7 @@ function emptyList(group: StaffKeepGroup): unknown {
 /**
  * Every team row except the people on the lists named in `keep`, plus their
  * event assignments, the kids they looked after and every list that named
- * them. Memberships in projects-api are not touched (Mordomia owns them).
+ * them. Memberships in projects-api are not touched (Oikos owns them).
  */
 export async function wipeStaff(keep: readonly StaffKeepGroup[] = []): Promise<number> {
   const db = await getDb();

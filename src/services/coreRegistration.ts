@@ -107,7 +107,7 @@ function labelOf(label: HealthList["options"][number]["label"]): string {
 /**
  * Acampa's import categories (local option ids) → the church health lists'
  * option ids by label. What has no matching option is not lost: it goes into
- * `healthNotes` as text (the coordenação asks Mordomia to add the option).
+ * `healthNotes` as text (the coordenação asks Oikos to add the option).
  */
 export async function healthToCore(token: string, health: Partial<HealthInfo>, lists?: HealthList[]): Promise<Partial<HealthInfo>> {
   const out: Partial<HealthInfo> = { ...health };

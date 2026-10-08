@@ -54,7 +54,7 @@ import { emitImportEvent, publish } from "./realtime";
  * from persons-api (`GET /imports/:id/batches`, cursor = the next batch
  * number) with the importer's own coordenação token. Batches are applied in
  * order, each once (`lastBatch` only moves forward). An import started
- * outside Acampa (Mordomia, decision 63) with no live coordenação session
+ * outside Acampa (Oikos, decision 63) with no live coordenação session
  * waits as an id only until one appears.
  *
  * Decision 78: a camp field a person changed by hand since the last import
@@ -473,7 +473,7 @@ export async function applyBatch(importId: string, batch: ImportBatch, ctx: { ca
   });
 }
 
-/** An import nobody here started (Mordomia): the person's live edition role says kid or team. */
+/** An import nobody here started (Oikos): the person's live edition role says kid or team. */
 async function subjectOfPerson(personId: string, campId: string): Promise<ImportSubject | null> {
   const roles = await editionRolesOf(personId, campId);
   if (roles.includes(PARTICIPANT_ROLE)) return "camper";
@@ -508,7 +508,7 @@ export function subjectOf(importId: string): ImportSubject | null {
 }
 
 /**
- * Import ids that arrived (Mordomia, decision 63) before any coordenação
+ * Import ids that arrived (Oikos, decision 63) before any coordenação
  * session could read them. Ids only (decision 70). Lost on restart: persons-api
  * keeps results for 30 days, and GET /api/imports/:id still adopts the import.
  */

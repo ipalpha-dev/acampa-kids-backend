@@ -365,7 +365,7 @@ describe("webhook (§21/§22): HMAC, idempotent, batches → participants", () =
     other.close();
   });
 
-  test("an import nobody here started (Mordomia): kid or team comes from the live edition role", async () => {
+  test("an import nobody here started (Oikos): kid or team comes from the live edition role", async () => {
     await sessionFor(keys, ADMIN, ["coordenacao"]);
     job = { ...job!, targets: { camper: { role: "participante" }, team: { role: "equipe" } } };
     batches = [{ batch: 1, rows: [row(1, KID_C, { transportation: carId })] }];
@@ -593,7 +593,7 @@ describe("retained import reconciliation", () => {
     expect(await findImportJob(IMPORT_ID)).toMatchObject({ status: "done", lastBatch: 1 });
   });
 
-  test("Mordomia dispatch resolves a past edition and catches up a missing first batch", async () => {
+  test("Oikos dispatch resolves a past edition and catches up a missing first batch", async () => {
     const { createCamp, setCampEditionId } = await import("../models/camps");
     const past = await createCamp({ label: "Synthetic past camp", year: 2025, createdByPersonId: ADMIN });
     await setCampEditionId(past._id, "edition-2025");

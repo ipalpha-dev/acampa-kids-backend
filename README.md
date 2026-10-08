@@ -78,7 +78,7 @@ or logged. All core HTTP goes through `services/ipalpha/coreClient.ts`.
 editions, `camps.editionId`): per edition `participante` (kids — never sign
 in), `responsavel`, `equipe`, `saude`, `organizacao`, `organizacao-jogos`,
 `pontuacao`, `coletes`, `fotografia`, `checkin`, `checkin-onibus`; project-wide
-`coordenacao` (every edition). They are granted in Mordomia (or by Acampa's
+`coordenacao` (every edition). They are granted in Oikos (or by Acampa's
 imports with the coordenação token). `services/scope.ts#ROLE_FLAGS` maps a role
 onto what it sees; the WINDOWS (check-in, bus trips, vests, team / parent
 access) stay camp ops in `settings`, and so does which vehicle each
@@ -429,7 +429,7 @@ One document per camp with the camp-wide configuration: meeting points,
 notification toggles, the windows (check-in, return bus, team / parent access,
 score suspense), `busHelpers {helpers:[{personId, vehicleId}]}` and
 `parentContacts [{id, title, personId}]`. **Who holds which helper role is not
-here any more** — it is a project role in projects-api (Mordomia). Message
+here any more** — it is a project role in projects-api (Oikos). Message
 templates: `GET|PATCH /api/settings/message-templates[/:slug]`, `POST …/seed`,
 `POST …/:slug/reset` (coordenação).
 
@@ -670,7 +670,7 @@ copied kid / team member is a new participant row in this camp (placement
 reset) plus, with the coordenação's tokens, the membership of this year's
 edition: `equipe` for the team; `participante` (the source year's responsáveis
 involved) + `responsavel` for the kids. A membership core refuses is counted in
-`membershipsFailed` (fix it in Mordomia). `onMatch: "update"` refreshes the
+`membershipsFailed` (fix it in Oikos). `onMatch: "update"` refreshes the
 camp-ops notes of a person already here; `"skip"` (default) leaves them.
 Settings: `checkinLocations`, `notifications`, `busHelpers` / `parentContacts`
 of people on this year's team; never windows, drafts, the reminder, the album

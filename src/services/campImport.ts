@@ -49,7 +49,7 @@ export interface ImportOptions {
   onMatch: "skip" | "update";
 }
 
-/** `membershipsFailed`: people copied whose membership in the target edition core refused (they need it in Mordomia). */
+/** `membershipsFailed`: people copied whose membership in the target edition core refused (they need it in Oikos). */
 export type BlockResult = { created: number; updated: number; skipped: number; membershipsFailed?: number };
 
 /** A kid of another year (names live from core; `matched` = already in the ACTIVE camp — same person id). */

@@ -48,7 +48,7 @@ export interface IpalphaConfig {
    * imports still work (webhook + reconciliation on the importer's reads).
    */
   dispatchUrl: string;
-  /** OPTIONAL (§22): the app webhook signing secret (shown once in Mordomia / Developers portal). Empty = `POST /api/dispatch/webhook` refuses. */
+  /** OPTIONAL (§22): the app webhook signing secret (shown once in Oikos / Developers portal). Empty = `POST /api/dispatch/webhook` refuses. */
   webhookSecret: string;
 }
 

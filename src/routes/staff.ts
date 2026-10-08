@@ -591,7 +591,7 @@ staff.post("/:id/move", async (c) => {
  * DELETE /api/staff/:id — the person leaves this camp's operations; the
  * `equipe` membership is removed in projects-api when the coordenação token
  * may (best effort, `membershipRemoved`). Their other project roles are
- * managed in Mordomia.
+ * managed in Oikos.
  */
 staff.delete("/:id", async (c) => {
   const id = c.req.param("id");

@@ -177,7 +177,7 @@ export function bedroomCapacity(b: Pick<Bedroom, "bunkBeds" | "singleBeds">): nu
 
 /**
  * Health category keys — the persons-api health lists (`GET /health-lists`,
- * church-wide, managed in Mordomia). Health itself lives in persons-api
+ * church-wide, managed in Oikos). Health itself lives in persons-api
  * (kind `medical`); Acampa only references the option ids.
  */
 export const STAFF_CATEGORY_KEYS = {

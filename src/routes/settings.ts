@@ -206,7 +206,7 @@ settings.get("/", async (c) => c.json({ settings: await serializeSettings(await 
  * busReturnWindow?, staffAccessWindow?, parentAccessWindow?, checkinReminder?,
  * busHelpers?: { helpers: [{ personId, vehicleId }] }, parentContacts?: [{ id,
  * title, personId }], … }. WHO holds each helper role is managed in
- * projects-api (Mordomia); the windows stay here.
+ * projects-api (Oikos); the windows stay here.
  */
 settings.put("/", requireManager, async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);

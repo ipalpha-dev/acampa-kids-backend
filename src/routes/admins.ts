@@ -9,7 +9,7 @@ import { COORDINATION_ROLE } from "../types";
 /**
  * GET /api/admins — the coordenação: every person holding the project-wide
  * `coordenacao` role in projects-api (+ the SUPER_ADMIN_PERSON_IDS owners),
- * names read live. Granting / removing the role happens in Mordomia (projects
+ * names read live. Granting / removing the role happens in Oikos (projects
  * memberships) — Acampa no longer creates admins or hands the camp over.
  */
 const admins = new Hono<{ Variables: AuthVariables }>();

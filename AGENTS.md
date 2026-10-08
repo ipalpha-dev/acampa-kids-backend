@@ -62,6 +62,6 @@ Do NOT:
 ## Copy
 
 Backend messages are pt-BR + a machine code; the frontend localizes by code (5 languages).
-Template copy is localized here (catalog) and edited in Settings / Mordomia. Pastoral language
+Template copy is localized here (catalog) and edited in Settings / Oikos. Pastoral language
 applies to every user-facing string: never blunt labels about family shape, loss, health or
 money — propose gentler options when in doubt (workspace `AGENTS.md`).
