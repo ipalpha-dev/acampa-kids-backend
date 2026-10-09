@@ -143,7 +143,7 @@ describe("no blanks, no fallbacks (Round 3b)", () => {
 
   test("more people to leave out than core takes: not sent at all (never a partial exclusion)", async () => {
     const many = Array.from({ length: 1001 }, (_, i) => `person-x${i}`);
-    expect(await sendToRoles("occurrence", [COORDINATION_ROLE], { excludePersonIds: many })).toBe(0);
+    expect(await sendToRoles("occurrence", [COORDINATION_ROLE], { excludePersonIds: many })).toBe("refused");
     expect(core.callsTo("POST /projects/project-test-1/messages")).toHaveLength(0);
   });
 

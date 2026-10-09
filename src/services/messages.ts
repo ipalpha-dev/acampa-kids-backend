@@ -145,9 +145,10 @@ export async function sendToRoles(
   const slug = TEMPLATE_SLUGS[key];
   const exclude = [...new Set(opts.excludePersonIds ?? [])];
   if (exclude.length > EXCLUDE_MAX) {
-    // core takes at most EXCLUDE_MAX: dropping some would message people who must not get it — not sent at all
-    console.warn(`[messages] ${label}: not sent — ${exclude.length} people to leave out (max ${EXCLUDE_MAX})`);
-    return 0;
+    // core takes at most EXCLUDE_MAX: dropping some would message people who must not get it — not sent at all, and
+    // answered as a refusal so a once-only mark is lifted (nothing went out)
+    console.warn(`[messages] ${label}: refused here — ${exclude.length} people to leave out (max ${EXCLUDE_MAX}), nothing sent`);
+    return "refused";
   }
   try {
     const editionId = await campEditionId();

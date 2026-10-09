@@ -251,26 +251,40 @@ describe("session life", () => {
     expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(401);
   });
 
-  test("a camp whose edition cannot be resolved (none usable by Acampa) is unavailable — never 'role not held'", async () => {
-    const token = await sessionFor(keys, PERSON, ["equipe"]);
+  test("a camp edition no longer usable by Acampa is final for a per-edition role (session ends), 503 for coordenação", async () => {
     world.editions = [];
-    const res = await call("GET", "/api/auth/me", undefined, token);
-    expect(res.status).toBe(503);
-    expect(res.body.error.code).toBe("IPALPHA_UNAVAILABLE");
-    expect(await sessionDoc(token)).not.toBeNull();
+    const coord = await sessionFor(keys, PERSON, ["coordenacao"]);
+    world.memberships = world.memberships.map((m) => (m.personId === PERSON && m.role === "coordenacao" ? { ...m, editionId: TEST_EDITION } : m));
+    const kept = await call("GET", "/api/auth/me", undefined, coord);
+    expect(kept.status).toBe(503);
+    expect(await sessionDoc(coord)).not.toBeNull();
+    const team = await sessionFor(keys, PERSON, ["equipe"]);
+    const ended = await call("GET", "/api/auth/me", undefined, team);
+    expect(ended.status).toBe(401);
+    expect(await sessionDoc(team)).toBeNull();
   });
 
-  test("an outage of the self read (or the editions list) keeps the session: 503, then back to normal", async () => {
+  test("core that cannot answer (5xx / network) keeps the session: 503, then back to normal", async () => {
     const token = await sessionFor(keys, PERSON, ["equipe"]);
     core.on(`GET /projects/${TEST_PROJECT}/memberships/person/:personId`, () => json({ reason: "unavailable" }, 503));
     expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(503);
-    core.on(`GET /projects/${TEST_PROJECT}/memberships/person/:personId`, () => json({ reason: "unknownEdition" }, 400));
-    expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(503);
+    installFakeCore(core, world);
     core.on("GET /projects/:id/editions", () => json({ reason: "unavailable" }, 503));
+    await (await rawDb()).collection("camps").updateMany({}, { $set: { editionId: null } });
     expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(503);
+    core.setDown(true);
+    expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(503);
+    core.setDown(false);
     expect(await sessionDoc(token)).not.toBeNull();
     installFakeCore(core, world);
     expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(200);
+  });
+
+  test("an edition core refuses on the self read (unknownEdition) ends a per-edition role's session", async () => {
+    const token = await sessionFor(keys, PERSON, ["equipe"]);
+    core.on(`GET /projects/${TEST_PROJECT}/memberships/person/:personId`, () => json({ reason: "unknownEdition" }, 400));
+    expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(401);
+    expect(await sessionDoc(token)).toBeNull();
   });
 
   test("only a definitive answer that the membership is gone ends the session", async () => {

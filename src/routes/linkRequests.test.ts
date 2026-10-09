@@ -168,4 +168,16 @@ describe("link requests (decision 80, CONTRACTS §25)", () => {
     const welcomes = world.messages.filter((m) => m.slug === "acampa-parent-welcome").flatMap((m) => m.recipients.map((r) => r.personId));
     expect(welcomes).toEqual([fresh.body.responsible.personId]);
   });
+
+  test("a declined proposal clears the new-family mark (ids only) — nobody is welcomed later", async () => {
+    const admin = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    const parent = await sessionFor(keys, PARENT, ["responsavel"]);
+    const proposed = await propose(admin);
+    const id = proposed.body.responsible.personId as string;
+    const marked = async () => !!(await (await rawDb()).collection("userCampState").findOne({ personId: id, joinWelcomeAt: { $exists: true } }));
+    expect(await marked()).toBe(true);
+    await call("POST", `/api/link-requests/${proposed.body.request.id}/decline`, {}, parent);
+    expect(await marked()).toBe(false);
+  });
 });
+

@@ -133,14 +133,23 @@ describe("pending kinds (decision 87)", () => {
 
   test("core refusals keep their reason; a revoked responsável token ends the session", async () => {
     const token = await sessionFor(keys, NEW_PARENT, ["responsavel"]);
-    core.on(`GET ${PENDING}`, () => json({ reason: "appMismatch" }, 403));
-    const mismatch = await call("GET", "/api/pending-kinds", undefined, token);
-    expect(mismatch.status).toBe(403);
-    expect(mismatch.body.error).toMatchObject({ code: "CORE_FORBIDDEN", reason: "appMismatch" });
+    core.on(`GET ${PENDING}`, () => json({ reason: "noGrant" }, 403));
+    const refused = await call("GET", "/api/pending-kinds", undefined, token);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toMatchObject({ code: "CORE_FORBIDDEN", reason: "noGrant" });
     core.on(`GET ${PENDING}`, () => json({ items: [], kinds: [] }));
     core.on(`POST ${PENDING}/confirm`, () => json({ reason: "invalidToken" }, 401));
     const revoked = await call("POST", "/api/pending-kinds/confirm", { kinds: ["phone"] }, token);
     expect(revoked.status).toBe(401);
     expect(revoked.body.error.code).toBe("SESSION_ENDED");
+  });
+
+  test("Acampa unlinked from the project (appMismatch) is final: the session ends like a revoke", async () => {
+    const token = await sessionFor(keys, NEW_PARENT, ["responsavel"]);
+    core.on(`GET ${PENDING}`, () => json({ reason: "appMismatch" }, 403));
+    const res = await call("GET", "/api/pending-kinds", undefined, token);
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("SESSION_ENDED");
+    expect((await call("GET", "/api/auth/me", undefined, token)).status).toBe(401);
   });
 });

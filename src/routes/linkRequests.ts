@@ -54,6 +54,8 @@ linkRequests.use("*", requireAuth);
 
 linkRequests.get("/mine", requireRole("parent"), async (c) => {
   const items = await coreClient().myLinkRequests(actingToken(c, PERSONS_RESOURCE));
+  // a proposal that ended without the family (expired / cancelled) never welcomes anyone later
+  for (const r of items) if (r.status === "expired" || r.status === "cancelled") await takeJoinWelcome(r.proposedResponsibleId);
   return c.json({ items: items.filter((r) => r.status === "pending").map(view) });
 });
 
@@ -62,7 +64,10 @@ for (const decision of ["accept", "decline"] as const) {
     const request = await coreClient().decideLinkRequest(actingToken(c, PERSONS_RESOURCE), c.req.param("id"), decision);
     console.log(`[link-requests] ${request.id} ${request.status}`);
     // a responsável new to the edition joins it now: welcomed like any family that joins late (marked at the proposal)
-    if (request.status === "accepted" && (await takeJoinWelcome(request.proposedResponsibleId))) void welcomeLateFamilies([request.proposedResponsibleId]);
+    // (declined / expired / cancelled: the mark is cleared — nobody joins)
+    if (await takeJoinWelcome(request.proposedResponsibleId)) {
+      if (request.status === "accepted") void welcomeLateFamilies([request.proposedResponsibleId]);
+    }
     // ids + status only: the names were for the screen that asked
     return c.json({ request: { id: request.id, childId: request.childId, status: request.status } });
   });

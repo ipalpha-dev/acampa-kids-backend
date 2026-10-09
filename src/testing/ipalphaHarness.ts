@@ -510,8 +510,8 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   });
   core.on("GET /health-lists", (call) => refused(call) ? json({ reason: "invalidToken" }, 401) : json([{ key: "alergias", options: [{ id: "amendoim", label: { "pt-BR": "Amendoim" }, order: 0, active: true }] }, { key: "alergia-medicamentos", options: [] }, { key: "condicao-cronica", options: [] }]));
   // exactly one of `recipients` (→ results) or `audience` + shared `variables` (→ accepted; core resolves the members).
-  // Round 3b: core fills `{name}`, `{aboutName}` (aboutPersonId) and `{birthdayNames}` — an app sending them, or any
-  // empty variable, is refused; a recipient without a name or who may not see `aboutPersonId` is skipped (no fallback);
+  // Round 3b: core fills `{name}`, `{aboutName}` (aboutPersonId) and `{birthdayNames}` — an app's values for them are
+  // ignored; any empty variable is refused; a recipient without a name or who may not see `aboutPersonId` is skipped (no fallback);
   // a PERSON-token caller who may not see `aboutPersonId` gets 403
   const firstNameOf = (id: string) => (world.names.get(id) ?? "").split(" ")[0];
   const rolesOf = (id: string) => [...new Set(world.memberships.filter((m) => m.personId === id).map((m) => m.role))];
@@ -520,8 +520,11 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   core.on(`POST ${P}/messages`, (call) => {
     const body = call.json as { templateSlug: string; recipients?: { personId: string; variables: Record<string, string> }[]; audience?: FakeAudience; variables?: Record<string, string>; aboutPersonId?: string };
     if (!bearer(call).includes("notifications:send-template") || (body.recipients === undefined) === (body.audience === undefined)) return json({ reason: "validationFailed" }, 400);
+    // core ignores what it fills itself (`name`, `aboutName`, `birthdayNames`) — its own values win
+    const ownOnly = (v: Record<string, string> = {}) => Object.fromEntries(Object.entries(v).filter(([k]) => !["name", "aboutName", "birthdayNames"].includes(k)));
+    if (body.recipients) body.recipients = body.recipients.map((r) => ({ ...r, variables: ownOnly(r.variables) }));
+    if (body.variables) body.variables = ownOnly(body.variables);
     const sent = [...(body.recipients ?? []).map((r) => r.variables ?? {}), body.variables ?? {}];
-    if (sent.some((v) => "name" in v || "aboutName" in v || "birthdayNames" in v)) return json({ reason: "validationFailed", fieldErrors: ["names are filled by core"] }, 400);
     if (sent.some((v) => Object.values(v).some((x) => typeof x !== "string" || !x.trim()))) return json({ reason: "validationFailed", fieldErrors: ["variables must not be empty"] }, 400);
     if (personCaller(call) && body.aboutPersonId) {
       const claims = claimsOf(call);

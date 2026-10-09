@@ -592,10 +592,13 @@ changes to families collapse within `NOTIFY_COALESCE_SECONDS` like the
 per-person messages. A once-only mark (welcome, photos, birthday day) is lifted
 only when core clearly refused the send — never after a timeout / network
 failure (core may have sent it) nor after a failed e-mail twin. A role audience
-with more than 1000 people to leave out is not sent (logged). A responsável new
+with more than 1000 people to leave out is not sent and counts as refused (logged). A responsável new
 to the edition who is proposed by a link request is welcomed when the family
-accepts. A camp edition that cannot be resolved, or a self read core cannot
-answer, is 503 — never "role not held"; only a definitive answer ends a session. Families who join the edition after its welcome went out
+accepts (the mark is cleared when the proposal is declined or expires). Core
+that cannot answer (network, 5xx, timeout) is 503 and keeps the session; final
+refusals end it like a revoke — the membership gone, Acampa unlinked from the
+project (`appMismatch`), or (per-edition roles) the camp's edition no longer
+served to Acampa; coordenação keeps history camps (503 there). Families who join the edition after its welcome went out
 (a registration, a copy from another year) get it by id. Messages to the same person with the same
 template inside `NOTIFY_COALESCE_SECONDS` collapse into the last one.
 

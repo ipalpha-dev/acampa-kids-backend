@@ -1,10 +1,10 @@
 import type { Context } from "hono";
 import { findCamp, setCampEditionId } from "../models/camps";
 import { coreClient } from "./ipalpha";
-import { IpalphaUnavailable, IpalphaRejected, IpalphaTokenRevoked, PERSONS_RESOURCE, PROJECTS_RESOURCE } from "./ipalpha/coreClient";
+import { IpalphaTokenRevoked, PERSONS_RESOURCE, PROJECTS_RESOURCE } from "./ipalpha/coreClient";
 import { openRoleTokens, revokeSession } from "./session";
 import { forgetSessionValidation, rememberValidation, rememberedValidation } from "./sessionValidation";
-import { holdsRole } from "./members";
+import { holdsRole, sessionRefusal } from "./members";
 import { activeCampId, currentCampId } from "./campContext";
 import { currentViewer } from "./viewer";
 import { COORDINATION_ROLE, RESPONSIBLE_ROLE, type CoreRole, type Session } from "../types";
@@ -129,8 +129,6 @@ export function coordinationJobToken(session: Session): { token: string; expires
  * projects-api answers 400 unknownEdition once that edition is archived — which
  * would end every history-camp request.
  */
-const EDITION_REASONS = new Set(["unknownEdition", "editionMismatch", "editionNotUsable"]);
-
 export async function validateSessionRole(session: Session, role: CoreRole = session.activeRole): Promise<void> {
   if (rememberedValidation(session._id, role, session.campId)) return;
   // drop it before the core calls: a check that passes then fails must not leave the old entry
@@ -142,9 +140,7 @@ export async function validateSessionRole(session: Session, role: CoreRole = ses
     await coreClient()
       .pendingKinds(token, editionId)
       .catch((err: unknown) => {
-        // an edition core cannot use for Acampa right now is "cannot tell", never "not held"
-        if (err instanceof IpalphaRejected && EDITION_REASONS.has(err.reason)) throw new IpalphaUnavailable(`pending-kinds: ${err.reason}`);
-        throw err;
+        throw sessionRefusal(err, role, "pending-kinds");
       });
     if (!(await holdsRole(session, role, session.campId))) throw new IpalphaTokenRevoked("membership removed");
     rememberValidation(session._id, role, session.campId);
