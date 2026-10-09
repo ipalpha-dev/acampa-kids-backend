@@ -1,4 +1,4 @@
-import { validateSessionRole } from "../services/acting";
+import { activeEditionId, validateSessionRole } from "../services/acting";
 import { Hono } from "hono";
 import { resolveLocale } from "../i18n";
 import { requireAuth, sessionUser, type AuthVariables } from "../middleware/auth";
@@ -45,7 +45,7 @@ auth.post("/otp/request", async (c) => {
 
   let answer;
   try {
-    answer = await coreClient().relayStart({ phone, language: authLanguage(locale), clientIp: clientIp(c) ?? undefined });
+    answer = await coreClient().relayStart({ phone, language: authLanguage(locale), clientIp: clientIp(c) ?? undefined, editionId: await activeEditionId() });
   } catch (err) {
     const mapped = mapRelayError("request", err);
     return c.json({ error: mapped.error }, mapped.status);
@@ -84,7 +84,7 @@ auth.post("/otp/verify", async (c) => {
 
   let answer;
   try {
-    answer = await coreClient().relayVerify({ challengeId, code });
+    answer = await coreClient().relayVerify({ challengeId, code, editionId: await activeEditionId() });
   } catch (err) {
     const mapped = mapRelayError("verify", err);
     return c.json({ error: mapped.error }, mapped.status);

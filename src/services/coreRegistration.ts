@@ -217,10 +217,11 @@ export async function registerProposedResponsible(personsToken: string, input: {
   return person;
 }
 
-/** Already a `responsavel` of the camp's edition? (a read that fails counts as yes: never a second welcome) */
+/** Already a `responsavel` of the camp's edition? Unknown (refused, unavailable) counts as yes: never a second welcome. */
 async function isFamilyOfEdition(personId: string): Promise<boolean> {
-  const { editionRolesOf } = await import("./members");
-  return (await editionRolesOf(personId).catch(() => [RESPONSIBLE_ROLE])).includes(RESPONSIBLE_ROLE);
+  const { editionRolesKnown } = await import("./members");
+  const roles = await editionRolesKnown(personId, [RESPONSIBLE_ROLE]).catch(() => null);
+  return roles === null || roles.includes(RESPONSIBLE_ROLE);
 }
 
 /** Families that just joined the edition get the welcome by id when the edition's audience welcome already went out. */

@@ -29,7 +29,7 @@ import { getSettings } from "../models/settings";
 import type { Role } from "../types";
 import { isSuperAdmin } from "../middleware/auth";
 import { COLLECTIONS, type Collection, type Snapshot } from "./realtime";
-import { currentViewer, withViewer } from "./viewer";
+import { currentViewer, withViewerOf } from "./viewer";
 import { canManageGallery, canSeeBedroom, canSeeDoc, canSeeScores, isParent, resolveScope, scopeEvent, scopeRoles, viewerOccurrenceGroup, type Viewer } from "./scope";
 
 /**
@@ -65,7 +65,7 @@ export async function loadCollections(viewer: Viewer, names: readonly Collection
   if (!viewer.sessionId || currentViewer()?._id === viewer.sessionId) return loadFor(viewer, names);
   const { findSession } = await import("./session");
   const session = await findSession(viewer.sessionId);
-  return session ? withViewer(session, () => loadFor(viewer, names)) : loadFor(viewer, names);
+  return withViewerOf(session, () => loadFor(viewer, names));
 }
 
 async function loadFor(viewer: Viewer, names: readonly Collection[]): Promise<Snapshot> {

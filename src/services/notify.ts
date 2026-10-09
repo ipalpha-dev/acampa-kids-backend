@@ -10,9 +10,8 @@ import { COORDINATION_ROLE, PARTICIPANT_ROLE, PREP_AUDIENCES, RESPONSIBLE_ROLE, 
 import { saoPauloWallClock, saoPauloWallClockToIso, todayInSaoPaulo } from "../utils";
 import { campPeriod } from "./camp";
 import { ipalphaEnabled } from "./ipalpha";
-import { membersOf, responsiblesOf } from "./members";
+import { membersOf, responsiblesView } from "./members";
 import { previewMessage, sendMessage, sendToRoles, type SendInput } from "./messages";
-import { firstName, namesOf } from "./people";
 import { currentViewer, withViewerOf } from "./viewer";
 import { assignmentDetail, autoRoleCovers, autoRoleFor, teamMap } from "./schedule";
 import type { TemplateKey } from "../messages/templates";
@@ -67,6 +66,16 @@ interface Pending {
 const queue = new Map<string, Pending>();
 let timer: ReturnType<typeof setTimeout> | null = null;
 
+/** A role-audience message waiting like the per-person ones: repeated saves about the same thing collapse into the last. */
+interface PendingAudience {
+  key: TemplateKey;
+  roles: string[];
+  opts: Parameters<typeof sendToRoles>[2];
+  viewer: Session | null;
+}
+
+const audienceQueue = new Map<string, PendingAudience>();
+
 /** The helper roles (not plain `equipe` / `responsavel`) — never window-gated. */
 async function helperRoles(): Promise<string[]> {
   const { ROLE_FLAGS } = await import("./scope");
@@ -94,6 +103,16 @@ async function gateOpen(p: Pending, settings: Settings, helpers: () => Promise<S
 
 function enqueue(key: TemplateKey, input: SendInput, gate: Pending["gate"]): void {
   queue.set(`${input.personId}|${key}`, { key, input, gate, viewer: currentViewer() });
+  armFlush();
+}
+
+/** `about` = what repeats collapse on (the kid, the section…) — the last one within NOTIFY_COALESCE_SECONDS goes. */
+function enqueueAudience(key: TemplateKey, about: string, roles: string[], opts: PendingAudience["opts"]): void {
+  audienceQueue.set(`${key}|${about}`, { key, roles, opts, viewer: currentViewer() });
+  armFlush();
+}
+
+function armFlush(): void {
   if (COALESCE_MS <= 0) {
     void flushNotifications();
     return;
@@ -109,9 +128,12 @@ export async function flushNotifications(): Promise<void> {
   if (timer) clearTimeout(timer);
   timer = null;
   const pending = [...queue.values()];
+  const audiences = [...audienceQueue.values()];
   queue.clear();
-  if (pending.length === 0) return;
+  audienceQueue.clear();
+  if (pending.length === 0 && audiences.length === 0) return;
   try {
+    for (const a of audiences) await withViewerOf(a.viewer, () => sendToRoles(a.key, a.roles, a.opts));
     const settings = await getSettings();
     const byViewer = new Map<string, Pending[]>();
     for (const p of pending) byViewer.set(p.viewer?._id ?? "", [...(byViewer.get(p.viewer?._id ?? "") ?? []), p]);
@@ -142,18 +164,6 @@ async function transportLabel(id: string | null): Promise<string> {
   return t ? transportLabelOf(t) : "—";
 }
 
-async function firstNames(ids: string[]): Promise<Map<string, string>> {
-  const names = await namesOf(ids);
-  return new Map(ids.map((id) => [id, firstName(names.get(id)?.name ?? "")]));
-}
-
-/** "Ana, João e Maria" (pt-BR join of first names; core renders the rest of the sentence per language) */
-function joinNames(names: string[]): string {
-  const list = names.filter(Boolean);
-  if (list.length <= 1) return list[0] ?? "";
-  return `${list.slice(0, -1).join(", ")} & ${list[list.length - 1]}`;
-}
-
 // ── check-in ─────────────────────────────────────────────────────────────────
 
 /** The team member's church check-in was recorded (by themselves or the roll call). */
@@ -170,7 +180,7 @@ export async function notifyCheckin(staff: Staff): Promise<void> {
 /**
  * At `settings.checkinReminder.at` every active team member not checked in yet is reminded (once per instant).
  * Outside the team's access window only the parents' contacts are (by id) and the helper roles (audience: a
- * timer cannot list them; the ones already checked in are excluded).
+ * timer cannot list them; the ones checked in or off this camp's active team are excluded by id).
  */
 export async function sendCheckinReminder(now = new Date()): Promise<void> {
   try {
@@ -179,11 +189,13 @@ export async function sendCheckinReminder(now = new Date()): Promise<void> {
     if (!settings.notifications.checkinReminder || !at || settings.checkinReminder.sentAt || now < at) return;
     if (!(await claimCheckinReminder(at))) return;
     const open = staffAccessOpen(settings.staffAccessWindow);
-    const staff = await listStaff({ active: true });
+    const everyone = await listStaff();
+    const staff = everyone.filter((s) => s.active);
     const team = staff.filter((s) => !s.checkin && (open || settings.parentContacts.some((p) => p.personId === s._id)));
     await sendMessage("checkinReminder", team.map((s) => ({ personId: s._id })));
-    // helpers already checked in (or just reminded by id) are left out by core
-    if (!open) await sendToRoles("checkinReminder", await helperRoles(), { excludePersonIds: [...staff.filter((s) => s.checkin).map((s) => s._id), ...team.map((s) => s._id)] });
+    // core leaves out whom Acampa knows needs no reminder: checked in, just reminded by id, or off this camp's active team
+    const known = [...everyone.filter((s) => !s.active || s.checkin).map((s) => s._id), ...team.map((s) => s._id)];
+    if (!open) await sendToRoles("checkinReminder", await helperRoles(), { excludePersonIds: known });
   } catch (err) {
     console.error("notify: checkin reminder failed", err);
   }
@@ -239,10 +251,10 @@ export async function notifyParentEdit(kid: Camper, entry: Pick<CamperChangeLog,
   try {
     const settings = await getSettings();
     if (!settings.notifications.parentEdits) return;
-    const kidName = (await firstNames([kid._id])).get(kid._id) ?? "";
     const key: TemplateKey = entry.medical ? "parentEditMedical" : "parentEditNotes";
-    if (kid.caretakerId && !settings.kidsRoomsDraft && kid.caretakerId !== entry.byPersonId) enqueue(key, { personId: kid.caretakerId, variables: { kid: kidName } }, "staff");
-    if (entry.medical) await sendToRoles("parentEditMedical", ["saude", COORDINATION_ROLE], { variables: { kid: kidName }, excludePersonIds: [entry.byPersonId, ...(kid.caretakerId ? [kid.caretakerId] : [])] });
+    const caretaker = kid.caretakerId && !settings.kidsRoomsDraft && kid.caretakerId !== entry.byPersonId ? kid.caretakerId : null;
+    if (caretaker) enqueue(key, { personId: caretaker, aboutPersonId: kid._id }, "staff");
+    if (entry.medical) enqueueAudience("parentEditMedical", kid._id, ["saude", COORDINATION_ROLE], { aboutPersonId: kid._id, excludePersonIds: [entry.byPersonId, ...(caretaker ? [caretaker] : [])] });
   } catch (err) {
     console.error("notify: parent edit failed", err);
   }
@@ -264,8 +276,7 @@ export async function notifyOccurrence(o: Occurrence): Promise<void> {
 /** A team member reached the out-of-scope badge scan threshold → every coordenação member. */
 export async function notifyForeignLookupAlert(staff: Pick<Staff, "_id">, count: number): Promise<void> {
   try {
-    const staffName = (await firstNames([staff._id])).get(staff._id) ?? "";
-    await sendToRoles("foreignLookup", [COORDINATION_ROLE], { variables: { staff: staffName, count } });
+    await sendToRoles("foreignLookup", [COORDINATION_ROLE], { aboutPersonId: staff._id, variables: { count } });
   } catch (err) {
     console.error("notify: foreign lookup alert failed", err);
   }
@@ -282,10 +293,9 @@ export async function notifyCamperChange(before: Camper | null, after: Camper | 
     const settings = await getSettings();
     if (!settings.notifications.bedroomChanges || settings.kidsRoomsDraft) return;
     const kid = (after ?? before)!;
-    const kidName = (await firstNames([kid._id])).get(kid._id) ?? "";
     const [lost, got] = await Promise.all([from ? findStaffById(from) : null, to ? findStaffById(to) : null]);
-    if (lost?.active) enqueue("kidUnassigned", { personId: lost._id, variables: { kid: kidName } }, "staff");
-    if (got?.active && after) enqueue("kidAssigned", { personId: got._id, variables: { kid: kidName, room: await bedroomName(after.bedroom) } }, "staff");
+    if (lost?.active) enqueue("kidUnassigned", { personId: lost._id, aboutPersonId: kid._id }, "staff");
+    if (got?.active && after) enqueue("kidAssigned", { personId: got._id, aboutPersonId: kid._id, variables: { room: await bedroomName(after.bedroom) } }, "staff");
   } catch (err) {
     console.error("notify: camper change failed", err);
   }
@@ -297,9 +307,10 @@ export async function notifyCaretakerChange(kids: Camper[], from: Staff, to: Sta
     if (kids.length === 0) return;
     const settings = await getSettings();
     if (!settings.notifications.bedroomChanges || settings.kidsRoomsDraft) return;
-    const names = joinNames([...(await firstNames(kids.map((k) => k._id))).values()]);
-    if (from.active) enqueue("kidUnassigned", { personId: from._id, variables: { kid: names } }, "staff");
-    if (to?.active) enqueue("kidAssigned", { personId: to._id, variables: { kid: names, room: await bedroomName(kids[0].bedroom) } }, "staff");
+    const one = kids.length === 1 ? kids[0]._id : undefined;
+    const room = await bedroomName(kids[0].bedroom);
+    if (from.active) enqueue(one ? "kidUnassigned" : "kidsUnassigned", { personId: from._id, ...(one ? { aboutPersonId: one } : { variables: { count: kids.length } }) }, "staff");
+    if (to?.active) enqueue(one ? "kidAssigned" : "kidsAssigned", { personId: to._id, ...(one ? { aboutPersonId: one, variables: { room } } : { variables: { count: kids.length, room } }) }, "staff");
   } catch (err) {
     console.error("notify: caretaker change failed", err);
   }
@@ -328,8 +339,8 @@ export async function notifyStaffChange(before: Staff, after: Staff): Promise<vo
 /** One person's slice of the bulk room apply — which messages they get. */
 export interface RoomsAppliedMessage {
   staffId: string;
-  /** catalog keys + variables, in send order */
-  messages: { key: TemplateKey; variables: Record<string, string> }[];
+  /** catalog keys + variables (+ the kid it is about, `{aboutName}` filled by core), in send order */
+  messages: { key: TemplateKey; variables: Record<string, string>; aboutPersonId?: string }[];
   /** pt-BR preview of the first message (the settings dialog shows it) */
   text: string;
 }
@@ -337,7 +348,7 @@ export interface RoomsAppliedMessage {
 /**
  * Pure core of notifyRoomsApplied: given before/after + settings + rooms,
  * who gets which message. Same gates as the individual writes (staffChanges /
- * bedroomChanges, the kids-rooms draft). `kidNames` maps kid ids to first names.
+ * bedroomChanges, the kids-rooms draft). `kidNames` (first names, the requester's view) only fill the preview.
  */
 export function roomsAppliedMessages(
   before: { staff: Staff[]; campers: Camper[] },
@@ -368,10 +379,12 @@ export function roomsAppliedMessages(
     if (was.bedroom !== s.bedroom && n.staffChanges && !settings.kidsRoomsDraft) messages.push({ key: "myRoom", variables: { room: roomName(s.bedroom) } });
     if (was.roomRole !== s.roomRole && n.staffChanges) messages.push({ key: s.roomRole === "caretaker" ? "myRoomCaretaker" : "myRoomHelper", variables: {} });
     if (gained.length && n.bedroomChanges && !settings.kidsRoomsDraft) {
-      messages.push({ key: "kidAssigned", variables: { kid: joinNames(gained.map((k) => kidNames.get(k._id) ?? "")), room: roomName(s.bedroom) } });
+      messages.push(gained.length === 1 ? { key: "kidAssigned", aboutPersonId: gained[0]._id, variables: { room: roomName(s.bedroom) } } : { key: "kidsAssigned", variables: { count: String(gained.length), room: roomName(s.bedroom) } });
     }
     if (messages.length === 0) continue;
-    out.push({ staffId: s._id, messages, text: previewMessage(messages[0].key, messages[0].variables) });
+    const first = messages[0];
+    const aboutName = first.aboutPersonId ? kidNames.get(first.aboutPersonId) : undefined;
+    out.push({ staffId: s._id, messages, text: previewMessage(first.key, { ...first.variables, ...(aboutName ? { aboutName } : {}) }) });
   }
   return out;
 }
@@ -380,9 +393,8 @@ export async function notifyRoomsApplied(before: { staff: Staff[]; campers: Camp
   try {
     const settings = await getSettings();
     const rooms = await listBedrooms();
-    const kidNames = await firstNames(after.campers.map((k) => k._id));
-    for (const m of roomsAppliedMessages(before, after, settings, rooms, kidNames)) {
-      for (const msg of m.messages) enqueue(msg.key, { personId: m.staffId, variables: msg.variables }, "staff");
+    for (const m of roomsAppliedMessages(before, after, settings, rooms)) {
+      for (const msg of m.messages) enqueue(msg.key, { personId: m.staffId, variables: msg.variables, ...(msg.aboutPersonId ? { aboutPersonId: msg.aboutPersonId } : {}) }, "staff");
     }
   } catch (err) {
     console.error("notify: rooms apply failed", err);
@@ -493,7 +505,7 @@ export async function notifyPreparationChange(before: PrepSection | null, after:
       for (const s of await teamFor("all")) if (concerned(s.roomRole)) enqueue("preparationUpdated", { personId: s._id, variables: { title: after.title } }, "staff");
     }
     if (n.parentContentChanges && concerned("parent") && staffAccessOpen((await getSettings()).parentAccessWindow)) {
-      await sendToRoles("preparationUpdated", [RESPONSIBLE_ROLE], { variables: { title: after.title } });
+      enqueueAudience("preparationUpdated", after._id, [RESPONSIBLE_ROLE], { variables: { title: after.title } });
     }
   } catch (err) {
     console.error("notify: preparation change failed", err);
@@ -522,9 +534,11 @@ export async function notifyPhotosPublished(count: number): Promise<void> {
 export async function notifyBusCheckin(kid: Camper): Promise<void> {
   try {
     if (!(await getSettings()).notifications.busCheckin) return;
-    const parents = (await responsiblesOf([kid._id])).get(kid._id) ?? [];
-    const kidName = (await firstNames([kid._id])).get(kid._id) ?? "";
-    await sendMessage("busBoarded", parents.map((personId) => ({ personId, variables: { kid: kidName } })));
+    const view = await responsiblesView([kid._id]);
+    // ids never logged: only that the acting role could not see the family
+    if (view.hidden) console.warn("notify: bus boarded not sent — the acting role does not see the kid's responsáveis (seesPersonsOf)");
+    const parents = view.byKid.get(kid._id) ?? [];
+    await sendMessage("busBoarded", parents.map((personId) => ({ personId, aboutPersonId: kid._id })));
   } catch (err) {
     console.error("notify: bus checkin failed", err);
   }

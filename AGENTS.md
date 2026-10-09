@@ -20,7 +20,7 @@ programme, documents, scores, photos. Details: README → "Identity, people and 
   `services/viewer.ts`; core omits who the role may not see, `seesPersonsOf`; no viewer = no names; ≤ 200 per
   call, page the lists), health / contacts with the ACTING role token (`services/acting.ts`), the list
   ♥ via persons health-flags (never a full medical read), counts by project role (no ids, acting token).
-- Member lists (one role, ids + involvement) with the session's coordenação token, else its acting one — core
+- Member lists (one role, ids + involvement) with the ACTING role's token only (never another role of the session) — core
   answers per `seesPersonsOf`; a refusal fails closed and is shown as such, never as "nobody". A parent's kids and a
   role check through the self read with the person's OWN token (`services/members.ts`). Never send `{name}` to
   notifications-api (core fills it). Acampa holds no app-bound read scope any more: only

@@ -295,17 +295,23 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     if (!personCaller(call)) return json({ reason: "forbidden" }, 403);
     return json(world.editions.map((e) => ({ id: e.id, name: String(e.year), year: e.year, current: e.current })));
   });
-  // Round 2: leaders / directors list everything; another role one role it `seesPersonsOf` (ids + involvement)
-  const sees = (call: FakeCall, role: string | null) => {
-    const own = String(claimsOf(call).projectRole ?? "");
-    return own === "coordenacao" || (!!role && (world.seesPersonsOf[own] ?? []).includes(role));
-  };
+  // Round 2/3: a role lists / counts / names only the roles its `seesPersonsOf` names (coordenação too: by policy, not by rank)
+  const roleSees = (own: string, role: string | null) => !!role && (world.seesPersonsOf[own] ?? []).includes(role);
+  const sees = (call: FakeCall, role: string | null) => roleSees(String(claimsOf(call).projectRole ?? ""), role);
+  /** an explicit edition other than the token's (and not `none`) → 403 editionMismatch */
+  const otherEdition = (call: FakeCall, editionId: string | null | undefined) => !!editionId && editionId !== "none" && editionId !== claimsOf(call).editionId;
+  /** visible-members: the viewer, whoever names them as involved (a responsável's kids), members of the roles their role sees */
+  const visibleTo = (viewer: string, viewerRoles: string[], target: string, editionId?: string | null) =>
+    viewer === target ||
+    world.memberships.some(
+      (m) => m.personId === target && (!m.editionId || !editionId || m.editionId === editionId) && ((m.involved ?? []).some((i) => i.personId === viewer) || viewerRoles.some((r) => roleSees(r, m.role))),
+    );
   core.on(`GET ${P}/memberships`, (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
     const q = call.query;
     if (!personCaller(call)) return json({ reason: "forbidden" }, 403);
     if (!sees(call, q.get("role"))) return json({ reason: "roleNotVisible" }, 403);
-    if (q.get("editionId") && q.get("editionId") !== "none" && q.get("editionId") !== claimsOf(call).editionId) return json({ reason: "editionMismatch" }, 403);
+    if (otherEdition(call, q.get("editionId"))) return json({ reason: "editionMismatch" }, 403);
     const editionId = q.get("editionId");
     const items = world.memberships
       .filter((m) => !q.get("role") || m.role === q.get("role"))
@@ -447,15 +453,20 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   core.on(`POST ${P}/people/names`, (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
     if (!personCaller(call)) return json({ reason: "forbidden" }, 403);
-    const ids = (call.json as { personIds: string[] }).personIds;
+    const { personIds: ids, editionId } = call.json as { personIds: string[]; editionId?: string };
     if (ids.length > 200) return json({ reason: "validationFailed" }, 400);
-    return json({ items: ids.filter((id) => world.names.has(id)).map((id) => ({ personId: id, name: world.names.get(id), ...(world.sex.has(id) ? { sex: world.sex.get(id) } : {}) })) });
+    if (otherEdition(call, editionId)) return json({ reason: "editionMismatch" }, 403);
+    const claims = claimsOf(call);
+    const viewer = String(claims.sub);
+    const shown = ids.filter((id) => world.names.has(id) && visibleTo(viewer, [String(claims.projectRole ?? "")], id, editionId ?? (claims.editionId as string | undefined)));
+    return json({ items: shown.map((id) => ({ personId: id, name: world.names.get(id), ...(world.sex.has(id) ? { sex: world.sex.get(id) } : {}) })) });
   });
   core.on(`POST ${P}/people/count`, (call) => {
     if (refused(call)) return json({ reason: "invalidToken" }, 401);
     // §23: project + role (+ edition) — never person ids
     const body = call.json as { personIds?: unknown; role: string; editionId?: string; filters: { healthTags?: { allergies?: string[] } } };
     if (!personCaller(call) || !sees(call, body.role)) return json({ reason: "forbidden" }, 403);
+    if (otherEdition(call, body.editionId)) return json({ reason: "editionMismatch" }, 403);
     if (body.personIds !== undefined || !body.role) return json({ reason: "validationFailed" }, 400);
     const ids = [...new Set(world.memberships.filter((m) => m.role === body.role && (!body.editionId || m.editionId === body.editionId)).map((m) => m.personId))];
     const byTag: Record<string, number> = {};
@@ -492,15 +503,19 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   });
   core.on("GET /health-lists", (call) => refused(call) ? json({ reason: "invalidToken" }, 401) : json([{ key: "alergias", options: [{ id: "amendoim", label: { "pt-BR": "Amendoim" }, order: 0, active: true }] }, { key: "alergia-medicamentos", options: [] }, { key: "condicao-cronica", options: [] }]));
   // exactly one of `recipients` (→ results) or `audience` + shared `variables` (→ accepted; core resolves the members).
-  // Round 2: core fills `{name}` (and `{birthdayNames}`) — an app sending them is refused
+  // Round 2/3: core fills `{name}`, `{aboutName}` (aboutPersonId; a gentle generic when the recipient may not see them)
+  // and `{birthdayNames}` — an app sending them, or any empty variable, is refused
   const firstNameOf = (id: string) => (world.names.get(id) ?? "").split(" ")[0];
+  const rolesOf = (id: string) => [...new Set(world.memberships.filter((m) => m.personId === id).map((m) => m.role))];
+  const aboutFor = (recipient: string, about?: string): Record<string, string> => (!about ? {} : { aboutName: visibleTo(recipient, rolesOf(recipient), about) ? firstNameOf(about) : "sua criança" });
   core.on(`POST ${P}/messages`, (call) => {
-    const body = call.json as { templateSlug: string; recipients?: { personId: string; variables: Record<string, string> }[]; audience?: FakeAudience; variables?: Record<string, string> };
+    const body = call.json as { templateSlug: string; recipients?: { personId: string; variables: Record<string, string> }[]; audience?: FakeAudience; variables?: Record<string, string>; aboutPersonId?: string };
     if (!bearer(call).includes("notifications:send-template") || (body.recipients === undefined) === (body.audience === undefined)) return json({ reason: "validationFailed" }, 400);
     const sent = [...(body.recipients ?? []).map((r) => r.variables ?? {}), body.variables ?? {}];
-    if (sent.some((v) => "name" in v || "birthdayNames" in v)) return json({ reason: "validationFailed", fieldErrors: ["name is filled by core"] }, 400);
+    if (sent.some((v) => "name" in v || "aboutName" in v || "birthdayNames" in v)) return json({ reason: "validationFailed", fieldErrors: ["names are filled by core"] }, 400);
+    if (sent.some((v) => Object.values(v).some((x) => typeof x !== "string" || !x.trim()))) return json({ reason: "validationFailed", fieldErrors: ["variables must not be empty"] }, 400);
     if (body.recipients) {
-      world.messages.push({ slug: body.templateSlug, recipients: body.recipients.map((r) => ({ personId: r.personId, variables: { ...r.variables, name: firstNameOf(r.personId) } })) });
+      world.messages.push({ slug: body.templateSlug, recipients: body.recipients.map((r) => ({ personId: r.personId, variables: { ...r.variables, name: firstNameOf(r.personId), ...aboutFor(r.personId, body.aboutPersonId) } })) });
       return json({ results: body.recipients.map((r) => ({ personId: r.personId, status: "sent" })) });
     }
     const audience = body.audience!;
@@ -511,17 +526,39 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     const birthdays = birthdayOf ? [...new Set(world.memberships.filter((m) => birthdayOf.roles.includes(m.role) && inEdition(m) && world.birthdays.has(m.personId)).map((m) => m))] : [];
     const recipients: { personId: string; variables: Record<string, string> }[] = [];
     for (const [personId, role] of [...roleOf].sort(([x], [y]) => x.localeCompare(y))) {
-      const seen = birthdays.filter((b) => role === "coordenacao" || (world.seesPersonsOf[role] ?? []).includes(b.role)).map((b) => firstNameOf(b.personId));
+      const seen = birthdays.filter((b) => roleSees(role, b.role)).map((b) => firstNameOf(b.personId));
       if (birthdayOf && seen.length === 0) continue;
-      recipients.push({ personId, variables: { ...(body.variables ?? {}), name: firstNameOf(personId), ...(birthdayOf ? { birthdayNames: seen.join(" & ") } : {}) } });
+      recipients.push({ personId, variables: { ...(body.variables ?? {}), name: firstNameOf(personId), ...aboutFor(personId, body.aboutPersonId), ...(birthdayOf ? { birthdayNames: seen.join(" & ") } : {}) } });
     }
     world.messages.push({ slug: body.templateSlug, recipients, audience });
     return json({ accepted: recipients.length });
   });
 }
 
+/** The Acampa roles policy Oikos holds (deployment/fixtures/2/README.md "Who sees whose persons"). */
+export function defaultSeesPersonsOf(): Record<string, string[]> {
+  const kids = "participante";
+  const families = "responsavel";
+  const team = "equipe";
+  const helpers = ["organizacao", "organizacao-jogos", "pontuacao", "saude", "coletes", "fotografia", "checkin", "checkin-onibus"];
+  return {
+    coordenacao: [kids, families, team, ...helpers, "coordenacao"],
+    equipe: [kids, families, team],
+    saude: [kids, families, team],
+    organizacao: [kids, families, team],
+    "organizacao-jogos": [kids, team],
+    pontuacao: [kids],
+    fotografia: [kids],
+    coletes: [team],
+    checkin: [kids, families],
+    "checkin-onibus": [kids, families],
+    responsavel: [],
+    participante: [],
+  };
+}
+
 export function emptyWorld(): FakeWorld {
-  return { links: [], linkRequests: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], seesPersonsOf: { equipe: ["participante", "responsavel"], saude: ["participante", "responsavel"], organizacao: ["participante", "responsavel", "equipe"], "checkin-onibus": ["participante"], checkin: ["participante"], responsavel: [] }, messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), phones: new Map(), births: new Map(), pendingKinds: new Map(), nextId: 0 };
+  return { links: [], linkRequests: [], names: new Map(), sex: new Map(), health: new Map(), memberships: [], editions: [{ id: TEST_EDITION, year: new Date().getFullYear(), current: true }], seesPersonsOf: defaultSeesPersonsOf(), messages: [], revoked: new Set(), birthdays: new Set(), medicalForbidden: new Set(), phones: new Map(), births: new Map(), pendingKinds: new Map(), nextId: 0 };
 }
 
 /** Opens an Acampa session for `personId` holding `roles` (tokens signed like auth-api's) and returns the browser token. */

@@ -10,7 +10,7 @@ describe("message template catalog", () => {
   });
 
   test("decision 45: every SMS fits 160 characters in every language with realistic values", () => {
-    const sample: Record<string, string> = { name: "Mariana", birthdayNames: "Ana Clara, João & Maria", kid: "Joãozinho", kids: "Ana & João", room: "Quarto 12", link: "https://acampa.ipalpha.org", event: "Gincana (12/09 14:00)", when: "Gincana (13/09 15:00)", duty: "Base 3 · Time Belém", title: "Regras do acampamento", team: "Time Belém", bus: "Ônibus Azul 2", staff: "Mariana", count: "12", code: "123456", minutes: "5", failed: "3", total: "40" };
+    const sample: Record<string, string> = { name: "Mariana", aboutName: "Joãozinho", birthdayNames: "Ana Clara, João & Maria", kid: "Joãozinho", kids: "Ana & João", room: "Quarto 12", link: "https://acampa.ipalpha.org", event: "Gincana (12/09 14:00)", when: "Gincana (13/09 15:00)", duty: "Base 3 · Time Belém", title: "Regras do acampamento", team: "Time Belém", bus: "Ônibus Azul 2", staff: "Mariana", count: "12", code: "123456", minutes: "5", failed: "3", total: "40" };
     for (const t of TEMPLATE_DEFAULTS.filter((x) => x.channel === "sms")) {
       for (const [lang, text] of Object.entries(t.body)) {
         const rendered = text.replace(/\{(\w+)\}/g, (_, k: string) => sample[k] ?? k);

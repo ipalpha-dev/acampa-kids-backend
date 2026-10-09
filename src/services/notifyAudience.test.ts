@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { createFakeCore, createTestKeys, emptyWorld, enableIpalpha, installFakeCore, resetData, startTestDb, stopTestDb, TEST_EDITION, type FakeCore, type FakeWorld, type TestKeys } from "../testing/ipalphaHarness";
+import { createFakeCore, createTestKeys, emptyWorld, enableIpalpha, installFakeCore, json, resetData, startTestDb, stopTestDb, TEST_EDITION, type FakeCore, type FakeWorld, type TestKeys } from "../testing/ipalphaHarness";
 import { rawDb } from "../db";
 import { setCampEditionId } from "../models/camps";
 import { EMPTY_STAFF, insertStaff } from "../models/staff";
 import { DEFAULT_SETTINGS, updateSettings } from "../models/settings";
 import { activeCampId } from "./campContext";
-import { notifyOccurrence, sendCheckinReminder, syncParentWelcomes, welcomeLateFamilies } from "./notify";
-import type { Occurrence } from "../types";
+import { flushNotifications, notifyOccurrence, notifyParentEdit, sendCheckinReminder, syncParentWelcomes, welcomeLateFamilies } from "./notify";
+import type { Camper, Occurrence } from "../types";
 
 /** Round 2: role audiences leave out who must not get them (`excludePersonIds`); families joining late are welcomed by id. */
 let keys: TestKeys;
@@ -83,5 +83,29 @@ describe("families' welcome", () => {
     expect(byId.map((m) => m.recipients.map((r) => r.personId))).toEqual([[LATE]]);
     const sentBody = core.callsTo("POST /projects/project-test-1/messages").find((c) => (c.json as { recipients?: unknown }).recipients)?.json as { recipients: { variables: Record<string, string> }[] };
     expect(Object.keys(sentBody.recipients[0].variables)).toEqual(["link"]);
+  });
+});
+
+describe("no repeats", () => {
+  test("the families' welcome is marked sent when the SMS went out, even if its e-mail twin failed", async () => {
+    await updateSettings({ notifications: { ...DEFAULT_SETTINGS.notifications, parentWelcome: true } });
+    core.on("POST /projects/project-test-1/messages", (c) => {
+      if ((c.json as { templateSlug: string }).templateSlug.endsWith("-email")) return json({ reason: "unavailable" }, 503);
+      return json({ accepted: 1 });
+    });
+    await syncParentWelcomes();
+    await syncParentWelcomes();
+    const sms = core.callsTo("POST /projects/project-test-1/messages").filter((c) => (c.json as { templateSlug: string }).templateSlug === "acampa-parent-welcome");
+    expect(sms).toHaveLength(1);
+  });
+
+  test("repeated health saves about one kid collapse into one audience send (the last)", async () => {
+    await updateSettings({ notifications: { ...DEFAULT_SETTINGS.notifications, parentEdits: true } });
+    const kid = { _id: "person-kid", caretakerId: null } as unknown as Camper;
+    await notifyParentEdit(kid, { medical: true, byPersonId: PARENT });
+    await notifyParentEdit(kid, { medical: true, byPersonId: PARENT });
+    expect(audienceOf("acampa-parent-edit-medical")).toHaveLength(0);
+    await flushNotifications();
+    expect(core.callsTo("POST /projects/project-test-1/messages").filter((c) => (c.json as { templateSlug: string }).templateSlug === "acampa-parent-edit-medical")).toHaveLength(1);
   });
 });

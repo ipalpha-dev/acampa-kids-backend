@@ -144,7 +144,8 @@ camps.put("/:id", requireAuth, requireGlobalAdmin, async (c) => {
 
   const finalYear = typeof year === "number" ? year : existing.year;
   const remap = body?.active === true || finalYear !== existing.year;
-  const editionId = remap && (finalYear !== existing.year || !existing.editionId) ? await editionOf(c.get("session"), finalYear) : undefined;
+  // activating re-checks the edition even when one is stored: it must still be usable by Acampa in Oikos
+  const editionId = remap ? await editionOf(c.get("session"), finalYear) : undefined;
   if (editionId === null) return c.json(editionMissing(finalYear), 409);
 
   if (body?.active === true) {

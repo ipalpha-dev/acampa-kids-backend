@@ -123,7 +123,9 @@ describe("campers: camp ops + names live, health only with the acting role token
     // the caretaker by person id; saúde + coordenação as a role audience (a family cannot list them)
     expect(sent.flatMap((m) => m.recipients.map((r) => r.personId)).sort()).toEqual([ADMIN, CARE, MEDIC].sort());
     expect(sent.find((m) => m.audience)?.audience).toEqual({ roles: ["saude", "coordenacao"], editionId: TEST_EDITION, excludePersonIds: [PARENT, CARE] });
-    for (const m of sent) expect(m.recipients[0].variables).toMatchObject({ kid: "Ana" });
+    // the kid travels as `aboutPersonId`; core fills `{aboutName}` (no name ever leaves Acampa)
+    for (const m of sent) expect(m.recipients[0].variables).toMatchObject({ aboutName: "Ana" });
+    for (const c of core.callsTo("POST /projects/project-test-1/messages")) expect(c.json).toMatchObject({ aboutPersonId: KID_A });
   });
 
   test("a responsável reads / edits their kid's health with THEIR responsavel role token (core's onlyInvolved rule, §19)", async () => {
@@ -175,8 +177,8 @@ describe("campers: camp ops + names live, health only with the acting role token
     await new Promise((r) => setTimeout(r, 20));
     const sent = world.messages.find((m) => m.slug === "acampa-bus-boarded");
     // `{name}` is filled by core (the fake records it as rendered); Acampa never sends it
-    expect(sent?.recipients).toEqual([{ personId: PARENT, variables: { kid: "Ana", name: "Família" } }]);
-    expect((core.callsTo("POST /projects/project-test-1/messages").at(-1)?.json as { recipients: { variables: Record<string, string> }[] }).recipients[0].variables).toEqual({ kid: "Ana" });
+    expect(sent?.recipients).toEqual([{ personId: PARENT, variables: { aboutName: "Ana", name: "Família" } }]);
+    expect(core.callsTo("POST /projects/project-test-1/messages").at(-1)?.json).toMatchObject({ aboutPersonId: KID_A, recipients: [{ personId: PARENT, variables: {} }] });
     const log = await (await rawDb()).collection("checkinLog").find({ personId: KID_A }).toArray();
     expect(log.map((l) => l.kind)).toEqual(["church", "bus"]);
     expect(log[0]).toMatchObject({ byPersonId: ADMIN, byRole: "coordenacao" });

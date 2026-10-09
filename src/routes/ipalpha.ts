@@ -1,3 +1,4 @@
+import { activeEditionId } from "../services/acting";
 import { createHash, randomBytes } from "node:crypto";
 import { Hono } from "hono";
 import { consumeLoginState, saveLoginState } from "../models/ipalphaLoginStates";
@@ -98,7 +99,7 @@ ipalphaRoutes.post("/start", async (c) => {
   const codeVerifier = randomToken();
   await saveLoginState(state, codeVerifier);
   try {
-    const { url } = await coreClient().startAuthorization({ state, codeChallenge: s256(codeVerifier), personHint });
+    const { url } = await coreClient().startAuthorization({ state, codeChallenge: s256(codeVerifier), personHint, editionId: await activeEditionId() });
     c.header("Cache-Control", "no-store");
     // `state` lets the SPA match the popup's reply; the one-time server check stays the real guard
     return c.json({ url, state });

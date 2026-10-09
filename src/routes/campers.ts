@@ -606,7 +606,7 @@ campers.post("/", async (c) => {
   if (!personId) return fail(c, "PERSON_REQUIRED", "Escolha a pessoa no IPAlpha.");
   if (await participantKind(personId)) return fail(c, "ALREADY_IN_CAMP", "Esta pessoa já está neste acampamento.", 409);
   // only a live `participante` of THIS camp's edition becomes a kid row (never an arbitrary person id)
-  if (!(await editionRolesOf(personId)).includes(PARTICIPANT_ROLE)) return fail(c, "NOT_IN_EDITION", "Esta pessoa ainda não está inscrita como participante nesta edição no IPAlpha.", 409);
+  if (!(await editionRolesOf(personId, [PARTICIPANT_ROLE])).includes(PARTICIPANT_ROLE)) return fail(c, "NOT_IN_EDITION", "Esta pessoa ainda não está inscrita como participante nesta edição no IPAlpha.", 409);
   const ops = await buildOpsPatch(body);
   if (!("patch" in ops)) return fail(c, ops.code, ops.message);
   const data = ops.patch;

@@ -5,7 +5,7 @@ import { IpalphaTokenRevoked, PERSONS_RESOURCE, PROJECTS_RESOURCE } from "./ipal
 import { openRoleTokens, revokeSession } from "./session";
 import { forgetSessionValidation, rememberValidation, rememberedValidation } from "./sessionValidation";
 import { holdsRole } from "./members";
-import { currentCampId } from "./campContext";
+import { activeCampId, currentCampId } from "./campContext";
 import { currentViewer } from "./viewer";
 import { COORDINATION_ROLE, RESPONSIBLE_ROLE, type CoreRole, type Session } from "../types";
 import type { Edition } from "./ipalpha/coreClient";
@@ -51,11 +51,11 @@ export function responsibleToken(session: Session, audience: Audience): string |
 }
 
 /**
- * The projects token member lists are read with: the session's coordenação token (leaders / directors list),
- * else its acting one (core answers when that role `seesPersonsOf` the listed role, 403 otherwise).
+ * The projects token member lists are read with: the ACTING role's only — never another role of the session (core
+ * answers when that role `seesPersonsOf` the listed role, 403 otherwise).
  */
 export function membersToken(session: Session): string {
-  return coordinationToken(session, PROJECTS_RESOURCE) ?? roleToken(session, PROJECTS_RESOURCE);
+  return roleToken(session, PROJECTS_RESOURCE);
 }
 
 /**
@@ -84,6 +84,11 @@ export async function campEditionId(campId: string = currentCampId(), session: S
   } catch {
     return null;
   }
+}
+
+/** The edition sign-in asks auth-api for: the ACTIVE camp's (role tokens bound to it); undefined = auth's default. */
+export async function activeEditionId(): Promise<string | undefined> {
+  return (await findCamp(activeCampId()))?.editionId ?? undefined;
 }
 
 /** The coordenação tokens + the camp's edition an import / registration needs, or the error to answer. */

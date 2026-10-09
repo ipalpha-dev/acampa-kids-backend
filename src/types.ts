@@ -15,6 +15,8 @@ export type Role = (typeof ROLES)[number];
 export const CORE_ROLES = ["coordenacao", "organizacao", "organizacao-jogos", "pontuacao", "saude", "coletes", "fotografia", "checkin", "checkin-onibus", "equipe", "responsavel"] as const;
 export type CoreRole = (typeof CORE_ROLES)[number] | (string & {});
 export const PARTICIPANT_ROLE = "participante";
+/** every role that serves in a camp (not a kid, not a family) */
+export const TEAM_ROLES: readonly CoreRole[] = CORE_ROLES.filter((r) => r !== "responsavel");
 export const RESPONSIBLE_ROLE = "responsavel";
 export const TEAM_ROLE = "equipe";
 export const COORDINATION_ROLE = "coordenacao";

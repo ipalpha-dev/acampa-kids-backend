@@ -112,13 +112,32 @@ role to sign in.
 
 **People at use** (`services/people.ts`, `routes/people.ts`): names with the
 REQUESTER's acting role token (≤ 200 per call, the lists are PAGED) — core
-answers only who that role may see (roles policy `seesPersonsOf`; leaders /
-directors see everyone), others come back without a name; a timer has no
-requester and reads no names. Member lists (one role, ids + involvement) use the
-session's coordenação token, else its acting one — core answers when that role
-`seesPersonsOf` the listed role; a refusal fails closed (`responsiblesHidden`).
-A parent's kids and a role check come from the self read with their own token
-(`services/members.ts`, `services/viewer.ts`). Health /
+answers only who that role may see (roles policy `seesPersonsOf`, below; a
+responsável also their own kids), others come back without a name; a timer has
+no requester and reads no names. Names are read for the session's camp edition.
+Member lists (one role, ids + involvement) use the ACTING role's token only —
+core answers when that role `seesPersonsOf` the listed role; a refusal fails
+closed (`responsiblesHidden`). A parent's kids and a role check come from the
+self read with their own token (`services/members.ts`, `services/viewer.ts`).
+Sign-in (popup and SMS relay) asks auth-api for the ACTIVE camp's edition.
+
+**The roles policy Oikos must hold for Acampa** (`seesPersonsOf` on the project
+roles — the same table as `deployment/fixtures/2/README.md` and
+`deployment/scripts/preview/provision-acampa-kids.py`). Acampa's screens and
+messages are built on exactly this; a narrower policy hides people (shown as
+such), a wider one shows more than the camp needs:
+
+| Role | Sees the persons of |
+|------|---------------------|
+| `coordenacao` | every Acampa role (project-wide) |
+| `equipe` (caretakers included), `saude`, `organizacao` | `participante`, `responsavel`, `equipe` |
+| `checkin`, `checkin-onibus` | `participante`, `responsavel` |
+| `organizacao-jogos` | `participante`, `equipe` |
+| `pontuacao`, `fotografia` | `participante` |
+| `coletes` | `equipe` |
+| `responsavel`, `participante` | — (a responsável's own kids come from the self read) |
+
+Health /
 contacts / documents with the ACTING role token (persons-api role rules
 decide; logged for the person), health-tag chips through the anonymized count
 endpoint (acting role token). Lists never show health details (neutral ♥ only) unless filtered by a
@@ -563,8 +582,12 @@ roles and parent contacts always. Families, the coordenação / medical team
 from a non-coordenação request and the helpers of the check-in reminder go as
 a role `audience` (notifications-api resolves them, minus `excludePersonIds`
 — the author of an occurrence, helpers already checked in; shared variables
-only). `{name}` is always filled by core with each recipient's own first name —
-Acampa never sends it. Families who join the edition after its welcome went out
+only). `{name}` (each recipient's own first name) and `{aboutName}` (the kid /
+team member the message is about, sent as `aboutPersonId`; a gentle generic
+when the recipient may not see them) are filled by core — Acampa never sends a
+name, and no variable goes empty. Repeated family health edits and Preparação
+changes to families collapse within `NOTIFY_COALESCE_SECONDS` like the
+per-person messages. A failed e-mail twin never lifts a once-only mark. Families who join the edition after its welcome went out
 (a registration, a copy from another year) get it by id. Messages to the same person with the same
 template inside `NOTIFY_COALESCE_SECONDS` collapse into the last one.
 

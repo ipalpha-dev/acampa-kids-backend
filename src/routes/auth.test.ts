@@ -22,6 +22,8 @@ import {
 import { rawDb } from "../db";
 import { saveLoginState } from "../models/ipalphaLoginStates";
 import { updateSettings } from "../models/settings";
+import { setCampEditionId } from "../models/camps";
+import { activeCampId } from "../services/campContext";
 import { hashToken, openRoleTokens, unseal } from "../services/session";
 import { mapRelayError } from "../services/ipalpha";
 import { IpalphaRejected, IpalphaUnavailable } from "../services/ipalpha/coreClient";
@@ -79,6 +81,14 @@ describe("popup login (/api/auth/ipalpha) → per-role tokens → Acampa session
     const par = core.callsTo("POST /oauth/par")[0].form!;
     expect(par.getAll("resource")).toEqual(["ipalpha:persons", "ipalpha:projects", "ipalpha:auth"]);
     expect(par.get("project_id")).toBe("project-test-1");
+    expect(par.has("edition_id")).toBe(false);
+  });
+
+  test("start asks for the ACTIVE camp's edition once the camp is mapped to one", async () => {
+    await setCampEditionId(activeCampId(), TEST_EDITION);
+    core.on("POST /oauth/par", () => json({ request_uri: "urn:par:1", expires_in: 600 }, 201));
+    expect((await call("POST", "/api/auth/ipalpha/start", {})).status).toBe(200);
+    expect(core.callsTo("POST /oauth/par")[0].form!.get("edition_id")).toBe(TEST_EDITION);
   });
 
   test("complete opens a session holding every role; the browser never sees a core token", async () => {
@@ -148,8 +158,19 @@ describe("SMS login through the auth-api relay v2", () => {
 
     const ver = await call("POST", "/api/auth/otp/verify", { challenge: req.body.challenge, code: "123456" });
     expect(ver.status).toBe(200);
+    expect(core.callsTo("POST /internal/login/relay/verify")[0].json).not.toHaveProperty("editionId");
     expect(ver.body.user).toMatchObject({ personId: PERSON, activeRole: "equipe", audience: "staff" });
     expect(JSON.stringify(await rawDb().then((db) => db.collection("sessions").find({}).toArray()))).not.toContain(PHONE);
+  });
+
+  test("both relay legs carry the active camp's edition", async () => {
+    await setCampEditionId(activeCampId(), TEST_EDITION);
+    core.on("POST /internal/login/relay/start", () => json({ challengeId: "challenge-1", codeLength: 6, expiresInSec: 300 }));
+    core.on("POST /internal/login/relay/verify", async () => json({ personId: PERSON, ...(await tokenAnswer(keys, PERSON, ["equipe"])) }));
+    const req = await call("POST", "/api/auth/otp/request", { phone: "(11) 98765-0011" });
+    await call("POST", "/api/auth/otp/verify", { challenge: req.body.challenge, code: "123456" });
+    expect(core.callsTo("POST /internal/login/relay/start")[0].json).toMatchObject({ editionId: TEST_EDITION });
+    expect(core.callsTo("POST /internal/login/relay/verify")[0].json).toMatchObject({ editionId: TEST_EDITION });
   });
 
   test("unknown phone / no role → 404 NOT_IN_PROJECT; no local SMS ever", async () => {

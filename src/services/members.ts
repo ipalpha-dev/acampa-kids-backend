@@ -9,9 +9,9 @@ import { COORDINATION_ROLE, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, type CoreRole, t
  * Project memberships read with the VIEWER's role tokens (services/viewer.ts). Roles and family links live in
  * core; Acampa only asks:
  *
- *   member lists      one role's memberships (ids + involvement), with the session's coordenação token, else its
- *                     acting one — core answers when that role `seesPersonsOf` the listed role; a refusal (403) or
- *                     no viewer at all (timers) → an empty list, never a guess
+ *   member lists      one role's memberships (ids + involvement), with the ACTING role's token only — core answers
+ *                     when that role `seesPersonsOf` the listed role; a refusal (403) or no viewer at all (timers)
+ *                     → an empty list, never a guess
  *   own roles         the person's own role token on the self read (`memberships/person/:me`)
  *   a parent's kids   the same self read: the memberships naming them as involved
  *
@@ -69,17 +69,17 @@ export async function membersOf(role: CoreRole, campId: string = currentCampId()
 
 /**
  * Person ids of the kids (`participante` of the camp's edition) naming `personId` as involved responsável — the
- * self read with that responsável's OWN token, so only their own session (the viewer) can answer it.
+ * self read with that responsável's OWN token, so only their own session (the viewer) acting as responsável answers it.
  */
 export async function kidsOfResponsible(personId: string, campId: string = currentCampId()): Promise<string[]> {
   const key = `${campId}|${personId}`;
   const hit = memo.get(key);
   if (hit && Date.now() - hit.at < MEMO_MS) return hit.ids;
   const session = currentViewer();
-  if (!session || session.personId !== personId || !session.roles.includes(RESPONSIBLE_ROLE)) return [];
+  if (!session || session.personId !== personId || session.activeRole !== RESPONSIBLE_ROLE) return [];
   const editionId = await campEditionId(campId);
   if (!editionId) return [];
-  const own = await coreClient().ownMemberships(roleToken(session, PROJECTS_RESOURCE, RESPONSIBLE_ROLE), personId, editionId);
+  const own = await coreClient().ownMemberships(roleToken(session, PROJECTS_RESOURCE), personId, editionId);
   const ids = [...new Set(own.involved.filter((m) => m.role === PARTICIPANT_ROLE && m.editionId === editionId).map((m) => m.personId))];
   if (memo.size > 5000) memo.clear();
   memo.set(key, { ids, at: Date.now() });
@@ -97,8 +97,8 @@ export function forgetKidsOf(personId: string): void {
 /**
  * The responsáveis of the given kids, by kid, as far as the viewer may see them: the kids' `participante` rows
  * (their `involved`) ∩ the edition's `responsavel` members the viewer's role may list (`seesPersonsOf`). `hidden` =
- * core refused one of the lists (the role does not see them) — never "no responsável". A responsável refused the
- * lists still gets themselves for their own kids.
+ * core refused one of the lists (the role does not see them) — never "no responsável". A responsável (acting as one)
+ * refused the lists still gets themselves for their own kids.
  */
 export async function responsiblesView(kidIds: string[], campId: string = currentCampId()): Promise<{ byKid: Map<string, string[]>; hidden: boolean }> {
   const byKid = new Map<string, string[]>();
@@ -109,7 +109,7 @@ export async function responsiblesView(kidIds: string[], campId: string = curren
   const token = membersToken(session);
   const [kids, responsibles] = await Promise.all([listedOrNull(token, { role: PARTICIPANT_ROLE, editionId }), listedOrNull(token, { role: RESPONSIBLE_ROLE, editionId })]);
   if (!kids || !responsibles) {
-    if (session.roles.includes(RESPONSIBLE_ROLE)) {
+    if (session.activeRole === RESPONSIBLE_ROLE) {
       const mine = new Set(await kidsOfResponsible(session.personId, campId));
       for (const id of kidIds) if (mine.has(id)) byKid.set(id, [session.personId]);
     }
@@ -144,15 +144,27 @@ export async function holdsRole(session: Session, role: CoreRole, campId: string
  * Read fresh (no memo): used right before a participant row is created. The viewer's own roles come from the
  * self read; anyone else's from a member list (coordenação).
  */
-export async function editionRolesOf(personId: string, campId: string = currentCampId()): Promise<CoreRole[]> {
+export async function editionRolesOf(personId: string, among: readonly CoreRole[], campId: string = currentCampId()): Promise<CoreRole[]> {
+  return (await editionRolesKnown(personId, among, campId)) ?? [];
+}
+
+/**
+ * Same, but null when it cannot be known (no edition, no viewer, core refused every list) — callers that must fail
+ * closed. Another person's roles are asked one listed role at a time (`among`: the roles the caller cares about), as
+ * core lists only roles the acting role sees; the refused ones count as not held.
+ */
+export async function editionRolesKnown(personId: string, among: readonly CoreRole[], campId: string = currentCampId()): Promise<CoreRole[] | null> {
   const editionId = await campEditionId(campId);
-  if (!editionId) return [];
+  if (!editionId) return null;
   const session = currentViewer();
-  const rows =
-    session?.personId === personId
-      ? (await coreClient().ownMemberships(roleToken(session, PROJECTS_RESOURCE), personId, editionId)).memberships
-      : await listedWith(viewerListToken(), { personId, editionId });
-  return [...new Set(rows.filter((m) => m.personId === personId && m.editionId === editionId).map((m) => m.role))];
+  if (session?.personId === personId) {
+    const own = (await coreClient().ownMemberships(roleToken(session, PROJECTS_RESOURCE), personId, editionId)).memberships;
+    return [...new Set(own.filter((m) => m.editionId === editionId && among.includes(m.role)).map((m) => m.role))];
+  }
+  const token = viewerListToken();
+  const lists = await Promise.all(among.map((role) => listedOrNull(token, { role, personId, editionId })));
+  if (lists.every((rows) => rows === null)) return null;
+  return [...new Set(lists.flatMap((rows) => rows ?? []).filter((m) => m.personId === personId && m.editionId === editionId && among.includes(m.role)).map((m) => m.role))];
 }
 
 /** tests only */

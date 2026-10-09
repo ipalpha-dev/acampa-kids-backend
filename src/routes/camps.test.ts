@@ -74,4 +74,16 @@ describe("camps ↔ IPAlpha editions", () => {
     expect((await findCamp(originalCamp))?.editionId).toBe(TEST_EDITION);
     expect(rollovers()).toEqual([]);
   });
+
+  test("re-activating a camp re-checks its stored edition is still usable by Acampa", async () => {
+    const token = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    const created = (await call("POST", "/api/camps", { label: "Acampa Kids próximo", year: YEAR + 1 }, token)).body.camp.id as string;
+    await activateCamp(originalCamp);
+    await refreshActiveCamp();
+    world.editions = world.editions.filter((e) => e.id !== "edition-next");
+    const res = await call("PUT", `/api/camps/${created}`, { active: true }, token);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("EDITION_MISSING");
+    expect((await findCamp(created))?.active).toBe(false);
+  });
 });

@@ -375,7 +375,7 @@ export interface IpalphaCoreClient {
 
   // ── persons-api (per-role token) ──
   /** names the token's role may see (roles policy `seesPersonsOf`), ≤ 200 ids per call; other ids are silently left out */
-  names(token: string, personIds: string[]): Promise<PersonName[]>;
+  names(token: string, personIds: string[], editionId?: string): Promise<PersonName[]>;
   /** anonymized counts of a project ROLE's members (§23: project + role (+ edition), never person ids); not logged by core */
   count(token: string, input: { role: string; editionId?: string; filters: { healthTags?: HealthTagFilter } }): Promise<CountAnswer>;
   listPeople(token: string, query: { role: string; kinds?: string[]; cursor?: string; limit?: number; q?: string }): Promise<Page<PersonRow>>;
@@ -437,9 +437,10 @@ export interface IpalphaCoreClient {
   appChannelToken(fresh?: boolean): Promise<{ token: string; expiresAt: number }>;
 
   // ── notifications-api (app client) ──
-  sendTemplate(input: { templateSlug: string; recipients: MessageRecipient[]; editionId?: string }): Promise<{ personId: string; status: MessageStatus }[]>;
+  /** `aboutPersonId`: core fills `{aboutName}` per recipient (that person's first name when the recipient may see them, else a gentle generic) */
+  sendTemplate(input: { templateSlug: string; recipients: MessageRecipient[]; editionId?: string; aboutPersonId?: string }): Promise<{ personId: string; status: MessageStatus }[]>;
   /** the members of an audience (core resolves them; shared variables only) → how many messages core accepted */
-  sendTemplateToAudience(input: { templateSlug: string; audience: MessageAudience; variables?: Record<string, string> }): Promise<{ accepted: number }>;
+  sendTemplateToAudience(input: { templateSlug: string; audience: MessageAudience; variables?: Record<string, string>; aboutPersonId?: string }): Promise<{ accepted: number }>;
 }
 
 const LINK_REQUEST_STATUSES = new Set<LinkRequest["status"]>(["pending", "accepted", "declined", "expired", "cancelled"]);
@@ -814,10 +815,10 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       );
     },
 
-    async names(token, personIds) {
+    async names(token, personIds, editionId) {
       if (personIds.length === 0) return [];
       if (personIds.length > NAMES_BATCH_MAX) throw new Error(`names: at most ${NAMES_BATCH_MAX} ids per call`);
-      const body = obj(await roleCall("people/names", token, "POST", `${cfg.personsApiUrl}/projects/${project()}/people/names`, { personIds }));
+      const body = obj(await roleCall("people/names", token, "POST", `${cfg.personsApiUrl}/projects/${project()}/people/names`, { personIds, ...(editionId ? { editionId } : {}) }));
       return (Array.isArray(body.items) ? body.items : [])
         .map((x) => obj(x))
         .filter((x) => typeof x.personId === "string" && typeof x.name === "string")
@@ -989,7 +990,7 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       return { token, expiresAt: systemTokens.get(key)?.expiresAt ?? now() + 60_000 };
     },
 
-    async sendTemplate({ templateSlug, recipients, editionId }) {
+    async sendTemplate({ templateSlug, recipients, editionId, aboutPersonId }) {
       if (recipients.length === 0) return [];
       if (recipients.length > MESSAGE_RECIPIENTS_MAX) throw new Error(`sendTemplate: at most ${MESSAGE_RECIPIENTS_MAX} recipients per call`);
       const body = obj(
@@ -997,6 +998,7 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
           templateSlug,
           recipients,
           ...(editionId ? { editionId } : {}),
+          ...(aboutPersonId ? { aboutPersonId } : {}),
         }),
       );
       return (Array.isArray(body.results) ? body.results : [])
@@ -1005,12 +1007,13 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
         .map((x) => ({ personId: x.personId as string, status: (["sent", "notMember", "noContact", "failed"].includes(x.status as string) ? x.status : "failed") as MessageStatus }));
     },
 
-    async sendTemplateToAudience({ templateSlug, audience, variables }) {
+    async sendTemplateToAudience({ templateSlug, audience, variables, aboutPersonId }) {
       const body = obj(
         await systemCall("messages/audience", NOTIFICATIONS_RESOURCE, SCOPES.sendTemplate, "POST", `${cfg.notificationsApiUrl}/projects/${project()}/messages`, {
           templateSlug,
           audience,
           ...(variables && Object.keys(variables).length ? { variables } : {}),
+          ...(aboutPersonId ? { aboutPersonId } : {}),
         }),
       );
       return { accepted: typeof body.accepted === "number" && body.accepted >= 0 ? body.accepted : 0 };

@@ -19,7 +19,7 @@ import { EMPTY_STAFF, findStaffById, insertStaff, updateStaff, type StaffData } 
 import { listTeams } from "../models/teams";
 import { listTransports } from "../models/transports";
 import { transportLabel } from "../routes/transports";
-import { bedroomCapacity, COORDINATION_ROLE, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, ROOM_ROLES, TEAM_ROLE, type RoomRole, type Session } from "../types";
+import { bedroomCapacity, COORDINATION_ROLE, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, ROOM_ROLES, TEAM_ROLE, TEAM_ROLES, type RoomRole, type Session } from "../types";
 import { withCamp } from "./campContext";
 import { coreClient } from "./ipalpha";
 import {
@@ -476,7 +476,7 @@ export async function applyBatch(importId: string, batch: ImportBatch, ctx: { ca
 
 /** An import nobody here started (Oikos): the person's live edition role says kid or team. */
 async function subjectOfPerson(personId: string, campId: string): Promise<ImportSubject | null> {
-  const roles = await editionRolesOf(personId, campId);
+  const roles = await editionRolesOf(personId, [PARTICIPANT_ROLE, ...TEAM_ROLES], campId);
   if (roles.includes(PARTICIPANT_ROLE)) return "camper";
   if (roles.some((r) => r !== RESPONSIBLE_ROLE)) return "team";
   return null;

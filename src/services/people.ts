@@ -1,4 +1,5 @@
-import { roleToken } from "./acting";
+import { campEditionId, roleToken } from "./acting";
+import { currentCampId } from "./campContext";
 import { coreClient } from "./ipalpha";
 import { IpalphaRejected, NAMES_BATCH_MAX, PERSONS_RESOURCE, type HealthBlock, type HealthTagFilter, type PersonName } from "./ipalpha/coreClient";
 import { currentViewer } from "./viewer";
@@ -31,8 +32,10 @@ export async function namesOf(personIds: readonly string[], session: Session | n
   const out = new Map<string, PersonName>();
   if (unique.length === 0 || !session) return out;
   const token = roleToken(session, PERSONS_RESOURCE);
+  // the camp's edition (a history year reads its own memberships); none known → core's edition in effect
+  const editionId = (await campEditionId(currentCampId(), session)) ?? undefined;
   try {
-    const pages = await Promise.all(chunks(unique, NAMES_BATCH_MAX).map((ids) => coreClient().names(token, ids)));
+    const pages = await Promise.all(chunks(unique, NAMES_BATCH_MAX).map((ids) => coreClient().names(token, ids, editionId)));
     for (const page of pages) for (const p of page) out.set(p.personId, p);
   } catch (err) {
     if (err instanceof IpalphaRejected && err.status === 403) return out;

@@ -12,7 +12,7 @@ import { deleteStaff, EMPTY_STAFF, findStaffById, insertStaff, listStaff, NO_VES
 import { participantKind } from "../models/participants";
 import { editionRolesOf } from "../services/members";
 import { logCheckin } from "../models/campers";
-import { bedroomCapacity, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, ROOM_ROLES, TEAM_ROLE, type RoomRole, type SessionUser, type Staff } from "../types";
+import { bedroomCapacity, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, ROOM_ROLES, TEAM_ROLE, TEAM_ROLES, type RoomRole, type SessionUser, type Staff } from "../types";
 import { canHandleVests, hideOwnBedroom, resolveScope, staffVisibility, type Scope } from "../services/scope";
 import { bedroomFullMessage, isInvalid, parseBedroom, parseTeam, parseText, parseTransport } from "./_validate";
 import { listTeams } from "../models/teams";
@@ -476,7 +476,7 @@ staff.post("/", async (c) => {
   if (!personId) return fail(c, "PERSON_REQUIRED", "Escolha a pessoa no IPAlpha.");
   if (await participantKind(personId)) return fail(c, "ALREADY_IN_CAMP", "Esta pessoa já está neste acampamento.", 409);
   // only someone serving in THIS camp's edition (equipe or a helper role) becomes a team row
-  if (!(await editionRolesOf(personId)).some((r) => r !== PARTICIPANT_ROLE && r !== RESPONSIBLE_ROLE)) return fail(c, "NOT_IN_EDITION", "Esta pessoa ainda não serve nesta edição no IPAlpha.", 409);
+  if ((await editionRolesOf(personId, TEAM_ROLES)).length === 0) return fail(c, "NOT_IN_EDITION", "Esta pessoa ainda não serve nesta edição no IPAlpha.", 409);
   const result = await buildPatch(body);
   if (!("patch" in result)) return fail(c, result.code, result.message, result.status);
   const full = await bedroomFullMessage(result.patch.bedroom ?? null, null);
