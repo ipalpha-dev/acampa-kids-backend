@@ -437,7 +437,7 @@ export interface IpalphaCoreClient {
   appChannelToken(fresh?: boolean): Promise<{ token: string; expiresAt: number }>;
 
   // ── notifications-api (app client) ──
-  /** `aboutPersonId`: core fills `{aboutName}` per recipient (that person's first name when the recipient may see them, else a gentle generic) */
+  /** `aboutPersonId`: core fills `{aboutName}` per recipient; a recipient who may not see that person (or has no name) is skipped */
   sendTemplate(input: { templateSlug: string; recipients: MessageRecipient[]; editionId?: string; aboutPersonId?: string }): Promise<{ personId: string; status: MessageStatus }[]>;
   /** the members of an audience (core resolves them; shared variables only) → how many messages core accepted */
   sendTemplateToAudience(input: { templateSlug: string; audience: MessageAudience; variables?: Record<string, string>; aboutPersonId?: string }): Promise<{ accepted: number }>;

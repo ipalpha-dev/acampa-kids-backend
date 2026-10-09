@@ -253,6 +253,7 @@ export function enableIpalpha(core: FakeCore, keys: TestKeys, env: Record<string
   const cfg = readIpalphaConfig(env);
   ipalpha.config = cfg;
   config.ipalpha = cfg;
+  config.appUrl ||= "https://acampa.test.invalid";
   ipalpha.client = createIpalphaCoreClient(cfg, { fetch: core.fetch, jwks: keys.jwks });
   return cfg;
 }
@@ -503,20 +504,27 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   });
   core.on("GET /health-lists", (call) => refused(call) ? json({ reason: "invalidToken" }, 401) : json([{ key: "alergias", options: [{ id: "amendoim", label: { "pt-BR": "Amendoim" }, order: 0, active: true }] }, { key: "alergia-medicamentos", options: [] }, { key: "condicao-cronica", options: [] }]));
   // exactly one of `recipients` (→ results) or `audience` + shared `variables` (→ accepted; core resolves the members).
-  // Round 2/3: core fills `{name}`, `{aboutName}` (aboutPersonId; a gentle generic when the recipient may not see them)
-  // and `{birthdayNames}` — an app sending them, or any empty variable, is refused
+  // Round 3b: core fills `{name}`, `{aboutName}` (aboutPersonId) and `{birthdayNames}` — an app sending them, or any
+  // empty variable, is refused; a recipient without a name or who may not see `aboutPersonId` is skipped (no fallback);
+  // a PERSON-token caller who may not see `aboutPersonId` gets 403
   const firstNameOf = (id: string) => (world.names.get(id) ?? "").split(" ")[0];
   const rolesOf = (id: string) => [...new Set(world.memberships.filter((m) => m.personId === id).map((m) => m.role))];
-  const aboutFor = (recipient: string, about?: string): Record<string, string> => (!about ? {} : { aboutName: visibleTo(recipient, rolesOf(recipient), about) ? firstNameOf(about) : "sua criança" });
+  const reachable = (recipient: string, about?: string) => !!firstNameOf(recipient) && (!about || (visibleTo(recipient, rolesOf(recipient), about) && !!firstNameOf(about)));
+  const aboutFor = (about?: string): Record<string, string> => (about ? { aboutName: firstNameOf(about) } : {});
   core.on(`POST ${P}/messages`, (call) => {
     const body = call.json as { templateSlug: string; recipients?: { personId: string; variables: Record<string, string> }[]; audience?: FakeAudience; variables?: Record<string, string>; aboutPersonId?: string };
     if (!bearer(call).includes("notifications:send-template") || (body.recipients === undefined) === (body.audience === undefined)) return json({ reason: "validationFailed" }, 400);
     const sent = [...(body.recipients ?? []).map((r) => r.variables ?? {}), body.variables ?? {}];
     if (sent.some((v) => "name" in v || "aboutName" in v || "birthdayNames" in v)) return json({ reason: "validationFailed", fieldErrors: ["names are filled by core"] }, 400);
     if (sent.some((v) => Object.values(v).some((x) => typeof x !== "string" || !x.trim()))) return json({ reason: "validationFailed", fieldErrors: ["variables must not be empty"] }, 400);
+    if (personCaller(call) && body.aboutPersonId) {
+      const claims = claimsOf(call);
+      if (!visibleTo(String(claims.sub), [String(claims.projectRole ?? "")], body.aboutPersonId)) return json({ reason: "aboutPersonNotVisible" }, 403);
+    }
     if (body.recipients) {
-      world.messages.push({ slug: body.templateSlug, recipients: body.recipients.map((r) => ({ personId: r.personId, variables: { ...r.variables, name: firstNameOf(r.personId), ...aboutFor(r.personId, body.aboutPersonId) } })) });
-      return json({ results: body.recipients.map((r) => ({ personId: r.personId, status: "sent" })) });
+      const kept = body.recipients.filter((r) => reachable(r.personId, body.aboutPersonId));
+      world.messages.push({ slug: body.templateSlug, recipients: kept.map((r) => ({ personId: r.personId, variables: { ...r.variables, name: firstNameOf(r.personId), ...aboutFor(body.aboutPersonId) } })) });
+      return json({ results: kept.map((r) => ({ personId: r.personId, status: "sent" })) });
     }
     const audience = body.audience!;
     const { roles, editionId, birthdayToday, excludePersonIds = [], birthdayOf } = audience;
@@ -526,9 +534,9 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     const birthdays = birthdayOf ? [...new Set(world.memberships.filter((m) => birthdayOf.roles.includes(m.role) && inEdition(m) && world.birthdays.has(m.personId)).map((m) => m))] : [];
     const recipients: { personId: string; variables: Record<string, string> }[] = [];
     for (const [personId, role] of [...roleOf].sort(([x], [y]) => x.localeCompare(y))) {
-      const seen = birthdays.filter((b) => roleSees(role, b.role)).map((b) => firstNameOf(b.personId));
-      if (birthdayOf && seen.length === 0) continue;
-      recipients.push({ personId, variables: { ...(body.variables ?? {}), name: firstNameOf(personId), ...aboutFor(personId, body.aboutPersonId), ...(birthdayOf ? { birthdayNames: seen.join(" & ") } : {}) } });
+      const seen = birthdays.filter((b) => roleSees(role, b.role)).map((b) => firstNameOf(b.personId)).filter(Boolean);
+      if ((birthdayOf && seen.length === 0) || !reachable(personId, body.aboutPersonId)) continue;
+      recipients.push({ personId, variables: { ...(body.variables ?? {}), name: firstNameOf(personId), ...aboutFor(body.aboutPersonId), ...(birthdayOf ? { birthdayNames: seen.join(" & ") } : {}) } });
     }
     world.messages.push({ slug: body.templateSlug, recipients, audience });
     return json({ accepted: recipients.length });

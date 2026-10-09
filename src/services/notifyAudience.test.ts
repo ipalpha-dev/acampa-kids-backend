@@ -5,6 +5,9 @@ import { setCampEditionId } from "../models/camps";
 import { EMPTY_STAFF, insertStaff } from "../models/staff";
 import { DEFAULT_SETTINGS, updateSettings } from "../models/settings";
 import { activeCampId } from "./campContext";
+import { sendMessage, sendToRoles } from "./messages";
+import { config } from "../config";
+import { COORDINATION_ROLE } from "../types";
 import { flushNotifications, notifyOccurrence, notifyParentEdit, sendCheckinReminder, syncParentWelcomes, welcomeLateFamilies } from "./notify";
 import type { Camper, Occurrence } from "../types";
 
@@ -109,3 +112,30 @@ describe("no repeats", () => {
     expect(core.callsTo("POST /projects/project-test-1/messages").filter((c) => (c.json as { templateSlug: string }).templateSlug === "acampa-parent-edit-medical")).toHaveLength(1);
   });
 });
+
+describe("no blanks, no fallbacks (Round 3b)", () => {
+  test("a message whose own variable cannot be filled is not sent at all", async () => {
+    const before = config.appUrl;
+    try {
+      config.appUrl = "";
+      expect(await sendMessage("teamWelcome", [{ personId: MEDIC }])).toEqual({ sent: 0, notMember: 0, noContact: 0, failed: 0 });
+      expect(await sendToRoles("occurrence", [COORDINATION_ROLE])).toBe(0);
+      expect(core.callsTo("POST /projects/project-test-1/messages")).toHaveLength(0);
+    } finally {
+      config.appUrl = before;
+    }
+  });
+
+  test("a recipient who may not see the person the message is about is skipped by core — never a generic", async () => {
+    const res = await sendMessage("busBoarded", [{ personId: VESTS, aboutPersonId: PARENT }, { personId: MEDIC, aboutPersonId: PARENT }]);
+    expect(res?.sent).toBe(1);
+    expect(world.messages.at(-1)?.recipients).toEqual([{ personId: MEDIC, variables: { name: "Saúde", aboutName: "Família" } }]);
+  });
+
+  test("core refusing a send (403) is logged and never thrown into the action", async () => {
+    core.on("POST /projects/project-test-1/messages", () => json({ reason: "aboutPersonNotVisible" }, 403));
+    expect(await sendMessage("busBoarded", [{ personId: MEDIC, aboutPersonId: PARENT }])).toBeNull();
+    expect(await sendToRoles("foreignLookup", [COORDINATION_ROLE], { aboutPersonId: VESTS, variables: { count: 3 } })).toBeNull();
+  });
+});
+

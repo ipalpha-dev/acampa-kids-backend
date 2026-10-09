@@ -3,7 +3,7 @@ import { emailSlug, hasEmailTwin, templateDefault, TEMPLATE_SLUGS, type Template
 import { recordSms } from "../models/smsUsage";
 import { campEditionId } from "./acting";
 import { coreClient, ipalphaEnabled } from "./ipalpha";
-import { MESSAGE_RECIPIENTS_MAX, type MessageAudience, type MessageRecipient, type MessageStatus } from "./ipalpha/coreClient";
+import { IpalphaRejected, MESSAGE_RECIPIENTS_MAX, type MessageAudience, type MessageRecipient, type MessageStatus } from "./ipalpha/coreClient";
 
 /**
  * Every SMS / e-mail Acampa sends goes through notifications-api by personId
@@ -13,9 +13,11 @@ import { MESSAGE_RECIPIENTS_MAX, type MessageAudience, type MessageRecipient, ty
  *
  * `{link}` (APP_URL) is filled in here when the template uses it and the
  * caller did not. `{name}` (each recipient's own first name), `{aboutName}`
- * (the person the message is about — `aboutPersonId`, a gentle generic when
- * the recipient may not see them) and `{birthdayNames}` are filled by core —
- * Acampa never sends a name. No variable ever goes empty. Where Acampa
+ * (the person the message is about — `aboutPersonId`; a recipient who may not
+ * see them, or has no name, is skipped by core) and
+ * `{birthdayNames}` are filled by core — Acampa never sends a name. A message
+ * whose own variables cannot be filled is skipped (logged as a count), never
+ * sent with a blank. Where Acampa
  * cannot read the member list (a role of the edition, today's birthdays),
  * `sendToRoles` hands core an `audience` and shared variables only — core
  * resolves the people, Acampa never sees them.
@@ -71,7 +73,14 @@ export async function sendMessage(key: TemplateKey, recipients: SendInput[], lab
   const slug = TEMPLATE_SLUGS[key];
   const byAbout = new Map<string, SendInput[]>();
   for (const r of unique) byAbout.set(r.aboutPersonId ?? "", [...(byAbout.get(r.aboutPersonId ?? "") ?? []), r]);
-  const as = (s: string, list: SendInput[]): MessageRecipient[] => list.map((r) => ({ personId: r.personId, variables: appVariables(templateDefault(s)?.variables ?? [], r.variables) }));
+  let skipped = 0;
+  const as = (s: string, list: SendInput[]): MessageRecipient[] =>
+    list.flatMap((r) => {
+      const variables = appVariables(templateDefault(s)?.variables ?? [], r.variables);
+      if (variables) return [{ personId: r.personId, variables }];
+      skipped++;
+      return [];
+    });
   try {
     const editionId = await campEditionId();
     const sms: SendSummary = { sent: 0, notMember: 0, noContact: 0, failed: 0 };
@@ -79,6 +88,8 @@ export async function sendMessage(key: TemplateKey, recipients: SendInput[], lab
       const part = await sendSlug(slug, as(slug, list), editionId, about || undefined);
       for (const k of Object.keys(sms) as MessageStatus[]) sms[k] += part[k];
     }
+    // counts only: a message whose variables Acampa cannot fill is never sent half-empty
+    if (skipped) console.warn(`[messages] ${label}: ${skipped} not sent — a variable could not be filled`);
     void recordSms({ at: new Date(), templateSlug: slug, channel: "sms", sent: sms.sent });
     if (hasEmailTwin(slug)) {
       await sendTwin(label, async () => {
@@ -90,19 +101,26 @@ export async function sendMessage(key: TemplateKey, recipients: SendInput[], lab
     console.log(`[messages] ${label}: ${sms.sent} sent, ${sms.noContact} without contact, ${sms.notMember} not members, ${sms.failed} failed`);
     return sms;
   } catch (err) {
-    console.error(`[messages] ${label} failed (${err instanceof Error ? err.message : "error"})`);
+    logFailure(label, err);
     return null;
   }
 }
 
-/** The variables Acampa sends: the caller's, `{link}`, every other declared one ("—" when unset, never empty) — never the ones core fills. */
-function appVariables(declared: readonly string[], given: Record<string, string | number> = {}): Record<string, string> {
+/** A refused / failed send is logged (reason only) and never surfaces to the person whose action triggered it. */
+function logFailure(label: string, err: unknown): void {
+  if (err instanceof IpalphaRejected) console.warn(`[messages] ${label} refused by core (${err.status} ${err.reason}) — not sent`);
+  else console.error(`[messages] ${label} failed (${err instanceof Error ? err.message : "error"})`);
+}
+
+/**
+ * The variables Acampa sends: the caller's and `{link}` — never the ones core fills. null when a declared one cannot be
+ * filled (empty, or APP_URL unset): that message is not sent at all, never with a blank or a placeholder.
+ */
+function appVariables(declared: readonly string[], given: Record<string, string | number> = {}): Record<string, string> | null {
   const v: Record<string, string> = {};
   for (const [k, val] of Object.entries(given)) if (!CORE_FILLED.has(k) && String(val).trim()) v[k] = String(val);
   if (declared.includes("link") && v.link === undefined && appLink()) v.link = appLink();
-  // notifications-api refuses the whole batch when a declared variable is missing (§18): never leave one out, never empty
-  for (const k of declared) if (!CORE_FILLED.has(k)) v[k] ??= "—";
-  return v;
+  return declared.every((k) => CORE_FILLED.has(k) || v[k] !== undefined) ? v : null;
 }
 
 /**
@@ -128,15 +146,20 @@ export async function sendToRoles(
       ...(opts.birthdayOf?.length ? { birthdayOf: { roles: opts.birthdayOf } } : {}),
       ...(exclude.length ? { excludePersonIds: exclude } : {}),
     };
-    const shared = (s: string) => appVariables(templateDefault(s)?.variables ?? [], opts.variables);
+    const variables = appVariables(templateDefault(slug)?.variables ?? [], opts.variables);
+    if (!variables) {
+      console.warn(`[messages] ${label}: not sent — a variable could not be filled`);
+      return 0;
+    }
     const about = opts.aboutPersonId ? { aboutPersonId: opts.aboutPersonId } : {};
-    const { accepted } = await coreClient().sendTemplateToAudience({ templateSlug: slug, audience, variables: shared(slug), ...about });
+    const { accepted } = await coreClient().sendTemplateToAudience({ templateSlug: slug, audience, variables, ...about });
     void recordSms({ at: new Date(), templateSlug: slug, channel: "sms", sent: accepted });
-    if (hasEmailTwin(slug)) await sendTwin(label, async () => (await coreClient().sendTemplateToAudience({ templateSlug: emailSlug(slug), audience, variables: shared(emailSlug(slug)), ...about })).accepted, emailSlug(slug));
+    const twin = hasEmailTwin(slug) ? appVariables(templateDefault(emailSlug(slug))?.variables ?? [], opts.variables) : null;
+    if (twin) await sendTwin(label, async () => (await coreClient().sendTemplateToAudience({ templateSlug: emailSlug(slug), audience, variables: twin, ...about })).accepted, emailSlug(slug));
     console.log(`[messages] ${label}: ${accepted} accepted for ${roles.length} role(s)`);
     return accepted;
   } catch (err) {
-    console.error(`[messages] ${label} failed (${err instanceof Error ? err.message : "error"})`);
+    logFailure(label, err);
     return null;
   }
 }

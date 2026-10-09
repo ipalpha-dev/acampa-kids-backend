@@ -583,9 +583,11 @@ from a non-coordenação request and the helpers of the check-in reminder go as
 a role `audience` (notifications-api resolves them, minus `excludePersonIds`
 — the author of an occurrence, helpers already checked in; shared variables
 only). `{name}` (each recipient's own first name) and `{aboutName}` (the kid /
-team member the message is about, sent as `aboutPersonId`; a gentle generic
-when the recipient may not see them) are filled by core — Acampa never sends a
-name, and no variable goes empty. Repeated family health edits and Preparação
+team member the message is about, sent as `aboutPersonId`) are filled by core;
+a recipient who may not see that person, or has no name, is skipped by core.
+Acampa never sends a name, and a message whose own variables it cannot fill is
+not sent (logged as a count) — never a blank or a placeholder. A refused send
+(core 403) is logged; it never fails the action that triggered it. Repeated family health edits and Preparação
 changes to families collapse within `NOTIFY_COALESCE_SECONDS` like the
 per-person messages. A failed e-mail twin never lifts a once-only mark. Families who join the edition after its welcome went out
 (a registration, a copy from another year) get it by id. Messages to the same person with the same
