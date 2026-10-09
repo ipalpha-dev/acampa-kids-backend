@@ -26,7 +26,7 @@ committed YAML or frontend `VITE_*` variables.
 | `SESSION_HOURS` | `96` (fallback only; auth-api's `sessionIdleHours` wins) |
 | `SUPER_ADMIN_PERSON_IDS` | comma list of IPAlpha person ids of the deployment owners |
 | `TRUST_PROXY_HOPS` | `1` (Traefik appends the real peer as the last `X-Forwarded-For` entry). Set to the number of appending proxies; `0` ignores the header |
-| `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (the `{link}` of the message templates) |
+| `APP_URL` | `https://ipalpha-kids-camping.kevyn.com.br` (the `{link}` of the message templates) — REQUIRED when IPAlpha is configured: the process exits at boot without it |
 | `NOTIFY_COALESCE_SECONDS` | `20` |
 | `IPALPHA_ENV` | `prod` in production; `preview` / `dev` enable the wizard's synthetic sample camp (decision 71 — anything else answers 403 `SAMPLE_DISABLED`) |
 | `AI_BASE_URL` | `https://ai-models.kevyn.com.br/v1` |

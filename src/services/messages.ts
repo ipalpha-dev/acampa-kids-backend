@@ -49,7 +49,7 @@ function chunks<T>(list: T[], size: number): T[][] {
 }
 
 async function sendSlug(slug: string, recipients: MessageRecipient[], editionId: string | null, aboutPersonId?: string): Promise<SendSummary> {
-  const summary: SendSummary = { sent: 0, notMember: 0, noContact: 0, failed: 0 };
+  const summary: SendSummary = { sent: 0, notMember: 0, noContact: 0, skipped: 0, failed: 0 };
   for (const batch of chunks(recipients, MESSAGE_RECIPIENTS_MAX)) {
     const results = await coreClient().sendTemplate({ templateSlug: slug, recipients: batch, ...(editionId ? { editionId } : {}), ...(aboutPersonId ? { aboutPersonId } : {}) });
     for (const r of results) summary[r.status]++;
@@ -83,13 +83,14 @@ export async function sendMessage(key: TemplateKey, recipients: SendInput[], lab
     });
   try {
     const editionId = await campEditionId();
-    const sms: SendSummary = { sent: 0, notMember: 0, noContact: 0, failed: 0 };
+    const sms: SendSummary = { sent: 0, notMember: 0, noContact: 0, skipped: 0, failed: 0 };
     for (const [about, list] of byAbout) {
       const part = await sendSlug(slug, as(slug, list), editionId, about || undefined);
       for (const k of Object.keys(sms) as MessageStatus[]) sms[k] += part[k];
     }
     // counts only: a message whose variables Acampa cannot fill is never sent half-empty
     if (skipped) console.warn(`[messages] ${label}: ${skipped} not sent — a variable could not be filled`);
+    sms.skipped += skipped;
     void recordSms({ at: new Date(), templateSlug: slug, channel: "sms", sent: sms.sent });
     if (hasEmailTwin(slug)) {
       await sendTwin(label, async () => {
@@ -99,6 +100,7 @@ export async function sendMessage(key: TemplateKey, recipients: SendInput[], lab
       }, emailSlug(slug));
     }
     console.log(`[messages] ${label}: ${sms.sent} sent, ${sms.noContact} without contact, ${sms.notMember} not members, ${sms.failed} failed`);
+    if (sms.skipped) console.log(`[messages] ${label}: ${sms.skipped} skipped (no name, the person not visible to them, or a variable Acampa could not fill)`);
     return sms;
   } catch (err) {
     logFailure(label, err);
@@ -123,23 +125,32 @@ function appVariables(declared: readonly string[], given: Record<string, string 
   return declared.every((k) => CORE_FILLED.has(k) || v[k] !== undefined) ? v : null;
 }
 
+/** accepted count (0 = nothing to send), or why nothing is known to have gone out */
+export type AudienceOutcome = number | "refused" | "failed";
+
 /**
  * Sends one catalog message (and its e-mail twin) to the members of `roles` in the camp's edition (+ project-wide),
  * minus `excludePersonIds`; with `birthdayOf` core sends only to those who see a birthday kid of those roles
- * (`{birthdayNames}`). Variables are shared by everyone. Returns how many messages core
- * accepted, null on failure.
+ * (`{birthdayNames}`). Variables are shared by everyone. Returns how many messages core accepted (0 = nothing to
+ * send), `refused` when core clearly said no (nothing went out — a once-only mark may be lifted), `failed` when it is
+ * unknown (timeout / network: core may have accepted — never retried).
  */
 export async function sendToRoles(
   key: TemplateKey,
   roles: string[],
   opts: { birthdayOf?: string[]; excludePersonIds?: string[]; variables?: Record<string, string | number>; aboutPersonId?: string } = {},
   label: string = key,
-): Promise<number | null> {
-  if (roles.length === 0 || !ipalphaEnabled()) return null;
+): Promise<AudienceOutcome> {
+  if (roles.length === 0 || !ipalphaEnabled()) return 0;
   const slug = TEMPLATE_SLUGS[key];
+  const exclude = [...new Set(opts.excludePersonIds ?? [])];
+  if (exclude.length > EXCLUDE_MAX) {
+    // core takes at most EXCLUDE_MAX: dropping some would message people who must not get it — not sent at all
+    console.warn(`[messages] ${label}: not sent — ${exclude.length} people to leave out (max ${EXCLUDE_MAX})`);
+    return 0;
+  }
   try {
     const editionId = await campEditionId();
-    const exclude = [...new Set(opts.excludePersonIds ?? [])].slice(0, EXCLUDE_MAX);
     const audience: MessageAudience = {
       roles,
       ...(editionId ? { editionId } : {}),
@@ -160,7 +171,7 @@ export async function sendToRoles(
     return accepted;
   } catch (err) {
     logFailure(label, err);
-    return null;
+    return err instanceof IpalphaRejected ? "refused" : "failed";
   }
 }
 

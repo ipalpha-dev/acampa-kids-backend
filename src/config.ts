@@ -125,8 +125,8 @@ export const config = {
   /** IPAlpha login (see readIpalphaConfig) */
   ipalpha: readIpalphaConfig(process.env),
 
-  /** public URL of the app — the `{link}` of the message templates (empty = no link) */
-  appUrl: process.env.APP_URL ?? "",
+  /** public URL of the app — the `{link}` of the message templates; REQUIRED with IPAlpha on (boot refuses without it) */
+  appUrl: (process.env.APP_URL ?? "").trim(),
 
   /** Private InsightFace service used to index and search gallery faces. */
   face: {
@@ -162,3 +162,8 @@ export const config = {
     transcribeKey: process.env.AI_TRANSCRIBE_KEY ?? "",
   },
 };
+
+/** Boot check: the env names (never values) that stop the process — IPAlpha on without APP_URL would send no message with a `{link}`. */
+export function fatalConfigProblems(cfg: { ipalpha: { enabled: boolean }; appUrl: string }): string[] {
+  return cfg.ipalpha.enabled && !cfg.appUrl ? ["APP_URL"] : [];
+}

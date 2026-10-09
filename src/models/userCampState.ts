@@ -100,6 +100,22 @@ export async function resetUserPhotosNoticeOf(personId: string, campId: string =
   await db.collection(COLLECTION).updateOne({ personId, campId }, { $set: { photosSmsSentAt: null } });
 }
 
+/**
+ * A responsável proposed by a link request who is NOT yet a family of the edition (decision 80): remembered (id + a
+ * date, nothing else) so their acceptance welcomes them like any family that joins late.
+ */
+export async function markJoinWelcome(personId: string, campId: string = currentCampId()): Promise<void> {
+  const db = await getDb();
+  await db.collection(COLLECTION).updateOne({ personId, campId }, { $set: { joinWelcomeAt: new Date() }, $setOnInsert: { ...EMPTY } }, { upsert: true });
+}
+
+/** Takes the mark (atomically): true once, when this person was marked. */
+export async function takeJoinWelcome(personId: string, campId: string = currentCampId()): Promise<boolean> {
+  const db = await getDb();
+  const res = await db.collection(COLLECTION).updateOne({ personId, campId, joinWelcomeAt: { $exists: true } }, { $unset: { joinWelcomeAt: "" } });
+  return res.modifiedCount === 1;
+}
+
 export async function setUserPrepDoneState(personId: string, key: string, done: boolean, campId: string = currentCampId()): Promise<UserCampState> {
   const db = await getDb();
   const res = await db.collection(COLLECTION).findOneAndUpdate(

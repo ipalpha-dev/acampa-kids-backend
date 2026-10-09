@@ -1,7 +1,7 @@
-import { campEditionId, membersToken, roleToken } from "./acting";
+import { campEditionId, campEditionIdOrThrow, membersToken, roleToken } from "./acting";
 import { currentCampId } from "./campContext";
 import { coreClient } from "./ipalpha";
-import { IpalphaRejected, PROJECTS_RESOURCE, type Membership } from "./ipalpha/coreClient";
+import { IpalphaRejected, IpalphaUnavailable, PROJECTS_RESOURCE, type Membership } from "./ipalpha/coreClient";
 import { currentViewer } from "./viewer";
 import { COORDINATION_ROLE, PARTICIPANT_ROLE, RESPONSIBLE_ROLE, type CoreRole, type Session } from "../types";
 
@@ -130,12 +130,33 @@ export async function responsiblesOf(kidIds: string[], campId: string = currentC
   return (await responsiblesView(kidIds, campId)).byKid;
 }
 
-/** Is `role` still a live role of the session's person (that edition's row or, for coordenação, a project-wide row)? Self read with that role's token (§15). */
+/** the self read; an edition core will not answer for (unknown, archived for us, not Acampa's) is "cannot tell" — never "not held" */
+async function ownRows(token: string, personId: string, editionId?: string): Promise<Membership[]> {
+  try {
+    return (await coreClient().ownMemberships(token, personId, editionId)).memberships;
+  } catch (err) {
+    if (err instanceof IpalphaRejected && (err.status === 400 || err.status === 403 || err.status === 404)) throw new IpalphaUnavailable(`memberships/own: ${err.reason}`);
+    throw err;
+  }
+}
+
+/**
+ * Is `role` still a live role of the session's person — that camp edition's row, or (coordenação) a project-wide
+ * row or the camp edition's? Self read with that role's token (§15). Only a definitive answer is `false`: a core that
+ * cannot answer, or a camp edition that cannot be resolved / used now, throws `IpalphaUnavailable` (503, session kept).
+ */
 export async function holdsRole(session: Session, role: CoreRole, campId: string = currentCampId()): Promise<boolean> {
-  const editionId = role === COORDINATION_ROLE ? null : await campEditionId(campId, session);
-  if (role !== COORDINATION_ROLE && !editionId) return false;
-  const own = await coreClient().ownMemberships(roleToken(session, PROJECTS_RESOURCE, role), session.personId, editionId ?? undefined);
-  return own.memberships.some((m) => m.role === role && (role === COORDINATION_ROLE ? !m.editionId : m.editionId === editionId));
+  const token = roleToken(session, PROJECTS_RESOURCE, role);
+  if (role === COORDINATION_ROLE && (await ownRows(token, session.personId)).some((m) => m.role === role && !m.editionId)) return true;
+  let editionId: string | null;
+  try {
+    editionId = await campEditionIdOrThrow(campId, session);
+  } catch (err) {
+    if (err instanceof IpalphaRejected) throw new IpalphaUnavailable(`camp edition: ${err.reason}`);
+    throw err;
+  }
+  if (!editionId) throw new IpalphaUnavailable("camp edition unknown");
+  return (await ownRows(token, session.personId, editionId)).some((m) => m.role === role && m.editionId === editionId);
 }
 
 /**

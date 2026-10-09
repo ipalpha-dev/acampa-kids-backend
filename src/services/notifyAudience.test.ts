@@ -6,7 +6,7 @@ import { EMPTY_STAFF, insertStaff } from "../models/staff";
 import { DEFAULT_SETTINGS, updateSettings } from "../models/settings";
 import { activeCampId } from "./campContext";
 import { sendMessage, sendToRoles } from "./messages";
-import { config } from "../config";
+import { config, fatalConfigProblems } from "../config";
 import { COORDINATION_ROLE } from "../types";
 import { flushNotifications, notifyOccurrence, notifyParentEdit, sendCheckinReminder, syncParentWelcomes, welcomeLateFamilies } from "./notify";
 import type { Camper, Occurrence } from "../types";
@@ -118,7 +118,7 @@ describe("no blanks, no fallbacks (Round 3b)", () => {
     const before = config.appUrl;
     try {
       config.appUrl = "";
-      expect(await sendMessage("teamWelcome", [{ personId: MEDIC }])).toEqual({ sent: 0, notMember: 0, noContact: 0, failed: 0 });
+      expect(await sendMessage("teamWelcome", [{ personId: MEDIC }])).toEqual({ sent: 0, notMember: 0, noContact: 0, skipped: 1, failed: 0 });
       expect(await sendToRoles("occurrence", [COORDINATION_ROLE])).toBe(0);
       expect(core.callsTo("POST /projects/project-test-1/messages")).toHaveLength(0);
     } finally {
@@ -135,7 +135,22 @@ describe("no blanks, no fallbacks (Round 3b)", () => {
   test("core refusing a send (403) is logged and never thrown into the action", async () => {
     core.on("POST /projects/project-test-1/messages", () => json({ reason: "aboutPersonNotVisible" }, 403));
     expect(await sendMessage("busBoarded", [{ personId: MEDIC, aboutPersonId: PARENT }])).toBeNull();
-    expect(await sendToRoles("foreignLookup", [COORDINATION_ROLE], { aboutPersonId: VESTS, variables: { count: 3 } })).toBeNull();
+    expect(await sendToRoles("foreignLookup", [COORDINATION_ROLE], { aboutPersonId: VESTS, variables: { count: 3 } })).toBe("refused");
+    core.setDown(true);
+    expect(await sendToRoles("occurrence", [COORDINATION_ROLE])).toBe("failed");
+    core.setDown(false);
+  });
+
+  test("more people to leave out than core takes: not sent at all (never a partial exclusion)", async () => {
+    const many = Array.from({ length: 1001 }, (_, i) => `person-x${i}`);
+    expect(await sendToRoles("occurrence", [COORDINATION_ROLE], { excludePersonIds: many })).toBe(0);
+    expect(core.callsTo("POST /projects/project-test-1/messages")).toHaveLength(0);
+  });
+
+  test("APP_URL is required at boot once IPAlpha is on", () => {
+    expect(fatalConfigProblems({ ipalpha: { enabled: true }, appUrl: "" })).toEqual(["APP_URL"]);
+    expect(fatalConfigProblems({ ipalpha: { enabled: true }, appUrl: "https://x" })).toEqual([]);
+    expect(fatalConfigProblems({ ipalpha: { enabled: false }, appUrl: "" })).toEqual([]);
   });
 });
 

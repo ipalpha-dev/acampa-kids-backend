@@ -107,13 +107,16 @@ describe("birthday messages (decision 51)", () => {
     expect(sends()).toHaveLength(0);
   });
 
-  test("core down or the message refused: the marker is lifted, the next run tries again", async () => {
+  test("core clearly refusing lifts the marker (the next run tries again); a timeout / network failure keeps it (never told twice)", async () => {
     core.setDown(true);
     await sendBirthdayNotices(now);
     core.setDown(false);
-    core.on("POST /projects/project-test-1/messages", () => json({ reason: "unavailable" }, 503));
+    const marker = async () => (await (await rawDb()).collection("settings").findOne({ _id: activeCampId() as never }))?.birthdayNoticeDay;
+    expect(await marker()).toBe(todayInSaoPaulo(now));
+    await (await rawDb()).collection("settings").updateOne({ _id: activeCampId() as never }, { $unset: { birthdayNoticeDay: "" } });
+    core.on("POST /projects/project-test-1/messages", () => json({ reason: "templateNotFound" }, 404));
     await sendBirthdayNotices(now);
-    expect((await (await rawDb()).collection("settings").findOne({ _id: activeCampId() as never }))?.birthdayNoticeDay).toBeUndefined();
+    expect(await marker()).toBeUndefined();
     installFakeCore(core, world);
     await sendBirthdayNotices(now);
     expect(world.messages.filter((m) => m.slug === SLUG)).toHaveLength(1);

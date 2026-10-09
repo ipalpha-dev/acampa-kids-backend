@@ -348,7 +348,8 @@ export interface MessageRecipient {
   variables: Record<string, string>;
 }
 
-export type MessageStatus = "sent" | "notMember" | "noContact" | "failed";
+/** `skipped`: core did not send it on purpose (the recipient has no name, or may not see `aboutPersonId`) */
+export type MessageStatus = "sent" | "notMember" | "noContact" | "skipped" | "failed";
 
 export interface IpalphaCoreClient {
   // ── auth-api ──
@@ -1004,7 +1005,7 @@ export function createIpalphaCoreClient(cfg: IpalphaConfig, deps: CoreClientDeps
       return (Array.isArray(body.results) ? body.results : [])
         .map((x) => obj(x))
         .filter((x) => typeof x.personId === "string")
-        .map((x) => ({ personId: x.personId as string, status: (["sent", "notMember", "noContact", "failed"].includes(x.status as string) ? x.status : "failed") as MessageStatus }));
+        .map((x) => ({ personId: x.personId as string, status: (["sent", "notMember", "noContact", "skipped", "failed"].includes(x.status as string) ? x.status : "failed") as MessageStatus }));
     },
 
     async sendTemplateToAudience({ templateSlug, audience, variables, aboutPersonId }) {

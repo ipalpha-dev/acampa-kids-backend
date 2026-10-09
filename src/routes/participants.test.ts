@@ -1,6 +1,6 @@
 import { createApp } from "../app";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { createFakeCore, createTestKeys, emptyWorld, enableIpalpha, installFakeCore, resetData, sessionFor, startTestDb, stopTestDb, testApp, TEST_EDITION, type FakeCore, type FakeWorld, type TestKeys } from "../testing/ipalphaHarness";
+import { createFakeCore, createTestKeys, emptyWorld, enableIpalpha, installFakeCore, resetData, sessionFor, signRoleToken, startTestDb, stopTestDb, testApp, TEST_EDITION, type FakeCore, type FakeWorld, type TestKeys } from "../testing/ipalphaHarness";
 import { rawDb } from "../db";
 import { EMPTY_CAMPER, insertCamper } from "../models/campers";
 import { EMPTY_STAFF, insertStaff } from "../models/staff";
@@ -360,6 +360,19 @@ describe("/api/people", () => {
     expect(JSON.parse(atob((asked.headers.get("authorization") ?? "").split(".")[1]))).toMatchObject({ sub: ADMIN, projectRole: "coordenacao" });
     const list = await call("GET", "/api/campers", undefined, admin);
     expect(list.body.items.find((k: { id: string }) => k.id === KID_B)).toMatchObject({ name: "" });
+  });
+
+  test("names carry the camp's edition; a per-edition role asking another edition is refused, a project-wide one is not", async () => {
+    const { setCampEditionId } = await import("../models/camps");
+    const { activeCampId } = await import("../services/campContext");
+    await setCampEditionId(activeCampId(), "edition-other");
+    world.editions.push({ id: "edition-other", year: 1999, current: false });
+    const admin = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    world.memberships.push({ personId: KID_A, role: "participante", editionId: "edition-other" });
+    expect((await call("POST", "/api/people/names", { personIds: [KID_A] }, admin)).body.items).toHaveLength(1);
+    expect((core.callsTo("POST /projects/project-test-1/people/names").at(-1)?.json as { editionId?: string }).editionId).toBe("edition-other");
+    const res = await core.fetch("https://persons.test.invalid/projects/project-test-1/people/names", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await signRoleToken(keys, CARE, "equipe", "ipalpha:persons")}` }, body: JSON.stringify({ personIds: [KID_A], editionId: "edition-other" }) });
+    expect(res.status).toBe(403);
   });
 
   test("there is no health queue in Acampa any more (decision 50)", async () => {

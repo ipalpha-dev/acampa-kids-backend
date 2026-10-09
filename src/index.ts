@@ -1,5 +1,5 @@
 import { websocket } from "hono/bun";
-import { config } from "./config";
+import { config, fatalConfigProblems } from "./config";
 import { createApp } from "./app";
 import { getDb } from "./db";
 import { ensureCategoryIndexes } from "./models/categories";
@@ -37,6 +37,12 @@ import { ensureImportConflictIndexes } from "./models/importConflicts";
 import { catchUpUnfinished } from "./services/personImports";
 
 const app = createApp({ logRequests: true, bootGate: true });
+
+const fatal = fatalConfigProblems(config);
+if (fatal.length) {
+  console.error(`❌ missing required configuration: ${fatal.join(", ")} (IPAlpha is on: every message link needs it)`);
+  process.exit(1);
+}
 
 const { port } = config;
 // the dispatch app channel is a peer: shown on /ready as info, never a readiness gate

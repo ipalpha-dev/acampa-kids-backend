@@ -3,7 +3,9 @@ import { requireAuth, type AuthVariables } from "../middleware/auth";
 import { requireManager, requireRole } from "../middleware/roles";
 import { findCamperById } from "../models/campers";
 import { actingToken, coordinationToken } from "../services/acting";
-import { registerProposedResponsible } from "../services/coreRegistration";
+import { isFamilyOfEdition, registerProposedResponsible } from "../services/coreRegistration";
+import { markJoinWelcome, takeJoinWelcome } from "../models/userCampState";
+import { welcomeLateFamilies } from "../services/notify";
 import { coreClient } from "../services/ipalpha";
 import { IpalphaRejected, PERSONS_RESOURCE, type LinkRequest } from "../services/ipalpha/coreClient";
 import { normalizeBrazilPhone, titleCaseName } from "../utils";
@@ -59,6 +61,8 @@ for (const decision of ["accept", "decline"] as const) {
   linkRequests.post(`/:id/${decision}`, requireRole("parent"), async (c) => {
     const request = await coreClient().decideLinkRequest(actingToken(c, PERSONS_RESOURCE), c.req.param("id"), decision);
     console.log(`[link-requests] ${request.id} ${request.status}`);
+    // a responsável new to the edition joins it now: welcomed like any family that joins late (marked at the proposal)
+    if (request.status === "accepted" && (await takeJoinWelcome(request.proposedResponsibleId))) void welcomeLateFamilies([request.proposedResponsibleId]);
     // ids + status only: the names were for the screen that asked
     return c.json({ request: { id: request.id, childId: request.childId, status: request.status } });
   });
@@ -82,6 +86,7 @@ linkRequests.post("/", requireManager, async (c) => {
   if (!token) return fail(c, "COORDINATION_REQUIRED", "Só a coordenação cadastra pessoas.", 403);
   const responsible = await registerProposedResponsible(token, { name, phone, email });
   if (responsible.personId === kid._id) return fail(c, "RESPONSIBLE_INVALID", "Informe o nome e o celular do responsável.");
+  const newFamily = !(await isFamilyOfEdition(responsible.personId));
   let request: LinkRequest;
   try {
     request = await coreClient().proposeLinkRequest(token, { childId: kid._id, responsibleId: responsible.personId });
@@ -90,6 +95,7 @@ linkRequests.post("/", requireManager, async (c) => {
     if (err instanceof IpalphaRejected && err.status === 409) return c.json({ error: { code: "LINK_REQUEST_REFUSED", reason: err.reason, message: "O IPAlpha não criou este pedido." } }, 409);
     throw err;
   }
+  if (newFamily) await markJoinWelcome(responsible.personId);
   console.log(`[link-requests] ${request.id} proposed for ${kid._id}`);
   return c.json({ request: { id: request.id, childId: request.childId, status: request.status, expiresAt: request.expiresAt }, responsible: { personId: responsible.personId, created: responsible.created } }, 201);
 });

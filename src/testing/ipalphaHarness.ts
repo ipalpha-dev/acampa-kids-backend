@@ -299,8 +299,14 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
   // Round 2/3: a role lists / counts / names only the roles its `seesPersonsOf` names (coordenação too: by policy, not by rank)
   const roleSees = (own: string, role: string | null) => !!role && (world.seesPersonsOf[own] ?? []).includes(role);
   const sees = (call: FakeCall, role: string | null) => roleSees(String(claimsOf(call).projectRole ?? ""), role);
-  /** an explicit edition other than the token's (and not `none`) → 403 editionMismatch */
+  /** an explicit edition other than the token's (and not `none`) → 403 editionMismatch (member lists, counts) */
   const otherEdition = (call: FakeCall, editionId: string | null | undefined) => !!editionId && editionId !== "none" && editionId !== claimsOf(call).editionId;
+  /** names: only a role held PER EDITION is bound to the token's edition; a project-wide holder may ask any edition */
+  const otherEditionForNames = (call: FakeCall, editionId: string | null | undefined) => {
+    if (!otherEdition(call, editionId)) return false;
+    const claims = claimsOf(call);
+    return !world.memberships.some((m) => m.personId === claims.sub && m.role === claims.projectRole && !m.editionId);
+  };
   /** visible-members: the viewer, whoever names them as involved (a responsável's kids), members of the roles their role sees */
   const visibleTo = (viewer: string, viewerRoles: string[], target: string, editionId?: string | null) =>
     viewer === target ||
@@ -456,7 +462,7 @@ export function installFakeCore(core: FakeCore, world: FakeWorld): void {
     if (!personCaller(call)) return json({ reason: "forbidden" }, 403);
     const { personIds: ids, editionId } = call.json as { personIds: string[]; editionId?: string };
     if (ids.length > 200) return json({ reason: "validationFailed" }, 400);
-    if (otherEdition(call, editionId)) return json({ reason: "editionMismatch" }, 403);
+    if (otherEditionForNames(call, editionId)) return json({ reason: "editionMismatch" }, 403);
     const claims = claimsOf(call);
     const viewer = String(claims.sub);
     const shown = ids.filter((id) => world.names.has(id) && visibleTo(viewer, [String(claims.projectRole ?? "")], id, editionId ?? (claims.editionId as string | undefined)));

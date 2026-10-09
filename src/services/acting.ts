@@ -1,7 +1,7 @@
 import type { Context } from "hono";
 import { findCamp, setCampEditionId } from "../models/camps";
 import { coreClient } from "./ipalpha";
-import { IpalphaTokenRevoked, PERSONS_RESOURCE, PROJECTS_RESOURCE } from "./ipalpha/coreClient";
+import { IpalphaUnavailable, IpalphaRejected, IpalphaTokenRevoked, PERSONS_RESOURCE, PROJECTS_RESOURCE } from "./ipalpha/coreClient";
 import { openRoleTokens, revokeSession } from "./session";
 import { forgetSessionValidation, rememberValidation, rememberedValidation } from "./sessionValidation";
 import { holdsRole } from "./members";
@@ -73,17 +73,25 @@ export async function editionForYear(session: Session, year: number): Promise<Ed
  * with the viewer's token (none → null).
  */
 export async function campEditionId(campId: string = currentCampId(), session: Session | null = currentViewer()): Promise<string | null> {
+  try {
+    return await campEditionIdOrThrow(campId, session);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Same, but a core that could not answer throws (unavailable, refused, revoked token) — null only when the editions
+ * were read and none of the camp's year is usable by Acampa (or there is no camp / no viewer to read them with).
+ */
+export async function campEditionIdOrThrow(campId: string = currentCampId(), session: Session | null = currentViewer()): Promise<string | null> {
   const camp = await findCamp(campId);
   if (!camp) return null;
   if (camp.editionId) return camp.editionId;
   if (!session) return null;
-  try {
-    const edition = await editionForYear(session, camp.year);
-    if (edition) await setCampEditionId(camp._id, edition.id);
-    return edition?.id ?? null;
-  } catch {
-    return null;
-  }
+  const edition = await editionForYear(session, camp.year);
+  if (edition) await setCampEditionId(camp._id, edition.id);
+  return edition?.id ?? null;
 }
 
 /** The edition sign-in asks auth-api for: the ACTIVE camp's (role tokens bound to it); undefined = auth's default. */
@@ -121,6 +129,8 @@ export function coordinationJobToken(session: Session): { token: string; expires
  * projects-api answers 400 unknownEdition once that edition is archived — which
  * would end every history-camp request.
  */
+const EDITION_REASONS = new Set(["unknownEdition", "editionMismatch", "editionNotUsable"]);
+
 export async function validateSessionRole(session: Session, role: CoreRole = session.activeRole): Promise<void> {
   if (rememberedValidation(session._id, role, session.campId)) return;
   // drop it before the core calls: a check that passes then fails must not leave the old entry
@@ -129,7 +139,13 @@ export async function validateSessionRole(session: Session, role: CoreRole = ses
     await coreClient().healthLists(roleToken(session, PERSONS_RESOURCE, role));
     const token = roleToken(session, PROJECTS_RESOURCE, role);
     const editionId = role === COORDINATION_ROLE ? undefined : openRoleTokens(session)[role]?.editionId ?? undefined;
-    await coreClient().pendingKinds(token, editionId);
+    await coreClient()
+      .pendingKinds(token, editionId)
+      .catch((err: unknown) => {
+        // an edition core cannot use for Acampa right now is "cannot tell", never "not held"
+        if (err instanceof IpalphaRejected && EDITION_REASONS.has(err.reason)) throw new IpalphaUnavailable(`pending-kinds: ${err.reason}`);
+        throw err;
+      });
     if (!(await holdsRole(session, role, session.campId))) throw new IpalphaTokenRevoked("membership removed");
     rememberValidation(session._id, role, session.campId);
   } catch (err) {

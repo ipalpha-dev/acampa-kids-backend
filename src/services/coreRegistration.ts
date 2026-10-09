@@ -218,7 +218,7 @@ export async function registerProposedResponsible(personsToken: string, input: {
 }
 
 /** Already a `responsavel` of the camp's edition? Unknown (refused, unavailable) counts as yes: never a second welcome. */
-async function isFamilyOfEdition(personId: string): Promise<boolean> {
+export async function isFamilyOfEdition(personId: string): Promise<boolean> {
   const { editionRolesKnown } = await import("./members");
   const roles = await editionRolesKnown(personId, [RESPONSIBLE_ROLE]).catch(() => null);
   return roles === null || roles.includes(RESPONSIBLE_ROLE);

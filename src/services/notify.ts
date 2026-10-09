@@ -231,10 +231,11 @@ export async function sendBirthdayNotices(now = new Date()): Promise<void> {
     if (now < birthdaySmsDue(today)) return;
     if (!(await claimBirthdayNoticeDay(today))) return;
     const accepted = await sendToRoles("birthday", await birthdayRoles(settings), { birthdayOf: [PARTICIPANT_ROLE] }, "birthday");
-    // nothing went out (core down / refused): lift the marker so the hourly run tries again today
-    if (accepted === null) await releaseBirthdayNoticeDay(today);
+    // core clearly refused (nothing went out): lift the marker so the hourly run tries again today. A timeout /
+    // network failure keeps it — core may have accepted, and a birthday is never told twice
+    if (accepted === "refused") await releaseBirthdayNoticeDay(today);
     // counts only — no person id or date that would tie the line to one kid's birthday
-    else if (accepted) console.log(`🎂 birthday notices: ${accepted} message(s) accepted`);
+    else if (typeof accepted === "number" && accepted) console.log(`🎂 birthday notices: ${accepted} message(s) accepted`);
   } catch (err) {
     console.error("notify: birthday notices failed", err instanceof Error ? err.message : err);
   }
@@ -501,11 +502,16 @@ export async function notifyPreparationChange(before: PrepSection | null, after:
     const concerned = (a: PrepAudience) => after.audiences.includes(a) && (changed || gained(a));
     if (!PREP_AUDIENCES.some(concerned)) return;
     const n = (await getSettings()).notifications;
+    const told: string[] = [];
     if (n.contentChanges && (concerned("caretaker") || concerned("helper"))) {
-      for (const s of await teamFor("all")) if (concerned(s.roomRole)) enqueue("preparationUpdated", { personId: s._id, variables: { title: after.title } }, "staff");
+      for (const s of await teamFor("all")) {
+        if (!concerned(s.roomRole)) continue;
+        enqueue("preparationUpdated", { personId: s._id, variables: { title: after.title } }, "staff");
+        told.push(s._id);
+      }
     }
     if (n.parentContentChanges && concerned("parent") && staffAccessOpen((await getSettings()).parentAccessWindow)) {
-      enqueueAudience("preparationUpdated", after._id, [RESPONSIBLE_ROLE], { variables: { title: after.title } });
+      enqueueAudience("preparationUpdated", after._id, [RESPONSIBLE_ROLE], { variables: { title: after.title }, excludePersonIds: told });
     }
   } catch (err) {
     console.error("notify: preparation change failed", err);
@@ -518,11 +524,14 @@ export async function notifyPhotosPublished(count: number): Promise<void> {
     if (count <= 0) return;
     const settings = await getSettings();
     if (!settings.notifications.photoPublishes) return;
-    for (const s of await listStaff({ active: true })) {
+    const team = await listStaff({ active: true });
+    for (const s of team) {
       if (await claimStaffPhotosNotice(s._id)) enqueue("photosPublished", { personId: s._id }, "staff");
     }
+    const notifiedStaff = team.map((s) => s._id);
     if (staffAccessOpen(settings.parentAccessWindow) && (await claimUserPhotosNotice(FAMILIES_MARK))) {
-      if ((await sendToRoles("photosPublished", [RESPONSIBLE_ROLE])) === null) await resetUserPhotosNoticeOf(FAMILIES_MARK);
+      // the team (told by id, once) is left out of the families' audience; the mark is lifted only on a clear refusal
+      if ((await sendToRoles("photosPublished", [RESPONSIBLE_ROLE], { excludePersonIds: notifiedStaff })) === "refused") await resetUserPhotosNoticeOf(FAMILIES_MARK);
     }
   } catch (err) {
     console.error("notify: photos published failed", err);
@@ -571,7 +580,8 @@ export async function syncParentWelcomes(): Promise<void> {
     const settings = await getSettings();
     if (!settings.notifications.parentWelcome || !staffAccessOpen(settings.parentAccessWindow)) return;
     if (!(await claimUserWelcome(FAMILIES_MARK))) return;
-    if ((await sendToRoles("parentWelcome", [RESPONSIBLE_ROLE])) === null) await resetUserWelcomeOf(FAMILIES_MARK);
+    // lifted only on a clear refusal: after a timeout core may have sent it, and a welcome is never repeated
+    if ((await sendToRoles("parentWelcome", [RESPONSIBLE_ROLE])) === "refused") await resetUserWelcomeOf(FAMILIES_MARK);
   } catch (err) {
     console.error("notify: parent welcome sync failed", err);
   }

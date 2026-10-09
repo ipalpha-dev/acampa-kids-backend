@@ -2,6 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { createFakeCore, createTestKeys, emptyWorld, enableIpalpha, installFakeCore, resetData, sessionFor, startTestDb, stopTestDb, testApp, TEST_EDITION, type FakeCore, type FakeWorld, type TestKeys } from "../testing/ipalphaHarness";
 import { rawDb } from "../db";
 import { EMPTY_CAMPER, insertCamper } from "../models/campers";
+import { DEFAULT_SETTINGS, updateSettings } from "../models/settings";
+import { claimUserWelcome } from "../models/userCampState";
 
 const call = testApp();
 let keys: TestKeys;
@@ -149,5 +151,21 @@ describe("link requests (decision 80, CONTRACTS §25)", () => {
     const res = await call("GET", "/api/link-requests/mine", undefined, parent);
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe("SESSION_ENDED");
+  });
+
+  test("a responsável new to the edition is welcomed when the family accepts (once); one already of the edition is not", async () => {
+    await updateSettings({ notifications: { ...DEFAULT_SETTINGS.notifications, parentWelcome: true } });
+    await claimUserWelcome("role:responsavel");
+    const admin = await sessionFor(keys, ADMIN, ["coordenacao"]);
+    const parent = await sessionFor(keys, PARENT, ["responsavel"]);
+    const fresh = await propose(admin);
+    await call("POST", `/api/link-requests/${fresh.body.request.id}/accept`, {}, parent);
+    world.phones.set("+5511955554444", OTHER_PARENT);
+    const known = await propose(admin, { camperId: KID_A, name: "outra família", phone: "11955554444" });
+    expect(known.status).toBe(201);
+    await call("POST", `/api/link-requests/${known.body.request.id}/accept`, {}, parent);
+    await new Promise((r) => setTimeout(r, 30));
+    const welcomes = world.messages.filter((m) => m.slug === "acampa-parent-welcome").flatMap((m) => m.recipients.map((r) => r.personId));
+    expect(welcomes).toEqual([fresh.body.responsible.personId]);
   });
 });
