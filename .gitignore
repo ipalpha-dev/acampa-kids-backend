@@ -5,3 +5,13 @@ node_modules/
 !.env.example
 # Uploaded pictures and thumbnails are runtime data, never source code.
 data/
+# AI agent instructions are personal (each developer keeps their own); docs live in README and the developer portal.
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.github/copilot-instructions.md
+.cursorrules
+.cursor/
+.claude/
+.codex/
+.pi/

@@ -10,7 +10,7 @@
  *
  * Rules: slug `^[a-z0-9-]{3,60}$`; every `{var}` of every language is listed in
  * `variables`; SMS bodies ≤ 160 chars per language WITH realistic values
- * filled in (decision 45 — templates.test.ts renders them). Copy is pastoral (workspace AGENTS.md): gentle, no labels
+ * filled in (decision 45 — templates.test.ts renders them). Copy is pastoral: gentle, no labels
  * about family shape, health or status; "responsável" / "família".
  */
 
